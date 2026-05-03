@@ -7,6 +7,7 @@ import shlex
 import socket
 import struct
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -14,10 +15,49 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
+def unique_paths(paths):
+    seen = set()
+    result = []
+    for path in paths:
+        try:
+            resolved = Path(path).resolve()
+        except Exception:
+            continue
+        key = str(resolved).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(resolved)
+    return result
+
+
+def runtime_candidate_dirs():
+    cwd = Path(os.getcwd())
+    file_dir = Path(__file__).resolve().parent
+    candidates = [cwd, file_dir, file_dir.parent, cwd.parent]
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.extend([exe_dir, exe_dir.parent])
+        mei_pass = getattr(sys, "_MEIPASS", None)
+        if mei_pass:
+            mei_dir = Path(mei_pass)
+            candidates.extend([mei_dir, mei_dir.parent])
+    return unique_paths(candidates)
+
+
+def find_control_ui_dir():
+    for directory in runtime_candidate_dirs():
+        if (directory / "config.yaml").exists():
+            return directory
+    return Path(os.getcwd()).resolve()
+
+
+BASE_DIR = find_control_ui_dir()
+PROJECT_ROOT = BASE_DIR.parent
+
+
 def load_config():
-    cfg_path = Path(os.getcwd()) / "config.yaml"
-    if not cfg_path.exists():
-        cfg_path = Path(__file__).resolve().parent / "config.yaml"
+    cfg_path = BASE_DIR / "config.yaml"
     if not cfg_path.exists():
         raise FileNotFoundError(f"Config file not found: {cfg_path}")
     text = cfg_path.read_text(encoding="utf-8")
@@ -74,9 +114,6 @@ def parse_simple_yaml(text):
         root[current][key.strip()] = parse_config_value(value)
     return root
 
-
-BASE_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = BASE_DIR.parent
 cfg = load_config()
 udp_cfg = cfg.get("udp", {})
 ws_cfg = cfg.get("websocket", {})
