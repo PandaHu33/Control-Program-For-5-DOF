@@ -1,0 +1,1908 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Remote Arm Control</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --accent: #38bdf8;
+      --text: #e5e7eb;
+      --muted: #94a3b8;
+      --danger: #f87171;
+      --success: #34d399;
+      --warning: #fbbf24;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at 20% 20%, rgba(56,189,248,0.08), transparent 35%),
+                  radial-gradient(circle at 80% 30%, rgba(52,211,153,0.08), transparent 35%),
+                  var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      padding: 16px;
+      gap: 12px;
+      overflow: auto;
+    }
+    header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    header h1 { margin: 0; font-size: 20px; letter-spacing: 0.02em; }
+    .pill {
+      padding: 6px 10px;
+      background: rgba(56,189,248,0.12);
+      border: 1px solid rgba(56,189,248,0.35);
+      border-radius: 999px;
+      font-size: 12px;
+      color: var(--text);
+    }
+    .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+    .main-layout {
+      display: grid;
+      grid-template-columns: 1fr;
+      grid-template-areas: "video";
+      gap: 12px;
+      align-items: start;
+    }
+    .video-card { grid-area: video; }
+    .side-column { grid-area: side; display: none; flex-direction: column; gap: 12px; }
+    .status-row { grid-area: status; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .card {
+      background: var(--panel);
+      border: 1px solid rgba(255,255,255,0.04);
+      border-radius: 12px;
+      padding: 12px;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.35);
+    }
+    .card h2 { margin: 0 0 10px 0; font-size: 16px; color: var(--text); }
+    .video-frame {
+      position: relative;
+      width: 100%;
+      padding-top: 56.25%;
+      border-radius: 10px;
+      overflow: hidden;
+      background: #0b1221;
+      border: 1px solid rgba(255,255,255,0.05);
+    }
+    .video-frame video, .video-frame img {
+      position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
+      background: #0b1221;
+    }
+    .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+    button {
+      cursor: pointer;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.05);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 10px;
+      font-size: 14px;
+      transition: all 0.15s ease;
+    }
+    button:hover { border-color: rgba(56,189,248,0.35); color: #fff; }
+    button.active { background: rgba(56,189,248,0.15); border-color: rgba(56,189,248,0.55); }
+    button.pending { opacity: .68; cursor: wait; }
+    button.mode-active { background: rgba(52,211,153,.18); border-color: rgba(52,211,153,.52); color: #fff; }
+    button.danger { border-color: rgba(248,113,113,0.45); }
+    .radios label { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; color: var(--muted); }
+    .radios { display: flex; flex-direction: column; align-items: flex-start; text-align: left; }
+    .flex { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .keyboard-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+    .keyboard-head h2 { margin: 0; }
+    .keyboard-mode-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .input-visual-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .keyboard-mode-selector { display: inline-flex; gap: 4px; padding: 3px; margin-bottom: 10px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); }
+    .keyboard-mode-selector label { cursor: pointer; border-radius: 8px; padding: 6px 10px; color: var(--muted); font-size: 13px; }
+    .keyboard-mode-selector input { width: auto; margin: 0 5px 0 0; }
+    .keyboard-mode-selector label:has(input:checked) { color: #fff; background: rgba(56,189,248,0.18); border: 1px solid rgba(56,189,248,0.36); }
+    .keyboard-mode-selector label.pending { opacity: .68; cursor: wait; }
+    #usbCameraFrame.camera-rotated-ccw { padding-top: 100%; }
+    #usbCameraFrame.camera-rotated-ccw video {
+      transform: rotate(-90deg);
+      transform-origin: center center;
+    }
+    .kbd-grid { display: grid; grid-template-columns: repeat(3, 60px); gap: 6px; justify-content: start; }
+    .kbd {
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.04);
+      color: var(--text);
+      height: 40px; width: 60px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 8px;
+      font-weight: 600;
+      transition: all 0.12s ease;
+    }
+    .kbd.active { background: rgba(56,189,248,0.2); border-color: rgba(56,189,248,0.6); box-shadow: 0 0 0 4px rgba(56,189,248,0.1); }
+    .stick-panel { display: flex; gap: 12px; align-items: center; }
+    .stick { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+    .stick-label { font-size: 11px; color: var(--muted); letter-spacing: 0.06em; }
+    .trigger-panel { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+    .trigger-grid { display: grid; grid-template-columns: repeat(2, 60px); gap: 6px; }
+    .stick-base {
+      position: relative;
+      width: 72px;
+      height: 72px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.12);
+      box-shadow: inset 0 0 12px rgba(0,0,0,0.4);
+    }
+    .stick-dot {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--accent);
+      transform: translate(-50%, -50%);
+      transition: transform 0.05s linear;
+      box-shadow: 0 0 10px rgba(56,189,248,0.4);
+    }
+    .stick-caption { font-size: 11px; color: var(--muted); text-align: center; width: 100px; }
+    .status-line { color: var(--muted); font-size: 13px; }
+    .status-line.warning { color: var(--warning); }
+    .console {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: 1.2fr 1fr;
+      align-items: start;
+    }
+    .debug-only { display: none; }
+    body.debug .debug-only { display: block; }
+    .console-wide { grid-column: 1 / -1; }
+    .state-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px;
+      border-radius: 12px;
+      background: rgba(56,189,248,0.08);
+      border: 1px solid rgba(56,189,248,0.2);
+    }
+    .state-name { font-size: 28px; font-weight: 700; letter-spacing: .04em; }
+    .module-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 8px;
+    }
+    .module {
+      padding: 10px;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.035);
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .module strong { display: block; font-size: 13px; margin-bottom: 6px; }
+    .module.secondary {
+      opacity: .86;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      border: 1px solid rgba(255,255,255,0.12);
+      color: var(--muted);
+    }
+    .badge::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+    .badge.online { color: var(--success); border-color: rgba(52,211,153,.35); }
+    .badge.online::before { background: var(--success); }
+    .badge.warning { color: var(--warning); border-color: rgba(251,191,36,.35); }
+    .badge.warning::before { background: var(--warning); }
+    .badge.error, .badge.offline { color: var(--danger); border-color: rgba(248,113,113,.35); }
+    .badge.error::before, .badge.offline::before { background: var(--danger); }
+    .demo-actions {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+      gap: 8px;
+    }
+    .control-block {
+      display: grid;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .control-block h3 {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .joint-input-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(72px, 1fr));
+      gap: 8px;
+    }
+    .joint-input-grid label {
+      display: grid;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .arm-preset-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 8px;
+    }
+    .arm-preset {
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .arm-preset strong { font-size: 13px; }
+    .arm-preset-fields {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(48px, 1fr));
+      gap: 6px;
+    }
+    .arm-preset-fields label {
+      display: grid;
+      gap: 3px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .demo-actions button.primary {
+      background: rgba(52,211,153,.16);
+      border-color: rgba(52,211,153,.42);
+    }
+    .demo-actions button.estop {
+      min-height: 56px;
+      font-size: 18px;
+      font-weight: 800;
+      background: rgba(248,113,113,.24);
+      border: 2px solid rgba(248,113,113,.8);
+      color: #fff;
+    }
+    .fault-box {
+      min-height: 44px;
+      padding: 10px;
+      border-radius: 10px;
+      background: rgba(248,113,113,.08);
+      border: 1px solid rgba(248,113,113,.22);
+      color: #fecaca;
+      font-size: 13px;
+    }
+    .console-log {
+      min-height: 220px;
+      max-height: 320px;
+    }
+    input, select {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.08);
+      color: var(--text);
+      padding: 8px;
+      border-radius: 8px;
+      width: 100%;
+    }
+    /* radios/checkboxes should not stretch full width */
+    .radios input[type="radio"],
+    .radios input[type="checkbox"] {
+      width: auto;
+    }
+    code { background: rgba(255,255,255,0.04); padding: 2px 6px; border-radius: 6px; }
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 10px;
+    }
+    .status-grid div {
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.05);
+      padding: 8px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 13px;
+    }
+    .status-grid strong { color: var(--text); }
+    .log {
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.05);
+      border-radius: 8px;
+      padding: 10px;
+      min-height: 180px;
+      max-height: 260px;
+      overflow-y: auto;
+      font-family: "Consolas", "SFMono-Regular", Menlo, monospace;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    /* Toggle (滑动开关) */
+    .toggle { display: inline-flex; align-items: center; gap: 10px; user-select: none; }
+    .toggle .word { font-size: 12px; color: var(--muted); }
+    .toggle input { position: absolute; opacity: 0; pointer-events: none; }
+    .toggle .track {
+      position: relative; width: 56px; height: 28px; border-radius: 999px;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.12);
+      transition: background .18s ease, border-color .18s ease;
+    }
+    .toggle .track::before {
+      content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px;
+      border-radius: 50%; background: var(--text);
+      box-shadow: 0 2px 6px rgba(0,0,0,0.35);
+      transition: transform .18s ease, background .18s ease;
+    }
+    .toggle input:checked ~ .track { background: rgba(56,189,248,0.22); border-color: rgba(56,189,248,0.5); }
+    .toggle input:checked ~ .track::before { transform: translateX(28px); background: #fff; }
+    .toggle input:not(:checked) ~ .word.left { color: #fff; }
+    .toggle input:checked ~ .word.right { color: #fff; }
+    @media (max-width: 640px) {
+      .console { grid-template-columns: 1fr; }
+      .kbd-grid { grid-template-columns: repeat(3, 48px); }
+      .kbd { width: 48px; height: 38px; }
+      .trigger-grid { grid-template-columns: repeat(2, 48px); }
+      .stick-base { width: 60px; height: 60px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Remote Arm Control</h1>
+    <span class="pill">HTML5 · Edge</span>
+    <span class="pill">Keyboard + Gamepad + Buttons → UDP</span>
+    <div style="flex:1"></div>
+    <button id="toggleView" style="min-width: 140px;">切换到 Debug</button>
+  </header>
+
+  <section id="demoConsole" class="console" aria-label="Demo Console">
+    <div class="card console-wide">
+      <div class="state-banner">
+        <div>
+          <div class="status-line">System Supervisor</div>
+          <div class="state-name" id="systemState">READY</div>
+        </div>
+        <div class="demo-actions" style="min-width: 520px;">
+          <button class="danger" data-api="POST /api/system/reboot_board">板卡重启</button>
+          <button data-api="POST /api/system/start">初始化</button>
+          <button data-api="POST /api/system/reset">复位</button>
+          <button data-api="POST /api/system/stop">关闭系统</button>
+          <button class="estop" data-api="POST /api/system/estop">急停</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card console-wide">
+      <h2>设备连接</h2>
+      <div class="module-grid" id="moduleGrid"></div>
+    </div>
+
+    <div class="card">
+      <h2>本地控制输入</h2>
+      <div class="keyboard-mode-row">
+        <div class="keyboard-mode-selector" id="inputDeviceMode" aria-label="input device mode">
+          <label><input type="radio" name="inputDeviceMode" value="keyboard" checked />键盘</label>
+          <label><input type="radio" name="inputDeviceMode" value="gamepad" />手柄</label>
+        </div>
+        <div class="keyboard-mode-selector" id="keyboardControlMode" aria-label="keyboard control mode">
+          <label><input type="radio" name="keyboardControlMode" value="position" checked />位置控制</label>
+          <label><input type="radio" name="keyboardControlMode" value="joint" />关节控制</label>
+        </div>
+        <div class="keyboard-mode-selector" id="handControlMode" aria-label="hand control mode">
+          <label><input type="radio" name="handControlMode" value="glove" checked />手套操控模式</label>
+          <label><input type="radio" name="handControlMode" value="preset" />预编程位置模式</label>
+        </div>
+      </div>
+      <div class="input-visual-row">
+        <div class="kbd-grid" id="kbdGrid">
+          <div class="kbd" data-key="KeyQ">Q</div>
+          <div class="kbd" data-key="KeyW">W</div>
+          <div class="kbd" data-key="KeyE">E</div>
+          <div class="kbd" data-key="KeyA">A</div>
+          <div class="kbd" data-key="KeyS">S</div>
+          <div class="kbd" data-key="KeyD">D</div>
+        </div>
+        <div class="stick-panel" aria-label="input mapping">
+          <div class="stick">
+            <div class="stick-label">LEFT</div>
+            <div class="stick-base"><div class="stick-dot" id="leftStickDot"></div></div>
+            <div class="stick-caption" id="leftStickCaption">WASD -> X/Y</div>
+          </div>
+          <div class="stick">
+            <div class="stick-label">RIGHT</div>
+            <div class="stick-base"><div class="stick-dot" id="rightStickDot"></div></div>
+            <div class="trigger-grid">
+              <div class="kbd" id="triggerL">L</div>
+              <div class="kbd" id="triggerL2">L2</div>
+            </div>
+            <div class="stick-caption" id="rightStickCaption">L/L2 -> Z</div>
+          </div>
+        </div>
+      </div>
+      <p class="status-line" id="keyboardTargetHint">位置控制</p>
+      <p class="status-line" id="gamepadStatusHint">USB 手柄未连接</p>
+    </div>
+
+    <div class="card" id="usbCameraCard">
+      <h2>USB 摄像头</h2>
+      <div class="video-frame camera-rotated-ccw" id="usbCameraFrame">
+        <video id="usbCameraPreview" autoplay muted playsinline></video>
+      </div>
+      <p class="status-line" id="usbCameraHint">等待摄像头...</p>
+    </div>
+
+    <div class="card" id="armStatus">
+      <h2>机械臂状态</h2>
+      <div class="status-grid" id="jointStatus">
+        <div><strong>关节1</strong><span id="j1">0° / 0A</span></div>
+        <div><strong>关节2</strong><span id="j2">0° / 0A</span></div>
+        <div><strong>关节3</strong><span id="j3">0° / 0A</span></div>
+        <div><strong>夹爪</strong><span id="gripper">0° / 0A</span></div>
+      </div>
+      <p class="status-line" id="armStatusHint">等待遥测...</p>
+    </div>
+
+    <div class="card" id="armPresetCard">
+      <h2>机械臂预设位置</h2>
+      <div class="arm-preset-grid">
+        <div class="arm-preset" data-arm-preset="initial">
+          <strong>初始位置</strong>
+          <div class="arm-preset-fields">
+            <label>J1°<input data-joint="0" type="number" step="1" value="0" /></label>
+            <label>J2°<input data-joint="1" type="number" step="1" value="0" /></label>
+            <label>J3°<input data-joint="2" type="number" step="1" value="0" /></label>
+          </div>
+          <button data-send-arm-preset="initial">发送</button>
+        </div>
+        <div class="arm-preset" data-arm-preset="approach">
+          <strong>预抓取</strong>
+          <div class="arm-preset-fields">
+            <label>J1°<input data-joint="0" type="number" step="1" value="0" /></label>
+            <label>J2°<input data-joint="1" type="number" step="1" value="-25" /></label>
+            <label>J3°<input data-joint="2" type="number" step="1" value="35" /></label>
+          </div>
+          <button data-send-arm-preset="approach">发送</button>
+        </div>
+        <div class="arm-preset" data-arm-preset="grasp">
+          <strong>抓取姿态</strong>
+          <div class="arm-preset-fields">
+            <label>J1°<input data-joint="0" type="number" step="1" value="0" /></label>
+            <label>J2°<input data-joint="1" type="number" step="1" value="-35" /></label>
+            <label>J3°<input data-joint="2" type="number" step="1" value="50" /></label>
+          </div>
+          <button data-send-arm-preset="grasp">发送</button>
+        </div>
+        <div class="arm-preset" data-arm-preset="release">
+          <strong>释放姿态</strong>
+          <div class="arm-preset-fields">
+            <label>J1°<input data-joint="0" type="number" step="1" value="25" /></label>
+            <label>J2°<input data-joint="1" type="number" step="1" value="-25" /></label>
+            <label>J3°<input data-joint="2" type="number" step="1" value="35" /></label>
+          </div>
+          <button data-send-arm-preset="release">发送</button>
+        </div>
+      </div>
+      <p class="status-line">预设值按角度编辑，发送时转换为弧度下发。</p>
+    </div>
+
+    <div class="card debug-only">
+      <h2>机械臂 / Jetson</h2>
+      <div class="demo-actions">
+        <button data-api="GET /api/arm/status">检查节点状态</button>
+        <button data-api="POST /api/arm/start_nodes">启动 Jetson 节点</button>
+        <button data-api="POST /api/arm/stop_nodes">停止 Jetson 节点</button>
+        <button data-api="POST /api/arm/preset_approach">预设接近位</button>
+        <button data-api="POST /api/arm/preset_grasp">预设抓取位</button>
+        <button data-api="POST /api/arm/preset_release">预设释放位</button>
+        <button data-api="POST /api/arm/stop">机械臂停止</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>灵巧手 / 数据手套</h2>
+      <div class="demo-actions">
+        <button data-api="POST /api/hand/start_exe">启动灵巧手 exe</button>
+        <button data-api="POST /api/hand/restart_exe">重启灵巧手 exe</button>
+        <button data-api="GET /api/hand/status">灵巧手状态</button>
+        <button data-api="POST /api/glove/start">启动 Unity 数据手套</button>
+        <button data-api="GET /api/glove/status">数据手套状态</button>
+        <button data-api="GET /api/hand/link_status">链路状态</button>
+      </div>
+      <div class="control-block">
+        <h3>预编程位置</h3>
+        <div class="demo-actions">
+          <button data-api="POST /api/hand/preset/reset">复位 2000</button>
+          <button data-api="POST /api/hand/preset/half">半握</button>
+          <button data-api="POST /api/hand/preset/close">握拳</button>
+          <button data-api="POST /api/hand/preset/pinch">捏取</button>
+          <button data-api="POST /api/hand/preset/hook">钩拉</button>
+        </div>
+      </div>
+      <div class="control-block">
+        <h3>自定义位置</h3>
+        <div class="joint-input-grid">
+          <label>J1<input class="hand-position-input" type="number" min="0" max="2000" step="1" value="2000" /></label>
+          <label>J2<input class="hand-position-input" type="number" min="0" max="2000" step="1" value="2000" /></label>
+          <label>J3<input class="hand-position-input" type="number" min="0" max="2000" step="1" value="2000" /></label>
+          <label>J4<input class="hand-position-input" type="number" min="0" max="2000" step="1" value="2000" /></label>
+          <label>J5<input class="hand-position-input" type="number" min="0" max="2000" step="1" value="2000" /></label>
+          <label>J6<input class="hand-position-input" type="number" min="0" max="2000" step="1" value="2000" /></label>
+        </div>
+        <div class="demo-actions">
+          <button id="sendHandCustomPosition">发送自定义位置</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card debug-only">
+      <h2>演示模式</h2>
+      <div class="demo-actions">
+        <button data-api="POST /api/demo/full">完整演示</button>
+        <button data-api="POST /api/demo/arm_only">只演示机械臂</button>
+        <button data-api="POST /api/demo/hand_only">只演示灵巧手</button>
+        <button data-api="POST /api/demo/semi_auto">半自动演示</button>
+        <button data-api="POST /api/demo/backup">备选演示</button>
+      </div>
+      <div id="faultBox" class="fault-box" style="margin-top: 10px;">暂无报警。若现场故障，请优先急停，然后复位或切换备选演示。</div>
+    </div>
+
+    <div class="card debug-only">
+      <h2>操作日志 / 报警</h2>
+      <div id="consoleLog" class="log console-log" aria-live="polite"></div>
+    </div>
+  </section>
+
+  <section id="mainView" class="debug-only" aria-label="Main view">
+    <div class="main-layout">
+      <div class="card video-card">
+        <!-- <h2>视频流</h2> -->
+        <div class="video-frame" id="videoContainer">
+          <video id="monitor" controls autoplay muted playsinline></video>
+        </div>
+      </div>
+
+      <div class="side-column">
+        <div class="card">
+          <h2>控制面板</h2>
+          <div class="radios" id="controlModeGroup">
+            <label><input type="radio" name="controlMode" value="keyboard" checked /> 键盘操作</label>
+            <label><input type="radio" name="controlMode" value="gamepad" /> USB 手柄操作</label>
+            <label><input type="radio" name="controlMode" value="teleop" /> 主手遥操(Debug)</label>
+            <label><input type="radio" name="controlMode" value="vision" /> 视觉伺服</label>
+            <label><input type="radio" name="controlMode" value="shared" /> 共享控制</label>
+            <label><input type="radio" name="controlMode" value="trajectory" /> 预定轨迹</label>
+          </div>
+          <div class="radios" id="trajectoryGroup" style="margin-top:6px;">
+            <span style="color: var(--muted); font-size: 12px;">轨迹选择</span>
+            <label><input type="radio" name="trajectory" value="none" checked /> 无</label>
+            <label><input type="radio" name="trajectory" value="extend" /> 伸出</label>
+            <label><input type="radio" name="trajectory" value="retract" /> 收回</label>
+            <label><input type="radio" name="trajectory" value="home" /> 归位</label>
+          </div>
+          <div class="radios" id="featureToggles" style="margin-top:8px;">
+            <span style="color: var(--muted); font-size: 12px;">功能开关</span>
+            <label class="toggle" aria-label="急停开关">
+              <input type="checkbox" data-toggle="emergency_stop" />
+              <span class="word left">保持运行</span>
+              <span class="track" aria-hidden="true"></span>
+              <span class="word right">紧急停止</span>
+            </label>
+            <label class="toggle" aria-label="控制维度">
+              <input type="checkbox" data-toggle="joint_space" />
+              <span class="word left">位置控制</span>
+              <span class="track" aria-hidden="true"></span>
+              <span class="word right">位姿控制</span>
+            </label>
+            <label class="toggle" aria-label="控制方式">
+              <input type="checkbox" data-toggle="elbow_control" />
+              <span id="modeOptionLeft" class="word left">末端位置</span>
+              <span class="track" aria-hidden="true"></span>
+              <span id="modeOptionRight" class="word right">肘部位置</span>
+            </label>
+            <label class="toggle" aria-label="柔顺开关">
+              <input type="checkbox" data-toggle="compliance" />
+              <span class="word left">关闭柔顺</span>
+              <span class="track" aria-hidden="true"></span>
+              <span class="word right">开启柔顺</span>
+            </label>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <section id="debugView" aria-label="Debug view" style="display:none;">
+    <div class="grid">
+      <div class="card">
+        <h2>视频流源配置</h2>
+        <div class="video-frame" id="debugVideoFrame">
+          <video id="debugMonitor" controls autoplay muted playsinline></video>
+        </div>
+        <div class="flex" style="margin-top: 8px;">
+          <input id="videoUrl" placeholder="HLS/WebRTC URL (RTSP needs a server-side gateway)" />
+          <button id="loadVideo">Load</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>UDP/WS 传输</h2>
+        <div class="flex">
+          <input id="wsUrl" placeholder="ws://localhost:8080/udp (bridge forwards UDP frames via WS)" />
+          <button id="connectWs">Connect</button>
+        </div>
+        <p class="status-line" id="wsState">WebSocket: disconnected</p>
+        <div class="flex" style="margin-top: 8px;">
+          <button id="sendNow">Send Frame</button>
+          <button id="toggleAuto" class="active">Auto-send: ON</button>
+        </div>
+        <p class="status-line" id="lastPacket">Last packet: -</p>
+        <p class="status-line">Frame: JSON schema + CRC32 (fixed-length)</p>
+      </div>
+
+      <div class="card">
+        <h2>完整模块状态</h2>
+        <div class="module-grid" id="debugModuleGrid"></div>
+      </div>
+
+      <div class="card">
+        <h2>主手 / Simulink</h2>
+        <div class="demo-actions">
+          <button data-api="POST /api/matlab/start">Simulink START</button>
+          <button data-api="POST /api/matlab/stop">Simulink STOP</button>
+          <button data-api="GET /api/matlab/status">主手状态检查</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>调试日志</h2>
+        <div id="debugLog" class="log" aria-live="polite"></div>
+      </div>
+    </div>
+  </section>
+
+  <script>
+    // Simple per-frame config
+    const DEFAULT_VIDEO_URL = "http://localhost:8081/stream.m3u8";
+    const DEFAULT_WS_URL = "ws://localhost:8080/udp";
+    const API_BASE = "http://localhost:8090";
+    const STATUS_WS_URL = "ws://localhost:8080/status";
+    // Frame schema (mirrors protocol/frame_config.json). We'll try fetch, fallback to inline.
+    const FRAME_SCHEMA_INLINE = {
+      endianness: "little",
+      invalid_fill: {
+        uint8: 255, uint16: 65535, uint32: 4294967295, uint64: "18446744073709551615",
+        float32: -1.0, bytes: 255, string: ""
+      },
+      semantics: {
+        main: {
+          valid_fields: ["ind","time","mode","order","note","crc"],
+          mode: {
+            reserved: [255],
+            bits: { emergency_stop:7, joint_space:6, elbow_control:5, compliance:4 },
+            selector_low_nibble: { none:0, trajectory_extend:1, trajectory_retract:2, keyboard:3, teleop:7, vision_servo:11, shared_control:15 }
+          },
+          order: { layout: { keys:["Q","W","E","A","S","D","Up","Down","Left","Right"], axes:["x","y","z","roll","pitch","yaw"] } }
+        },
+        sub: {
+          valid_fields: ["ind","time","angle","current","torque","pose_ee","pose_elbow","mode","note","crc"],
+          mode: { reserved:[0,255], status_nibble:{ ready:1, executing:2, failed:9, cannot_execute:10, emergency:15 }, selector_low_nibble:"mirror_main" }
+        }
+      },
+      fields: [
+        { name: "ind", type: "uint32" },
+        { name: "time", type: "uint64" },
+        { name: "angle", type: "float32", count: 7 },
+        { name: "current", type: "float32", count: 7 },
+        { name: "torque", type: "float32", count: 7 },
+        { name: "pose_ee", type: "float32", count: 6 },
+        { name: "pose_elbow", type: "float32", count: 6 },
+        { name: "mode", type: "uint8" },
+        { name: "order", type: "float32", count: 16 },
+        { name: "reserved", type: "bytes", size: 16 },
+        { name: "note", type: "string", size: 64, encoding: "utf-8" },
+        { name: "crc", type: "uint32" },
+      ],
+    };
+    let FRAME_SCHEMA = FRAME_SCHEMA_INLINE;
+    fetch("../protocol/frame_config.json").then(r=>r.ok?r.json():null).then(j=>{ if(j) FRAME_SCHEMA=j; }).catch(()=>{});
+
+    const keyMap = [
+      "KeyQ", "KeyW", "KeyE",
+      "KeyA", "KeyS", "KeyD"
+    ];
+    const pressed = new Set();
+    let seq = 0;
+    let ws = null;
+    let autoSend = true;
+    let lastPayloadBits = null;
+
+    const kbdGrid = document.getElementById("kbdGrid");
+    const lastPacket = document.getElementById("lastPacket");
+    const wsState = document.getElementById("wsState");
+    const mainView = document.getElementById("mainView");
+    const debugView = document.getElementById("debugView");
+    const toggleViewBtn = document.getElementById("toggleView");
+    const videoUrlInput = document.getElementById("videoUrl");
+    const wsUrlInput = document.getElementById("wsUrl");
+    const debugMonitor = document.getElementById("debugMonitor");
+    const debugLog = document.getElementById("debugLog");
+    const systemStateEl = document.getElementById("systemState");
+    const moduleGrid = document.getElementById("moduleGrid");
+    const debugModuleGrid = document.getElementById("debugModuleGrid");
+    const consoleLog = document.getElementById("consoleLog");
+    const faultBox = document.getElementById("faultBox");
+    const sendHandCustomPositionBtn = document.getElementById("sendHandCustomPosition");
+    const armPresetCard = document.getElementById("armPresetCard");
+    const keyboardModeGroup = document.getElementById("keyboardControlMode");
+    const handControlMode = document.getElementById("handControlMode");
+    const keyboardTargetHint = document.getElementById("keyboardTargetHint");
+    const gamepadStatusHint = document.getElementById("gamepadStatusHint");
+    const inputDeviceMode = document.getElementById("inputDeviceMode");
+    const leftStickDot = document.getElementById("leftStickDot");
+    const rightStickDot = document.getElementById("rightStickDot");
+    const leftStickCaption = document.getElementById("leftStickCaption");
+    const rightStickCaption = document.getElementById("rightStickCaption");
+    const triggerL = document.getElementById("triggerL");
+    const triggerL2 = document.getElementById("triggerL2");
+    const usbCameraPreview = document.getElementById("usbCameraPreview");
+    const usbCameraHint = document.getElementById("usbCameraHint");
+
+    const armStatusHint = document.getElementById("armStatusHint");
+    const jointSpans = [
+      document.getElementById("j1"),
+      document.getElementById("j2"),
+      document.getElementById("j3"),
+      document.getElementById("gripper"),
+    ];
+    const controlModeGroup = document.getElementById("controlModeGroup");
+    const featureToggles = document.getElementById("featureToggles");
+    const trajectoryGroup = document.getElementById("trajectoryGroup");
+    let showingDebug = false;
+    let currentHandMode = "glove";
+
+    videoUrlInput.value = DEFAULT_VIDEO_URL;
+    wsUrlInput.value = DEFAULT_WS_URL;
+    document.body.style.overflow = "auto";
+
+    const MODULE_LABELS = {
+      backend: "后端",
+      jetson: "Jetson",
+      arm: "机械臂",
+      udp_bridge: "UDP 桥接",
+      hand: "灵巧手",
+      glove: "数据手套",
+      hand_link: "手套链路",
+      matlab: "手柄",
+      camera: "相机",
+      network: "网络",
+    };
+    const MAIN_MODULE_KEYS = ["arm", "hand", "glove", "camera", "matlab"];
+    let lastStatus = null;
+    let cameraLocalStatus = null;
+    let cameraStream = null;
+    let cameraDeviceId = null;
+
+    function renderModuleCards(target, modules, keys, secondary=false) {
+      if (!target || !modules) return;
+      target.innerHTML = "";
+      keys.forEach((key) => {
+        const mod = modules[key] || { status: "OFFLINE", message: "未上报" };
+        const status = String(mod.status || "OFFLINE").toLowerCase();
+        const card = document.createElement("div");
+        card.className = `module${secondary ? " secondary" : ""}`;
+        card.innerHTML = `<strong>${MODULE_LABELS[key] || key}</strong><span class="badge ${status}">${mod.status || "OFFLINE"}</span><div class="status-line">${mod.message || ""}</div>`;
+        target.appendChild(card);
+      });
+    }
+
+    function appendConsoleLog(level, message, detail) {
+      if (!consoleLog) return;
+      const entry = document.createElement("div");
+      const ts = new Date().toLocaleTimeString();
+      entry.textContent = `[${ts}] ${level || "INFO"} ${message || ""}${detail ? " | " + detail : ""}`;
+      consoleLog.prepend(entry);
+      while (consoleLog.childElementCount > 120) consoleLog.removeChild(consoleLog.lastChild);
+    }
+
+    function setHandModeUi(mode, pending=false) {
+      currentHandMode = mode || currentHandMode || "glove";
+      if (handControlMode) {
+        handControlMode.querySelectorAll('input[name="handControlMode"]').forEach((input) => {
+          const active = input.value === currentHandMode;
+          input.checked = active;
+          input.disabled = pending;
+          input.closest("label")?.classList.toggle("pending", pending && active);
+        });
+      }
+      document.querySelectorAll("[data-hand-mode]").forEach((btn) => {
+        const active = btn.dataset.handMode === currentHandMode;
+        btn.classList.toggle("mode-active", active);
+        btn.classList.toggle("pending", pending && active);
+      });
+    }
+
+    function renderSupervisorStatus(data) {
+      if (!data) return;
+      lastStatus = data;
+      if (systemStateEl) systemStateEl.textContent = data.state || "UNKNOWN";
+      if (data.hand_mode) setHandModeUi(data.hand_mode);
+      updateButtonAvailability(data.state || "OFFLINE");
+      if (moduleGrid) {
+        const modules = { ...(data.modules || {}) };
+        if (cameraLocalStatus) modules.camera = cameraLocalStatus;
+        renderModuleCards(moduleGrid, modules, MAIN_MODULE_KEYS);
+        const debugKeys = Object.keys(modules).filter((key) => !MAIN_MODULE_KEYS.includes(key));
+        renderModuleCards(debugModuleGrid, modules, debugKeys, true);
+      }
+      if (faultBox) {
+        const faults = data.faults || [];
+        faultBox.textContent = faults.length ? faults[faults.length - 1].message : "暂无报警。若现场故障，请优先急停，然后复位或切换备选演示。";
+      }
+      if (consoleLog && Array.isArray(data.logs)) {
+        consoleLog.innerHTML = "";
+        data.logs.forEach((item) => appendConsoleLog(item.level, item.message, item.detail));
+      }
+    }
+
+    async function refreshCameraStatus() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+        cameraLocalStatus = { status: "WARNING", message: "浏览器不支持摄像头检测" };
+        stopUsbCameraPreview();
+      } else {
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const cameras = devices.filter((item) => item.kind === "videoinput");
+          if (cameras.length) {
+            const labeled = cameras.find((item) => item.label);
+            const message = labeled?.label
+              ? `已连接: ${labeled.label}`
+              : `USB 摄像头已连接 (${cameras.length})`;
+            cameraLocalStatus = { status: "ONLINE", message };
+            const preferred = cameras.find((item) => item.deviceId === cameraDeviceId) || cameras[0];
+            await startUsbCameraPreview(preferred?.deviceId || null);
+          } else {
+            cameraLocalStatus = { status: "OFFLINE", message: "未检测到 USB 摄像头" };
+            stopUsbCameraPreview();
+          }
+        } catch (err) {
+          const detail = err && err.message ? err.message : String(err || "unknown");
+          cameraLocalStatus = { status: "WARNING", message: `摄像头检测失败: ${detail}` };
+          stopUsbCameraPreview();
+        }
+      }
+      if (lastStatus) renderSupervisorStatus(lastStatus);
+    }
+
+    function stopUsbCameraPreview() {
+      if (cameraStream) {
+        cameraStream.getTracks().forEach((track) => track.stop());
+      }
+      cameraStream = null;
+      cameraDeviceId = null;
+      if (usbCameraPreview) usbCameraPreview.srcObject = null;
+      if (usbCameraHint) usbCameraHint.textContent = "未检测到 USB 摄像头";
+    }
+
+    async function startUsbCameraPreview(deviceId) {
+      if (!usbCameraPreview || !navigator.mediaDevices?.getUserMedia) return;
+      if (cameraStream && (!deviceId || deviceId === cameraDeviceId)) {
+        if (usbCameraHint) usbCameraHint.textContent = "USB 摄像头预览中";
+        return;
+      }
+      stopUsbCameraPreview();
+      const constraints = deviceId
+        ? { video: { deviceId: { exact: deviceId } } }
+        : { video: true };
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        cameraStream = stream;
+        const track = stream.getVideoTracks()[0];
+        cameraDeviceId = track?.getSettings()?.deviceId || deviceId || null;
+        usbCameraPreview.srcObject = stream;
+        usbCameraPreview.play().catch(() => {});
+        if (usbCameraHint) usbCameraHint.textContent = "USB 摄像头预览中";
+      } catch (err) {
+        const detail = err && err.message ? err.message : String(err || "unknown");
+        if (usbCameraHint) usbCameraHint.textContent = `摄像头预览失败: ${detail}`;
+      }
+    }
+
+    function updateButtonAvailability(_state) {
+      document.querySelectorAll("[data-api]").forEach((btn) => {
+        btn.disabled = false;
+        btn.style.opacity = "1";
+        btn.style.cursor = "pointer";
+      });
+    }
+
+    function handModeForPath(path) {
+      if (/\/api\/hand\/mode\/glove$/.test(path)) return "glove";
+      if (/\/api\/hand\/mode\/preset$/.test(path)) return "preset";
+      if (/\/api\/hand\/preset\//.test(path) || /\/api\/hand\/position$/.test(path)) return "preset";
+      return null;
+    }
+
+    async function callApi(spec, body=null, sourceBtn=null) {
+      const [method, path] = spec.split(/\s+/);
+      appendConsoleLog("ACTION", `${method} ${path}`);
+      const nextMode = handModeForPath(path);
+      const originalText = sourceBtn ? sourceBtn.textContent : "";
+      if (nextMode) setHandModeUi(nextMode, true);
+      if (sourceBtn) {
+        sourceBtn.disabled = true;
+        sourceBtn.classList.add("pending");
+        sourceBtn.textContent = "发送中...";
+      }
+      try {
+        const options = { method };
+        if (body !== null) {
+          options.headers = { "Content-Type": "application/json" };
+          options.body = JSON.stringify(body);
+        }
+        const res = await fetch(`${API_BASE}${path}`, options);
+        const data = await res.json();
+        appendConsoleLog(data.ok ? "OK" : "ERROR", data.message || path);
+        renderSupervisorStatus(data.status || data);
+      } catch (err) {
+        appendConsoleLog("ERROR", "后端服务不可达，请确认 bridge.py/bridge.exe 已启动", err.message);
+      } finally {
+        if (sourceBtn) {
+          sourceBtn.textContent = originalText;
+          sourceBtn.classList.remove("pending");
+          sourceBtn.disabled = false;
+          updateButtonAvailability(systemStateEl ? systemStateEl.textContent : "UNKNOWN");
+        }
+        setHandModeUi(currentHandMode, false);
+      }
+    }
+
+    document.querySelectorAll("[data-api]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        if (btn.dataset.api === "POST /api/system/estop") holdCurrentArmState();
+        if (btn.dataset.api === "POST /api/system/reset") resetArmTarget();
+        callApi(btn.dataset.api, null, btn);
+      });
+    });
+
+    if (sendHandCustomPositionBtn) {
+      sendHandCustomPositionBtn.addEventListener("click", () => {
+        const positions = [...document.querySelectorAll(".hand-position-input")].map((input) => {
+          const value = Number(input.value);
+          if (!Number.isFinite(value)) return 2000;
+          return Math.max(0, Math.min(2000, Math.round(value)));
+        });
+        callApi("POST /api/hand/position", { positions, name: "custom" }, sendHandCustomPositionBtn);
+      });
+    }
+
+    if (handControlMode) {
+      handControlMode.addEventListener("change", () => {
+        const mode = handControlMode.querySelector('input[name="handControlMode"]:checked')?.value || "glove";
+        callApi(`POST /api/hand/mode/${mode}`);
+      });
+    }
+
+    if (armPresetCard) {
+      armPresetCard.querySelectorAll("[data-send-arm-preset]").forEach((btn) => {
+        btn.addEventListener("click", () => sendArmPresetFromCard(btn.dataset.sendArmPreset));
+      });
+    }
+
+    function connectStatusWs() {
+      try {
+        const statusWs = new WebSocket(STATUS_WS_URL);
+        statusWs.onopen = () => appendConsoleLog("INFO", "状态 WebSocket 已连接");
+        statusWs.onmessage = (event) => renderSupervisorStatus(JSON.parse(event.data));
+        statusWs.onclose = () => {
+          appendConsoleLog("WARNING", "状态 WebSocket 断开，3 秒后重连");
+          setTimeout(connectStatusWs, 3000);
+        };
+        statusWs.onerror = () => statusWs.close();
+      } catch (err) {
+        appendConsoleLog("ERROR", "状态 WebSocket 初始化失败", err.message);
+        setTimeout(connectStatusWs, 3000);
+      }
+    }
+    connectStatusWs();
+    callApi("GET /api/status");
+    refreshCameraStatus();
+    if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+      navigator.mediaDevices.addEventListener("devicechange", refreshCameraStatus);
+    }
+    setInterval(refreshCameraStatus, 8000);
+
+    function logDebug(msg) {
+      if (!debugLog) return;
+      const entry = document.createElement("div");
+      const ts = new Date().toLocaleTimeString();
+      entry.textContent = `[${ts}] ${msg}`;
+      debugLog.prepend(entry);
+      while (debugLog.childElementCount > 80) debugLog.removeChild(debugLog.lastChild);
+    }
+
+    function radToDeg(value) {
+      const n = Number(value);
+      return Number.isFinite(n) ? n * 180 / Math.PI : 0;
+    }
+
+    function degToRad(value) {
+      const n = Number(value);
+      return Number.isFinite(n) ? n * Math.PI / 180 : 0;
+    }
+
+    function clampNumber(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function selectedControlMode() {
+      return controlModeGroup?.querySelector("input[name=controlMode]:checked")?.value || "keyboard";
+    }
+
+    function selectedInputDeviceMode() {
+      return inputDeviceMode?.querySelector('input[name="inputDeviceMode"]:checked')?.value || null;
+    }
+
+    function syncInputDeviceMode(mode) {
+      if (!inputDeviceMode) return;
+      const input = inputDeviceMode.querySelector(`input[name="inputDeviceMode"][value="${mode}"]`);
+      if (input) input.checked = true;
+    }
+
+    function motionSourceLabel() {
+      return selectedControlMode() === "gamepad" ? "手柄" : "键盘";
+    }
+
+    function armForwardKinematics(qs) {
+      const q1 = Number(qs?.[0]) || 0;
+      const q2 = Number(qs?.[1]) || 0;
+      const q3 = Number(qs?.[2]) || 0;
+      const radial = ARM_LINK_3 * Math.cos(q2) + ARM_LINK_5 * Math.cos(q2 - q3);
+      const z = ARM_LINK_3 * Math.sin(q2) + ARM_LINK_5 * Math.sin(q2 - q3);
+      return [radial * Math.cos(q1), radial * Math.sin(q1), z];
+    }
+
+    function solveArmKinematics(ps) {
+      const l3 = ARM_LINK_3;
+      const l5 = ARM_LINK_5;
+      const xs = Number(ps?.[0]) || 0;
+      const ys = Number(ps?.[1]) || 0;
+      const zs = Number(ps?.[2]) || 0;
+      const qs = [0, 0, 0];
+      qs[0] = Math.atan2(ys, xs);
+
+      const rs = Math.sqrt(xs * xs + ys * ys);
+      const lx = Math.sqrt(xs * xs + ys * ys + zs * zs);
+      const lx0 = Math.sqrt(l3 * l3 + l5 * l5 - 2 * l3 * l5 * Math.cos(ARM_MIN_ELBOW_ANGLE));
+      const qy = Math.atan2(zs, rs);
+      const safeAcos = (value) => Math.acos(clampNumber(value, -1, 1));
+
+      let qq;
+      let qx;
+      let flag = 0;
+      if (lx > (l3 + l5)) {
+        qq = Math.PI;
+        qx = 0;
+        flag = 1;
+      } else if (lx < lx0) {
+        qq = ARM_MIN_ELBOW_ANGLE;
+        qx = safeAcos((l3 * l3 + lx0 * lx0 - l5 * l5) / (2 * l3 * lx0));
+        flag = 2;
+      } else {
+        qq = safeAcos((l3 * l3 + l5 * l5 - lx * lx) / (2 * l3 * l5));
+        qx = safeAcos((l3 * l3 + lx * lx - l5 * l5) / (2 * l3 * lx));
+      }
+
+      if (rs < (l3 + l5)) {
+        qs[2] = Math.PI - qq;
+        qs[1] = qy + qx;
+      }
+      return { qs, flag };
+    }
+
+    function clampTargetPositionToWorkspace(position) {
+      const maxReach = ARM_LINK_3 + ARM_LINK_5;
+      const minReach = Math.sqrt(ARM_LINK_3 * ARM_LINK_3 + ARM_LINK_5 * ARM_LINK_5 - 2 * ARM_LINK_3 * ARM_LINK_5 * Math.cos(ARM_MIN_ELBOW_ANGLE));
+      const p = [Number(position?.[0]) || 0, Number(position?.[1]) || 0, Number(position?.[2]) || 0];
+      const reach = Math.hypot(p[0], p[1], p[2]);
+      let flag = 0;
+      if (reach > maxReach) {
+        const scale = maxReach / reach;
+        p[0] *= scale;
+        p[1] *= scale;
+        p[2] *= scale;
+        flag = 1;
+      } else if (reach < minReach) {
+        if (reach < 1e-6) {
+          p[0] = minReach;
+          p[1] = 0;
+          p[2] = 0;
+        } else {
+          const scale = minReach / reach;
+          p[0] *= scale;
+          p[1] *= scale;
+          p[2] *= scale;
+        }
+        flag = 2;
+      }
+      return { position: p, flag };
+    }
+
+    function motionConstraintMessage(flag) {
+      if (flag === 1) return "已到达工作空间外边界，目标被限制";
+      if (flag === 2) return "已到达内肘/自碰安全边界，目标被限制";
+      return "";
+    }
+
+    function getKeyboardControlMode() {
+      return keyboardModeGroup?.querySelector('input[name="keyboardControlMode"]:checked')?.value || "position";
+    }
+
+    function syncKeyboardModeFeatureBit() {
+      const jointSpaceInput = featureToggles.querySelector('input[data-toggle="joint_space"]');
+      if (jointSpaceInput) jointSpaceInput.checked = selectedControlMode() === "keyboard" && getKeyboardControlMode() === "joint";
+    }
+
+    function ensurePositionTargetInitialized() {
+      if (positionTargetInitialized) return;
+      targetPosition = armForwardKinematics(targetAngles);
+      positionTargetInitialized = true;
+    }
+
+    function updateKeyboardTargetHint(ikResult=null) {
+      if (!keyboardTargetHint) return;
+      const mode = getKeyboardControlMode();
+      const control = selectedControlMode();
+      if ((control === "keyboard" || control === "gamepad") && mode === "joint") {
+        keyboardTargetHint.textContent = `关节控制 J1/J2/J3: ${targetAngles.slice(0, 3).map((v) => radToDeg(v).toFixed(1)).join(", ")} deg`;
+        keyboardTargetHint.classList.remove("warning");
+        return;
+      }
+      const constraint = motionConstraintMessage(ikResult?.flag || 0);
+      const prefix = `${motionSourceLabel()}位置控制 XYZ`;
+      keyboardTargetHint.textContent = `${prefix}: ${targetPosition.map((v) => v.toFixed(3)).join(", ")} m${constraint ? " | " + constraint : ""}`;
+      keyboardTargetHint.classList.toggle("warning", !!constraint);
+      if (constraint) {
+        const now = Date.now();
+        if (constraint !== lastConstraintMessage || now - lastConstraintLogMs > 2500) {
+          lastConstraintMessage = constraint;
+          lastConstraintLogMs = now;
+          appendConsoleLog("WARNING", constraint);
+        }
+      } else {
+        lastConstraintMessage = "";
+      }
+    }
+
+    function applyPositionDelta(dx, dy, dz) {
+      ensurePositionTargetInitialized();
+      targetPosition[0] += dx;
+      targetPosition[1] += dy;
+      targetPosition[2] += dz;
+      const workspace = clampTargetPositionToWorkspace(targetPosition);
+      targetPosition = workspace.position;
+
+      const ikResult = solveArmKinematics(targetPosition);
+      if (workspace.flag && !ikResult.flag) ikResult.flag = workspace.flag;
+      targetAngles[0] = ikResult.qs[0];
+      targetAngles[1] = ikResult.qs[1];
+      targetAngles[2] = ikResult.qs[2];
+      updateKeyboardTargetHint(ikResult);
+    }
+
+    function applyPositionKeyboardStep() {
+      const dx = (pressed.has("KeyW") ? POSITION_STEP : 0) - (pressed.has("KeyS") ? POSITION_STEP : 0);
+      const dy = (pressed.has("KeyA") ? POSITION_STEP : 0) - (pressed.has("KeyD") ? POSITION_STEP : 0);
+      const dz = (pressed.has("KeyQ") ? POSITION_STEP : 0) - (pressed.has("KeyE") ? POSITION_STEP : 0);
+      applyPositionDelta(dx, dy, dz);
+    }
+
+    function applyJointKeyboardStep() {
+      ensureTargetInitialized();
+      if (pressed.has("KeyA")) targetAngles[0] -= JOINT_STEP;
+      if (pressed.has("KeyD")) targetAngles[0] += JOINT_STEP;
+      if (pressed.has("KeyS")) targetAngles[1] -= JOINT_STEP;
+      if (pressed.has("KeyW")) targetAngles[1] += JOINT_STEP;
+      if (pressed.has("KeyQ")) targetAngles[2] -= JOINT_STEP;
+      if (pressed.has("KeyE")) targetAngles[2] += JOINT_STEP;
+      targetPosition = armForwardKinematics(targetAngles);
+      positionTargetInitialized = true;
+      updateKeyboardTargetHint();
+    }
+
+    function applyKeyboardStep() {
+      syncKeyboardModeFeatureBit();
+      ensureTargetInitialized();
+      if (getKeyboardControlMode() === "joint") applyJointKeyboardStep();
+      else applyPositionKeyboardStep();
+    }
+
+    function gamepadButtonValue(button) {
+      if (!button) return 0;
+      if (typeof button === "number") return button;
+      return button.pressed ? 1 : (Number(button.value) || 0);
+    }
+
+    function applyGamepadDeadzone(value) {
+      const n = Number(value) || 0;
+      return Math.abs(n) < GAMEPAD_DEADZONE ? 0 : n;
+    }
+
+    function gamepadZAxis(gp) {
+      const down = gamepadButtonValue(gp?.buttons?.[GAMEPAD_Z_DOWN_BUTTON]);
+      const up = gamepadButtonValue(gp?.buttons?.[GAMEPAD_Z_UP_BUTTON]);
+      return applyGamepadDeadzone(up - down);
+    }
+
+    function setStickDot(dot, x, y) {
+      if (!dot) return;
+      const radius = 24;
+      const nx = clampNumber(Number(x) || 0, -1, 1);
+      const ny = clampNumber(Number(y) || 0, -1, 1);
+      const px = nx * radius;
+      const py = ny * radius;
+      dot.style.transform = `translate(calc(-50% + ${px}px), calc(-50% + ${py}px))`;
+    }
+
+    function updateInputIndicators() {
+      if (!leftStickDot) return;
+      const mode = selectedControlMode();
+      const jointMode = getKeyboardControlMode() === "joint";
+      let x = 0;
+      let y = 0;
+      let z = 0;
+      let downVal = 0;
+      let upVal = 0;
+      if (mode === "gamepad") {
+        const gp = getActiveGamepad();
+        if (gp) {
+          const axisX = applyGamepadDeadzone(gp.axes?.[0] || 0);
+          const axisY = applyGamepadDeadzone(gp.axes?.[1] || 0);
+          x = axisX;
+          y = axisY;
+          z = gamepadZAxis(gp);
+          downVal = gamepadButtonValue(gp.buttons?.[GAMEPAD_Z_DOWN_BUTTON]);
+          upVal = gamepadButtonValue(gp.buttons?.[GAMEPAD_Z_UP_BUTTON]);
+        }
+      } else if (mode === "keyboard") {
+        x = (pressed.has("KeyD") ? 1 : 0) - (pressed.has("KeyA") ? 1 : 0);
+        y = (pressed.has("KeyW") ? 1 : 0) - (pressed.has("KeyS") ? 1 : 0);
+        z = (pressed.has("KeyE") ? 1 : 0) - (pressed.has("KeyQ") ? 1 : 0);
+        downVal = pressed.has("KeyQ") ? 1 : 0;
+        upVal = pressed.has("KeyE") ? 1 : 0;
+      }
+      setStickDot(leftStickDot, x, y);
+      setStickDot(rightStickDot, 0, -z);
+      if (triggerL) triggerL.classList.toggle("active", downVal > 0.1);
+      if (triggerL2) triggerL2.classList.toggle("active", upVal > 0.1);
+      if (leftStickCaption && rightStickCaption) {
+        if (mode === "gamepad") {
+          leftStickCaption.textContent = jointMode ? "LX/LY -> J1/J2" : "LX/LY -> X/Y";
+          rightStickCaption.textContent = jointMode
+            ? `${GAMEPAD_Z_DOWN_LABEL}/${GAMEPAD_Z_UP_LABEL} -> J3`
+            : `${GAMEPAD_Z_DOWN_LABEL}/${GAMEPAD_Z_UP_LABEL} -> Z`;
+        } else if (mode === "keyboard") {
+          leftStickCaption.textContent = jointMode ? "WASD -> J1/J2" : "WASD -> X/Y";
+          rightStickCaption.textContent = jointMode ? "Q/E -> J3" : "Q/E -> Z";
+        } else {
+          leftStickCaption.textContent = "inactive";
+          rightStickCaption.textContent = "inactive";
+        }
+      }
+    }
+
+    function getActiveGamepad() {
+      if (!navigator.getGamepads) return null;
+      const pads = Array.from(navigator.getGamepads()).filter(Boolean);
+      if (!pads.length) return null;
+      if (activeGamepadIndex !== null) {
+        const active = pads.find((pad) => pad.index === activeGamepadIndex);
+        if (active) return active;
+      }
+      activeGamepadIndex = pads[0].index;
+      return pads[0];
+    }
+
+    function updateGamepadStatus(gamepad=null) {
+      if (!gamepadStatusHint) return;
+      const gp = gamepad || getActiveGamepad();
+      if (!gp) {
+        gamepadStatusHint.textContent = "USB 手柄未连接";
+        gamepadStatusHint.classList.add("warning");
+        return;
+      }
+      const ax = applyGamepadDeadzone(gp.axes?.[0] || 0);
+      const ay = applyGamepadDeadzone(gp.axes?.[1] || 0);
+      const zAxis = gamepadZAxis(gp);
+      gamepadStatusHint.textContent = `USB 手柄: ${gp.id || "connected"} | X:${ax.toFixed(2)} Y:${ay.toFixed(2)} Z:${zAxis.toFixed(2)} (L↓ / L2↑)`;
+      gamepadStatusHint.classList.remove("warning");
+    }
+
+    function applyGamepadPositionStep() {
+      ensurePositionTargetInitialized();
+      const gp = getActiveGamepad();
+      updateGamepadStatus(gp);
+      if (!gp) {
+        updateKeyboardTargetHint();
+        return;
+      }
+      const axisX = applyGamepadDeadzone(gp.axes?.[0] || 0);
+      const axisY = applyGamepadDeadzone(gp.axes?.[1] || 0);
+      const zAxis = gamepadZAxis(gp);
+      applyPositionDelta(-axisY * POSITION_STEP, -axisX * POSITION_STEP, zAxis * POSITION_STEP);
+    }
+
+    function applyGamepadJointStep() {
+      ensureTargetInitialized();
+      const gp = getActiveGamepad();
+      updateGamepadStatus(gp);
+      if (!gp) {
+        updateKeyboardTargetHint();
+        return;
+      }
+      const axisX = applyGamepadDeadzone(gp.axes?.[0] || 0);
+      const axisY = applyGamepadDeadzone(gp.axes?.[1] || 0);
+      const qAxis = gamepadZAxis(gp);
+      targetAngles[0] += axisX * JOINT_STEP;  // A/D
+      targetAngles[1] += -axisY * JOINT_STEP; // W/S
+      targetAngles[2] += qAxis * JOINT_STEP;  // Q/E
+      targetPosition = armForwardKinematics(targetAngles);
+      positionTargetInitialized = true;
+      updateKeyboardTargetHint();
+    }
+
+    function applyGamepadStep() {
+      if (getKeyboardControlMode() === "joint") applyGamepadJointStep();
+      else applyGamepadPositionStep();
+    }
+
+    function updateArmTelemetry(tsMs, angles, currents) {
+      angles = angles || [];
+      currents = currents || [];
+      const j1 = radToDeg(angles[0] ?? 0);
+      const j2 = radToDeg(angles[1] ?? 0);
+      const j3 = radToDeg(angles[2] ?? 0);
+      const gripper = radToDeg(angles[3] ?? angles[6] ?? 0);
+      const c1 = currents[0] ?? 0;
+      const c2 = currents[1] ?? 0;
+      const c3 = currents[2] ?? 0;
+      const cGrip = currents[3] ?? currents[6] ?? 0;
+      const values = [
+        [j1, c1],
+        [j2, c2],
+        [j3, c3],
+        [gripper, cGrip],
+      ];
+      jointSpans.forEach((el, idx) => {
+        if (!el) return;
+        const pair = values[idx] || [0, 0];
+        el.textContent = `${pair[0].toFixed(1)}° / ${pair[1].toFixed(2)}A`;
+      });
+      armStatusHint.textContent = `遥测 ${new Date(Number(tsMs)).toLocaleTimeString()} (schema)`;
+    }
+
+    // CRC32 IEEE
+    const CRC32_TABLE = (()=>{ const t=[]; for(let i=0;i<256;i++){ let c=i; for(let j=0;j<8;j++) c=(c>>>1)^((c&1)?0xEDB88320:0); t[i]=c>>>0; } return t; })();
+    function crc32(buf){ let crc=0xFFFFFFFF; for(let i=0;i<buf.length;i++){ crc = CRC32_TABLE[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8); } return (~crc)>>>0; }
+
+    const getField = (name) => FRAME_SCHEMA.fields.find(f => f.name === name);
+    const getCount = (name, def=1) => { const f = getField(name); return f && f.count ? f.count : def; };
+    const getSize = (name, def=0) => { const f = getField(name); return f && f.size ? f.size : def; };
+
+    function parseSchemaFrame(buf){
+      if (!buf || buf.length < 16) return null;
+      const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+      const le = (FRAME_SCHEMA.endianness||"little").toLowerCase()==="little";
+      const u16 = (o)=>dv.getUint16(o, le);
+      const u32 = (o)=>dv.getUint32(o, le);
+      const u64 = (o)=>{ const lo=u32(o); const hi=u32(o+4); return (BigInt(hi)<<32n)+BigInt(lo); };
+      const f32 = (o)=>dv.getFloat32(o, le);
+
+      // assume CRC is last field uint32
+      let crcOk = true;
+      const crcField = FRAME_SCHEMA.fields[FRAME_SCHEMA.fields.length-1];
+      if (crcField && crcField.name === "crc") {
+        const crcGot = u32(buf.length-4);
+        const crcCalc = crc32(buf.subarray(0, buf.length-4));
+        crcOk = (crcGot === crcCalc);
+      }
+
+      let off = 0;
+      const out = {};
+      for (const f of FRAME_SCHEMA.fields) {
+        const t = f.type;
+        if (f.name === "crc") { out.crc = u32(buf.length-4); continue; }
+        if (t === "uint8") { out[f.name] = dv.getUint8(off); off += 1; }
+        else if (t === "uint16") { out[f.name] = u16(off); off += 2; }
+        else if (t === "uint32") { out[f.name] = u32(off); off += 4; }
+        else if (t === "uint64") { out[f.name] = u64(off); off += 8; }
+        else if (t === "float32") {
+          const n = f.count || 1; const arr=[]; for(let i=0;i<n;i++){ arr.push(f32(off)); off+=4; } out[f.name]=arr;
+        }
+        else if (t === "bytes") { const size=f.size||0; out[f.name]=buf.subarray(off, off+size); off+=size; }
+        else if (t === "string") { const size=f.size||0; const bytes=buf.subarray(off, off+size); off+=size; out[f.name]=new TextDecoder().decode(bytes).replace(/\u0000+$/,''); }
+      }
+      out.crcOk = crcOk;
+      return out;
+    }
+
+    let armAngles = [0, 0, 0, 0];
+    let targetAngles = [0, 0, 0, 0]; // [J1, J2, J3, Gripper]
+    let targetPosition = [0.6, 0, 0];
+    let targetInitialized = false;
+    let positionTargetInitialized = false;
+    const ARM_LINK_3 = 0.424;
+    const ARM_LINK_5 = 0.424;
+    const ARM_MIN_ELBOW_ANGLE = Math.PI / 6;
+    const POSITION_STEP = 0.01;
+    const JOINT_STEP = 0.05;
+    const GAMEPAD_DEADZONE = 0.15;
+    const GAMEPAD_Z_DOWN_BUTTON = 4;
+    const GAMEPAD_Z_UP_BUTTON = 6;
+    const GAMEPAD_Z_DOWN_LABEL = "L";
+    const GAMEPAD_Z_UP_LABEL = "L2";
+    let activeGamepadIndex = null;
+    let lastConstraintMessage = "";
+    let lastConstraintLogMs = 0;
+
+    function handleTelemetry(buf){
+      const f = parseSchemaFrame(buf);
+      if (!f){ logDebug(`RX unknown frame len=${buf.length}`); return; }
+      if (!f.crcOk){ logDebug(`RX frame CRC mismatch len=${buf.length}`); }
+
+      const note = String(f.note || "");
+      const heartbeatOnly = note === "ready" && f.angle && f.angle.slice(0, 3).every((v) => Number(v) === -1);
+      const hasJointTelemetry = f.angle && f.angle.length >= 3 && !heartbeatOnly;
+      if (hasJointTelemetry) {
+        armAngles[0] = f.angle[0] || 0;
+        armAngles[1] = f.angle[1] || 0;
+        armAngles[2] = f.angle[2] || 0;
+        armAngles[3] = (f.angle[3] ?? f.angle[6] ?? 0);
+
+        if (!targetInitialized) {
+          targetAngles[0] = armAngles[0];
+          targetAngles[1] = armAngles[1];
+          targetAngles[2] = armAngles[2];
+          targetAngles[3] = armAngles[3];
+          targetInitialized = true;
+          targetPosition = armForwardKinematics(targetAngles);
+          positionTargetInitialized = true;
+          updateKeyboardTargetHint();
+        }
+        updateArmTelemetry(f.time, f.angle, f.current);
+      } else if (armStatusHint) {
+        armStatusHint.textContent = `等待本体关节遥测... (${note || "heartbeat"})`;
+      }
+      const a0 = (f.angle && f.angle.length) ? f.angle[0].toFixed(1) : "0.0";
+      const c0 = (f.current && f.current.length) ? f.current[0].toFixed(2) : "0.00";
+      logDebug(`RX ind=${f.ind} mode=${f.mode} a0=${a0} c0=${c0} crc=${f.crcOk?'OK':'BAD'}`);
+    }
+
+    function updateKeyUI() {
+      const blocks = kbdGrid.querySelectorAll(".kbd");
+      blocks.forEach((el) => {
+        el.classList.toggle("active", pressed.has(el.dataset.key));
+      });
+      const text = pressed.size ? `Keys: ${[...pressed].join(",")}` : "Keys: none";
+      logDebug(text);
+    }
+
+    function switchView() {
+      showingDebug = !showingDebug;
+      document.body.classList.toggle("debug", showingDebug);
+      if (mainView) {
+        const isDebugOnly = mainView.classList.contains("debug-only");
+        mainView.style.display = isDebugOnly ? (showingDebug ? "block" : "none") : (showingDebug ? "none" : "block");
+      }
+      if (debugView) debugView.style.display = showingDebug ? "block" : "none";
+      toggleViewBtn.textContent = showingDebug ? "切换到 Main" : "切换到 Debug";
+      document.body.style.overflow = "auto";
+    }
+
+    toggleViewBtn.addEventListener("click", switchView);
+
+    function isEditableTarget(target) {
+      const tag = (target && target.tagName || "").toLowerCase();
+      return tag === "input" || tag === "textarea" || tag === "select" || target?.isContentEditable;
+    }
+
+    function ensureTargetInitialized() {
+      if (targetInitialized) return;
+      targetAngles[0] = armAngles[0];
+      targetAngles[1] = armAngles[1];
+      targetAngles[2] = armAngles[2];
+      targetAngles[3] = armAngles[3];
+      targetInitialized = true;
+      targetPosition = armForwardKinematics(targetAngles);
+      positionTargetInitialized = true;
+      updateKeyboardTargetHint();
+    }
+
+    function selectControlMode(mode) {
+      const input = controlModeGroup.querySelector(`input[name=controlMode][value="${mode}"]`);
+      if (input) input.checked = true;
+      if (mode === "keyboard" || mode === "gamepad") syncInputDeviceMode(mode);
+    }
+
+    function setEmergencyStop(active) {
+      const input = featureToggles.querySelector('input[data-toggle="emergency_stop"]');
+      if (input) input.checked = !!active;
+    }
+
+    function holdCurrentArmState() {
+      pressed.clear();
+      updateKeyUI();
+      targetAngles[0] = armAngles[0];
+      targetAngles[1] = armAngles[1];
+      targetAngles[2] = armAngles[2];
+      targetAngles[3] = armAngles[3];
+      targetInitialized = true;
+      targetPosition = armForwardKinematics(targetAngles);
+      positionTargetInitialized = true;
+      updateKeyboardTargetHint();
+      selectControlMode("keyboard");
+      setEmergencyStop(true);
+      sendFrame();
+    }
+
+    function resetArmTarget() {
+      pressed.clear();
+      updateKeyUI();
+      targetAngles[0] = 0;
+      targetAngles[1] = 0;
+      targetAngles[2] = 0;
+      targetAngles[3] = armAngles[3] || 0;
+      targetInitialized = true;
+      targetPosition = armForwardKinematics(targetAngles);
+      positionTargetInitialized = true;
+      updateKeyboardTargetHint();
+      selectControlMode("keyboard");
+      setEmergencyStop(false);
+      sendFrame();
+    }
+
+    function sendArmPresetDegrees(degrees, name) {
+      pressed.clear();
+      updateKeyUI();
+      targetAngles[0] = degToRad(degrees[0]);
+      targetAngles[1] = degToRad(degrees[1]);
+      targetAngles[2] = degToRad(degrees[2]);
+      targetAngles[3] = armAngles[3] || 0;
+      targetInitialized = true;
+      targetPosition = armForwardKinematics(targetAngles);
+      positionTargetInitialized = true;
+      updateKeyboardTargetHint();
+      selectControlMode("keyboard");
+      setEmergencyStop(false);
+      sendFrame();
+      appendConsoleLog("ACTION", `机械臂预设: ${name || ""}`, `${degrees.map((v) => Number(v).toFixed(1)).join(", ")} deg`);
+    }
+
+    function sendArmPresetFromCard(name) {
+      const card = armPresetCard?.querySelector(`[data-arm-preset="${name}"]`);
+      if (!card) return;
+      const degrees = [0, 1, 2].map((idx) => {
+        const input = card.querySelector(`input[data-joint="${idx}"]`);
+        return Number(input?.value || 0);
+      });
+      sendArmPresetDegrees(degrees, name);
+    }
+
+    window.addEventListener("keydown", (e) => {
+      if (isEditableTarget(e.target)) return;
+      if (keyMap.includes(e.code)) {
+        e.preventDefault();
+        if (!pressed.has(e.code)) pressed.add(e.code);
+        updateKeyUI();
+        updateInputIndicators();
+        if (autoSend) sendFrame();
+      }
+    });
+    window.addEventListener("keyup", (e) => {
+      if (isEditableTarget(e.target)) return;
+      if (keyMap.includes(e.code)) {
+        e.preventDefault();
+        pressed.delete(e.code);
+        updateKeyUI();
+        updateInputIndicators();
+        if (autoSend) sendFrame();
+      }
+    });
+
+    window.addEventListener("gamepadconnected", (event) => {
+      activeGamepadIndex = event.gamepad.index;
+      updateGamepadStatus(event.gamepad);
+      appendConsoleLog("INFO", "USB 手柄已连接", event.gamepad.id);
+      updateInputIndicators();
+      if (autoSend) sendFrame();
+    });
+    window.addEventListener("gamepaddisconnected", (event) => {
+      if (activeGamepadIndex === event.gamepad.index) activeGamepadIndex = null;
+      updateGamepadStatus();
+      appendConsoleLog("WARNING", "USB 手柄已断开", event.gamepad.id);
+      updateInputIndicators();
+    });
+
+    // 控制面板事件
+    function handleControlModeChange() {
+      syncKeyboardModeFeatureBit();
+      if (selectedControlMode() === "gamepad") {
+        pressed.clear();
+        updateKeyUI();
+        if (getKeyboardControlMode() === "joint") ensureTargetInitialized();
+        else ensurePositionTargetInitialized();
+        updateGamepadStatus();
+      } else if (selectedControlMode() === "keyboard") {
+        if (getKeyboardControlMode() === "position") ensurePositionTargetInitialized();
+        else ensureTargetInitialized();
+      }
+      updateKeyboardTargetHint();
+      updateInputIndicators();
+      const mode = selectedControlMode();
+      if (mode === "keyboard" || mode === "gamepad") syncInputDeviceMode(mode);
+      if (autoSend) sendFrame();
+    }
+
+    controlModeGroup.addEventListener("change", handleControlModeChange);
+    if (inputDeviceMode) {
+      inputDeviceMode.addEventListener("change", () => {
+        const mode = selectedInputDeviceMode();
+        if (mode) selectControlMode(mode);
+        handleControlModeChange();
+      });
+    }
+    featureToggles.querySelectorAll('input[type=checkbox]').forEach(chk => {
+      chk.addEventListener('change', () => { if (autoSend) sendFrame(); });
+    });
+    trajectoryGroup.addEventListener("change", () => { if (autoSend) sendFrame(); });
+    if (keyboardModeGroup) {
+      keyboardModeGroup.addEventListener("change", () => {
+        syncKeyboardModeFeatureBit();
+        if (getKeyboardControlMode() === "position") ensurePositionTargetInitialized();
+        else ensureTargetInitialized();
+        updateKeyboardTargetHint();
+        updateInputIndicators();
+        if (autoSend) sendFrame();
+      });
+    }
+    syncKeyboardModeFeatureBit();
+    syncInputDeviceMode(selectedControlMode());
+    updateGamepadStatus();
+    updateInputIndicators();
+    updateKeyboardTargetHint();
+
+    // 根据“控制维度”（位置/位姿）动态切换下一行（控制方式）开关的左右文字
+    const jointSpaceToggle = featureToggles.querySelector('input[data-toggle="joint_space"]');
+    const modeOptionLeft = featureToggles.querySelector('#modeOptionLeft');
+    const modeOptionRight = featureToggles.querySelector('#modeOptionRight');
+    function updateModeOptionLabels(){
+      if (!jointSpaceToggle || !modeOptionLeft || !modeOptionRight) return;
+      if (jointSpaceToggle.checked) {
+        // 位姿控制：左=末端位姿，右=关节空间
+        modeOptionLeft.textContent = '末端位姿';
+        modeOptionRight.textContent = '关节空间';
+      } else {
+        // 位置控制：左=末端位置，右=肘部位置
+        modeOptionLeft.textContent = '末端位置';
+        modeOptionRight.textContent = '肘部位置';
+      }
+    }
+    if (jointSpaceToggle) {
+      jointSpaceToggle.addEventListener('change', () => { updateModeOptionLabels(); if (autoSend) sendFrame(); });
+      updateModeOptionLabels();
+    }
+
+    function applyVideoSource(url) {
+      if (!url) return;
+      const mainVideo = document.getElementById("monitor");
+      [mainVideo, debugMonitor].forEach((video) => {
+        if (!video) return;
+        video.src = url;
+        video.play().catch(() => {});
+      });
+    }
+
+    applyVideoSource(DEFAULT_VIDEO_URL);
+
+    // Video loader (requires gateway for RTSP)
+    document.getElementById("loadVideo").addEventListener("click", () => {
+      const url = videoUrlInput.value.trim();
+      applyVideoSource(url);
+    });
+
+    // WebSocket connector
+    let udpWsReconnectTimer = null;
+    function scheduleUdpWsReconnect() {
+      if (udpWsReconnectTimer) clearTimeout(udpWsReconnectTimer);
+      udpWsReconnectTimer = setTimeout(() => {
+        udpWsReconnectTimer = null;
+        connectUdpWebSocket();
+      }, 3000);
+    }
+
+    function connectUdpWebSocket() {
+      const url = wsUrlInput.value.trim();
+      if (!url) return;
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+      logDebug(`WS connect → ${url}`);
+      ws = new WebSocket(url);
+      ws.binaryType = "arraybuffer";
+      ws.onopen = () => { wsState.textContent = `WebSocket: connected (${url})`; logDebug("WS opened"); };
+      ws.onclose = (ev) => {
+        wsState.textContent = "WebSocket: disconnected";
+        logDebug(`WS closed code=${ev.code} reason=${ev.reason || 'n/a'}`);
+        ws = null;
+        scheduleUdpWsReconnect();
+      };
+      ws.onerror = (ev) => { wsState.textContent = "WebSocket: error"; logDebug(`WS error: ${ev.message || ev.type}`); };
+      ws.onmessage = (e) => {
+        const data = new Uint8Array(e.data);
+        handleTelemetry(data);
+      };
+    }
+
+    document.getElementById("connectWs").addEventListener("click", () => {
+      if (udpWsReconnectTimer) {
+        clearTimeout(udpWsReconnectTimer);
+        udpWsReconnectTimer = null;
+      }
+      if (ws) {
+        ws.onclose = null;
+        ws.close();
+        ws = null;
+      }
+      connectUdpWebSocket();
+    });
+
+    document.getElementById("sendNow").addEventListener("click", sendFrame);
+    document.getElementById("toggleAuto").addEventListener("click", (e) => {
+      autoSend = !autoSend;
+      e.target.classList.toggle("active", autoSend);
+      e.target.textContent = autoSend ? "Auto-send: ON" : "Auto-send: OFF";
+    });
+
+    // Build a custom payload: [mode:1][buttons:1 bitmask][keys:2 bitmask][timestamp:4]
+    let frameCounter = 0;
+    function packFrame(obj){
+      const le = (FRAME_SCHEMA.endianness||"little").toLowerCase()==="little";
+      const parts=[];
+      const dvpush=(arr)=>parts.push(arr);
+      const encU8=(v)=>new Uint8Array([v&0xFF]);
+      const encU16=(v)=>{ const a=new Uint8Array(2); const d=new DataView(a.buffer); d.setUint16(0,v,le); return a; };
+      const encU32=(v)=>{ const a=new Uint8Array(4); const d=new DataView(a.buffer); d.setUint32(0,(v>>>0),le); return a; };
+      const encU64=(v)=>{ const a=new Uint8Array(8); const d=new DataView(a.buffer); const big = BigInt(v); const lo = Number(big & 0xFFFFFFFFn); const hi = Number((big >> 32n) & 0xFFFFFFFFn); d.setUint32(0, lo, le); d.setUint32(4, hi, le); return a; };
+      const encF32=(arr)=>{ const a=new Uint8Array(4*arr.length); const d=new DataView(a.buffer); for(let i=0;i<arr.length;i++) d.setFloat32(i*4, arr[i], le); return a; };
+      FRAME_SCHEMA.fields.forEach(f=>{
+        const name=f.name, t=f.type; const v=obj[name];
+        // Skip CRC placeholder here; we'll append the computed CRC at the end
+        if (name === "crc") return;
+        if(t==="uint8") dvpush(encU8(v||0));
+        else if(t==="uint16") dvpush(encU16(v||0));
+        else if(t==="uint32") dvpush(encU32(v||0));
+        else if(t==="uint64") dvpush(encU64(v||0));
+        else if(t==="float32") { const count=f.count||1; const arr=(v||Array(count).fill(0)); if(arr.length<count) arr.push(...Array(count-arr.length).fill(0)); dvpush(encF32(arr.slice(0,count))); }
+        else if(t==="bytes") { const size=f.size; const b=new Uint8Array(size); (v||new Uint8Array()).slice(0,size).forEach((x,i)=>b[i]=x); dvpush(b); }
+        else if(t==="string") { const size=f.size; const enc = new TextEncoder(); const b = enc.encode(String(v||"")); const out = new Uint8Array(size); out.set(b.slice(0,size)); dvpush(out); }
+      });
+      let payload = parts.length? Uint8Array.from(parts.reduce((a,b)=>a.concat(Array.from(b)), [])) : new Uint8Array();
+      const c = crc32(payload);
+      const out = new Uint8Array(payload.length + 4);
+      out.set(payload,0);
+      const dv = new DataView(out.buffer);
+      dv.setUint32(payload.length, c, true);
+      return out;
+    }
+
+    function sendFrame(){
+      updateInputIndicators();
+      const sem = FRAME_SCHEMA.semantics?.main;
+      const bits = sem?.mode?.bits || { emergency_stop:7, joint_space:6, elbow_control:5, compliance:4 };
+      // 低4位（实时/预定轨迹）按最新规则：
+      // 实时操控：keyboard/gamepad=0, teleop=1, vision_servo=2, shared_control=3（保留4-7）
+      // 预定轨迹：extend=8, retract=9（保留10-15）
+      const emergencyChecked = !!featureToggles.querySelector('input[data-toggle="emergency_stop"]')?.checked;
+      const modeSel = emergencyChecked ? "keyboard" : selectedControlMode();
+      const trajSel = trajectoryGroup.querySelector('input[name=trajectory]:checked')?.value || 'none';
+      // 下位 4 bit 选择（无选择时为 0）
+      let low4 = 0;
+      
+      if (emergencyChecked) {
+        targetAngles[0] = armAngles[0];
+        targetAngles[1] = armAngles[1];
+        targetAngles[2] = armAngles[2];
+        targetAngles[3] = armAngles[3];
+        targetInitialized = true;
+        targetPosition = armForwardKinematics(targetAngles);
+        positionTargetInitialized = true;
+      }
+
+      if (modeSel === 'trajectory') {
+        if (trajSel === 'none') low4 = 8;
+        else if (trajSel === 'extend') low4 = 9;
+        else if (trajSel === 'retract') low4 = 10;
+        else if (trajSel === 'home') low4 = 11;
+        else low4 = 0;
+      } else if (modeSel === 'keyboard') {
+        low4 = 0;
+        if (!emergencyChecked) applyKeyboardStep();
+        else updateKeyboardTargetHint();
+      }
+      else if (modeSel === 'gamepad') {
+        low4 = 0;
+        if (!emergencyChecked) {
+          syncKeyboardModeFeatureBit();
+          applyGamepadStep();
+        } else {
+          updateKeyboardTargetHint();
+        }
+      }
+      else if (modeSel === 'teleop') low4 = 1;
+      else if (modeSel === 'vision') low4 = 2;
+      else if (modeSel === 'shared') low4 = 3;
+      // 高位功能开关
+      let modeVal = 0;
+      featureToggles.querySelectorAll('input[type=checkbox]').forEach(chk => {
+        const id = chk.getAttribute('data-toggle');
+        if (chk.checked) {
+          if (id === 'emergency_stop') modeVal |= (1 << bits.emergency_stop);
+          else if (id === 'joint_space') modeVal |= (1 << bits.joint_space);
+          else if (id === 'elbow_control') modeVal |= (1 << bits.elbow_control);
+          else if (id === 'compliance') modeVal |= (1 << bits.compliance);
+        }
+      });
+      modeVal |= (low4 & 0x0F);
+      // 统一构造 order：
+      // - 第1-7位为关节控制映射（±1）：
+      //   1:E/Q，2:W/S，3:D/A，4:I/K，5:L/J，6:↑/↓，7:→/←
+      // - 第11-16位为 xyzrpy，当前占位 0.0
+      const orderCount = getCount("order", 16);
+      const orderVec = Array(orderCount).fill(0);
+      const setPair = (idx, posKey, negKey) => {
+        if (idx >= orderVec.length) return;
+        const val = (pressed.has(posKey) ? 1 : 0) - (pressed.has(negKey) ? 1 : 0);
+        orderVec[idx] = val;
+      };
+
+      if (modeSel === 'keyboard' || modeSel === 'gamepad') {
+        orderVec[0] = targetAngles[0]; // J1 Target Angle
+        orderVec[1] = targetAngles[1]; // J2 Target Angle
+        orderVec[2] = targetAngles[2]; // J3 Target Angle
+        orderVec[3] = targetAngles[3]; // Gripper/KB_D
+        // You can still keep other mapping logic below if needed.
+      } else {
+        setPair(0, "KeyE", "KeyQ");
+        setPair(1, "KeyW", "KeyS");
+        setPair(2, "KeyD", "KeyA");
+      }
+      
+      const tsMs = Date.now();
+      const obj = {
+        ind: frameCounter++,
+        time: tsMs,
+        angle: Array(getCount("angle",6)).fill(FRAME_SCHEMA.invalid_fill?.float32 ?? -1.0),
+        current: Array(getCount("current",6)).fill(FRAME_SCHEMA.invalid_fill?.float32 ?? -1.0),
+        torque: Array(getCount("torque",6)).fill(FRAME_SCHEMA.invalid_fill?.float32 ?? -1.0),
+        pose_ee: Array(getCount("pose_ee",6)).fill(FRAME_SCHEMA.invalid_fill?.float32 ?? -1.0),
+        pose_elbow: Array(getCount("pose_elbow",6)).fill(FRAME_SCHEMA.invalid_fill?.float32 ?? -1.0),
+        mode: modeVal,
+        order: orderVec,
+        reserved: new Uint8Array(getSize("reserved",16)).fill(FRAME_SCHEMA.invalid_fill?.bytes ?? 255),
+        note: modeSel === "gamepad" ? "ui:gamepad" : "ui",
+      };
+      const frame = packFrame(obj);
+      lastPacket.textContent = `Last packet → mode:${modeVal} nibble:${(modeVal&0x0F)} ts:${tsMs}`;
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(frame);
+    }
+
+    // Auto heartbeat
+    connectUdpWebSocket();
+    setInterval(() => { if (autoSend) sendFrame(); }, 100);
+  </script>
+</body>
+</html>

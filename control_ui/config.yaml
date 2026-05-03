@@ -1,0 +1,42 @@
+udp:
+  host: "192.168.1.35"
+  recv_port: 14550
+  send_port: 14551
+  loop_filter: 0
+  matlab_host: "127.0.0.1"
+  matlab_port: 50010
+  hand_host: "127.0.0.1"
+  hand_port: 50020
+  glove_port: 50030
+
+local_checks:
+  hand_udp_host: "127.0.0.1"
+  hand_udp_port: 25001
+  local_program_delay_sec: 5
+  hand_ready_timeout_sec: 10
+  glove_ready_timeout_sec: 15
+
+websocket:
+  host: "0.0.0.0"
+  port: 8080
+  path: "/udp"
+  status_path: "/status"
+
+api:
+  host: "0.0.0.0"
+  port: 8090
+
+jetson:
+  host: "192.168.1.35"
+  user: "mumu"
+  start_script: "/home/mumu/robot/start_arm.sh"
+  stop_script: "/home/mumu/robot/stop_arm.sh"
+  check_script: "/home/mumu/robot/check_arm.sh"
+
+programs:
+  hand_exe: "wa100-sdk-publish\\build\\bin\\udp_receiver_unity.exe"
+  hand_args: "right"
+  unity_glove: "right1\\My project.exe"
+  unity_glove_args: "-screen-fullscreen 0 -screen-width 640 -screen-height 360"
+  matlab_exe: "C:\\Program Files\\MATLAB\\R2022b\\bin\\matlab.exe"
+  matlab_start_script: "D:\\robot_demo\\start_master_hand.m"

@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>h5_udp_bridge</name>
+  <version>0.1.0</version>
+  <description>ROS1 UDP bridge for the H5 arm teleoperation console.</description>
+
+  <maintainer email="robot@example.com">robot</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+</package>

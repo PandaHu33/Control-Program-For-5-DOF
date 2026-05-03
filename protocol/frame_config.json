@@ -1,0 +1,85 @@
+{
+  "endianness": "little",
+  "crc": {
+    "type": "crc32",
+    "field": "crc"
+  },
+  "invalid_fill": {
+    "uint8": 255,
+    "uint16": 65535,
+    "uint32": 4294967295,
+    "uint64": "18446744073709551615",
+    "float32": -1.0,
+    "bytes": 255,
+    "string": ""
+  },
+  "semantics": {
+    "main": {
+      "valid_fields": ["ind","time","mode","order","note","crc"],
+      "mode": {
+        "reserved": [255],
+        "bits": {
+          "emergency_stop": 7,
+          "joint_space": 6,
+          "elbow_control": 5,
+          "compliance": 4
+        },
+        "selector_low_nibble": {
+          "none": 0,
+          "keyboard": 0,
+          "teleop": 1,
+          "vision_servo": 2,
+          "shared_control": 3,
+          "trajectory_extend": 8,
+          "trajectory_retract": 9,
+          "trajectory_home": 10,
+          "comment": "低4位规则：实时操控 0..3（keyboard=0, teleop=1, vision=2, shared=3）；预定轨迹 8..10（extend=8, retract=9, home=10）；未选择为 0；保留 realtime 4..7, trajectory 11..15"
+        }
+      },
+      "order": {
+        "layout": {
+          "pairs": [
+            {"index": 1, "pos": "E", "neg": "Q"},
+            {"index": 2, "pos": "W", "neg": "S"},
+            {"index": 3, "pos": "D", "neg": "A"},
+            {"index": 4, "pos": "I", "neg": "K"},
+            {"index": 5, "pos": "L", "neg": "J"},
+            {"index": 6, "pos": "Up", "neg": "Down"},
+            {"index": 7, "pos": "Right", "neg": "Left"}
+          ],
+          "axes": ["x","y","z","roll","pitch","yaw"],
+          "axes_index_start": 11,
+          "comment": "主端 order 定义：1-7 为关节控制按键成对的 ±1；11-16 为 xyzrpy；其余填 0.0"
+        }
+      }
+    },
+    "sub": {
+      "valid_fields": ["ind","time","angle","current","torque","pose_ee","pose_elbow","mode","note","crc"],
+      "mode": {
+        "reserved": [0,255],
+        "status_nibble": {
+          "ready": 1,
+          "executing": 2,
+          "failed": 9,
+          "cannot_execute": 10,
+          "emergency": 15
+        },
+        "selector_low_nibble": "mirror_main"
+      }
+    }
+  },
+  "fields": [
+    {"name": "ind", "type": "uint32"},
+    {"name": "time", "type": "uint64"},
+    {"name": "angle", "type": "float32", "count": 7},
+    {"name": "current", "type": "float32", "count": 7},
+    {"name": "torque", "type": "float32", "count": 7},
+    {"name": "pose_ee", "type": "float32", "count": 6},
+    {"name": "pose_elbow", "type": "float32", "count": 6},
+    {"name": "mode", "type": "uint8"},
+    {"name": "order", "type": "float32", "count": 16},
+    {"name": "reserved", "type": "bytes", "size": 16},
+    {"name": "note", "type": "string", "size": 64, "encoding": "utf-8"},
+    {"name": "crc", "type": "uint32"}
+  ]
+}
