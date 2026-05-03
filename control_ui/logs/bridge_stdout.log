@@ -1,17 +1,18 @@
-[UDP] recv on 0.0.0.0:14550 -> WS; send to 192.168.1.35:14551
 [WS] bridge on ws://0.0.0.0:8080/udp; status ws://0.0.0.0:8080/status
+[UDP] recv on 0.0.0.0:14550 -> WS; send to 192.168.1.35:14551
 [INFO] Demo Console backend started
 [HTTP] REST API on http://0.0.0.0:8090
-[STATUS] network OFFLINE -> ONLINE | 收到 Jetson UDP 数据
-[STATUS] udp_bridge OFFLINE -> ONLINE | 收到 H5 UDP 桥接心跳/遥测
 [ACTION] GET /api/status
 [HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
 [ACTION] POST /api/system/start
 [STATUS] jetson OFFLINE -> ONLINE | Jetson ping 正常
+[STATUS] network OFFLINE -> ONLINE | 网络链路可达
 [ACTION] GET /api/status
 [HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
-[WS] client ('127.0.0.1', 57905) connected path=/status
-[WS] client ('127.0.0.1', 50783) connected path=/udp
+[WS] client ('127.0.0.1', 51318) connected path=/status
+[WS] client ('127.0.0.1', 57499) connected path=/udp
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WARNING] UDP 远端端口暂不可达，遥测监听继续保持 | [WinError 10054] 远程主机强迫关闭了一个现有的连接。
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
@@ -53,6 +54,45 @@
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WARNING] UDP 远端端口暂不可达，遥测监听继续保持 | [WinError 10054] 远程主机强迫关闭了一个现有的连接。
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[STATUS] udp_bridge OFFLINE -> ONLINE | H5 UDP 桥接节点运行中
 [STATUS] arm OFFLINE -> ONLINE | CAN 节点和机械臂控制节点运行中
 [INFO] 等待 5 秒后启动本地手/手套程序
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
@@ -93,6 +133,8 @@
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[STATUS] network OFFLINE -> ONLINE | 收到 Jetson UDP 数据
+[STATUS] udp_bridge OFFLINE -> ONLINE | 收到 H5 UDP 桥接心跳/遥测
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
@@ -105,8 +147,211 @@
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[STATUS] hand OFFLINE -> ERROR | 程序不存在: D:\桌面\主端程序beta for 5-dof\control_ui\bridge\wa100-sdk-publish\build\bin\udp_receiver_unity.exe
-[STATUS] glove OFFLINE -> ERROR | 程序不存在: D:\桌面\主端程序beta for 5-dof\control_ui\bridge\right1\My project.exe
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[STATUS] hand OFFLINE -> WARNING | 程序已启动 pid=29732，等待本地监听
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[STATUS] hand WARNING -> ERROR | 程序已退出，退出码 4294967295
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[STATUS] hand ERROR -> WARNING | 进程运行中，但未监听 UDP 127.0.0.1:25001
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[STATUS] hand WARNING -> ERROR | 程序已退出，退出码 4294967295
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[STATUS] glove OFFLINE -> WARNING | 程序已启动 pid=1268，等待本地监听
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[STATUS] hand_link OFFLINE -> WARNING | 手/手套进程存在，但未检测到完整本机 UDP 链路
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[STATUS] glove WARNING -> ONLINE | 进程运行中，本地 UDP 端点: 0.0.0.0:53135/pid=1268
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [STATUS] matlab OFFLINE -> ONLINE | USB 手柄由显控浏览器读取，主手/Simulink 已移入 Debug
 [STATE] 系统状态 OFFLINE -> ERROR | 初始化/启动流程完成，部分模块可能失败
 [HTTP] 127.0.0.1 "POST /api/system/start HTTP/1.1" 200 -
@@ -181,66 +426,6 @@
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[ACTION] GET /api/status
-[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[ACTION] GET /api/status
-[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[ACTION] GET /api/status
-[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[ACTION] GET /api/status
-[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[ACTION] GET /api/status
-[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [ACTION] GET /api/status
 [HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
@@ -338,6 +523,60 @@
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[ACTION] GET /api/status
+[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[ACTION] GET /api/status
+[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[ACTION] GET /api/status
+[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[ACTION] GET /api/status
+[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[ACTION] GET /api/status
+[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[ACTION] GET /api/status
+[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[ACTION] GET /api/status
+[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[ACTION] GET /api/status
+[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[ACTION] GET /api/status
+[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[ACTION] GET /api/status
+[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [ACTION] GET /api/status
 [HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
@@ -387,44 +626,12 @@
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[ACTION] GET /api/status
-[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [ACTION] GET /api/status
 [HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[ACTION] GET /api/status
-[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[ACTION] GET /api/status
-[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
@@ -448,14 +655,6 @@
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[ACTION] GET /api/status
-[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
@@ -465,15 +664,6 @@
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[ACTION] GET /api/status
-[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
@@ -496,13 +686,6 @@
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[ACTION] GET /api/status
-[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
-[WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
@@ -516,3 +699,162 @@
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
 [WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[ACTION] GET /api/status
+[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[ACTION] GET /api/status
+[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[ACTION] GET /api/status
+[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[ACTION] GET /api/status
+[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[ACTION] GET /api/status
+[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[ACTION] GET /api/status
+[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[ACTION] GET /api/status
+[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[WS->UDP] sent 293 bytes to 192.168.1.35:14551
+[ACTION] GET /api/status
+[HTTP] 127.0.0.1 "GET /api/status HTTP/1.1" 200 -

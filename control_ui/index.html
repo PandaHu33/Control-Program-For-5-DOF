@@ -99,6 +99,8 @@
     .keyboard-mode-selector label { cursor: pointer; border-radius: 8px; padding: 6px 10px; color: var(--muted); font-size: 13px; }
     .keyboard-mode-selector input { width: auto; margin: 0 5px 0 0; }
     .keyboard-mode-selector label:has(input:checked) { color: #fff; background: rgba(56,189,248,0.18); border: 1px solid rgba(56,189,248,0.36); }
+    .keyboard-mode-selector label:has(input:disabled),
+    .radios label:has(input:disabled) { opacity: .45; cursor: not-allowed; }
     .keyboard-mode-selector label.pending { opacity: .68; cursor: wait; }
     #usbCameraFrame.camera-rotated-ccw { padding-top: 100%; }
     #usbCameraFrame.camera-rotated-ccw video {
@@ -1055,6 +1057,54 @@
       if (input) input.checked = true;
     }
 
+    function isBlockedVirtualGamepad(gamepad) {
+      const id = String(gamepad?.id || "");
+      return /Tetherscript Virtual Joystick/i.test(id)
+        || (/Vendor:\s*f00f/i.test(id) && /Product:\s*0001/i.test(id));
+    }
+
+    function connectedGamepads() {
+      if (!navigator.getGamepads) return [];
+      return Array.from(navigator.getGamepads()).filter(Boolean);
+    }
+
+    function gamepadDisableReason(blockedPads) {
+      return blockedPads.length
+        ? "检测到 Tetherscript 虚拟手柄，已禁用手柄控制；请连接 USB 实体手柄"
+        : "USB 手柄未连接";
+    }
+
+    function gamepadInputElements() {
+      return [
+        inputDeviceMode?.querySelector('input[name="inputDeviceMode"][value="gamepad"]'),
+        controlModeGroup?.querySelector('input[name=controlMode][value="gamepad"]'),
+      ].filter(Boolean);
+    }
+
+    function updateGamepadAvailability() {
+      const pads = connectedGamepads();
+      const blocked = pads.filter(isBlockedVirtualGamepad);
+      const usable = pads.filter((pad) => !isBlockedVirtualGamepad(pad));
+      const disabled = usable.length === 0;
+      const reason = gamepadDisableReason(blocked);
+      gamepadInputElements().forEach((input) => {
+        input.disabled = disabled;
+        input.closest("label")?.setAttribute("title", disabled ? reason : "");
+      });
+      if (disabled) {
+        activeGamepadIndex = null;
+        if (selectedControlMode() === "gamepad") {
+          pressed.clear();
+          updateKeyUI();
+          selectControlMode("keyboard");
+          appendConsoleLog("WARNING", reason);
+        } else {
+          syncInputDeviceMode("keyboard");
+        }
+      }
+      return { pads, blocked, usable, disabled, reason };
+    }
+
     function motionSourceLabel() {
       return selectedControlMode() === "gamepad" ? "手柄" : "键盘";
     }
@@ -1298,8 +1348,8 @@
     }
 
     function getActiveGamepad() {
-      if (!navigator.getGamepads) return null;
-      const pads = Array.from(navigator.getGamepads()).filter(Boolean);
+      const state = updateGamepadAvailability();
+      const pads = state.usable;
       if (!pads.length) return null;
       if (activeGamepadIndex !== null) {
         const active = pads.find((pad) => pad.index === activeGamepadIndex);
@@ -1311,12 +1361,17 @@
 
     function updateGamepadStatus(gamepad=null) {
       if (!gamepadStatusHint) return;
-      const gp = gamepad || getActiveGamepad();
+      const state = updateGamepadAvailability();
+      const eventPadUsable = gamepad && !isBlockedVirtualGamepad(gamepad) ? gamepad : null;
+      const gp = eventPadUsable || (activeGamepadIndex !== null
+        ? state.usable.find((pad) => pad.index === activeGamepadIndex)
+        : state.usable[0]);
       if (!gp) {
-        gamepadStatusHint.textContent = "USB 手柄未连接";
+        gamepadStatusHint.textContent = state.reason;
         gamepadStatusHint.classList.add("warning");
         return;
       }
+      activeGamepadIndex = gp.index;
       const ax = applyGamepadDeadzone(gp.axes?.[0] || 0);
       const ay = applyGamepadDeadzone(gp.axes?.[1] || 0);
       const zAxis = gamepadZAxis(gp);
@@ -1616,9 +1671,15 @@
     });
 
     window.addEventListener("gamepadconnected", (event) => {
-      activeGamepadIndex = event.gamepad.index;
-      updateGamepadStatus(event.gamepad);
-      appendConsoleLog("INFO", "USB 手柄已连接", event.gamepad.id);
+      if (isBlockedVirtualGamepad(event.gamepad)) {
+        updateGamepadAvailability();
+        updateGamepadStatus();
+        appendConsoleLog("WARNING", "检测到虚拟手柄，已禁用手柄控制", event.gamepad.id);
+      } else {
+        activeGamepadIndex = event.gamepad.index;
+        updateGamepadStatus(event.gamepad);
+        appendConsoleLog("INFO", "USB 手柄已连接", event.gamepad.id);
+      }
       updateInputIndicators();
       if (autoSend) sendFrame();
     });
@@ -1631,6 +1692,11 @@
 
     // 控制面板事件
     function handleControlModeChange() {
+      const gamepadState = updateGamepadAvailability();
+      if (selectedControlMode() === "gamepad" && gamepadState.disabled) {
+        selectControlMode("keyboard");
+        updateGamepadStatus();
+      }
       syncKeyboardModeFeatureBit();
       if (selectedControlMode() === "gamepad") {
         pressed.clear();
@@ -1653,6 +1719,14 @@
     if (inputDeviceMode) {
       inputDeviceMode.addEventListener("change", () => {
         const mode = selectedInputDeviceMode();
+        const gamepadState = updateGamepadAvailability();
+        if (mode === "gamepad" && gamepadState.disabled) {
+          appendConsoleLog("WARNING", gamepadState.reason);
+          selectControlMode("keyboard");
+          updateGamepadStatus();
+          handleControlModeChange();
+          return;
+        }
         if (mode) selectControlMode(mode);
         handleControlModeChange();
       });
@@ -1671,6 +1745,7 @@
         if (autoSend) sendFrame();
       });
     }
+    updateGamepadAvailability();
     syncKeyboardModeFeatureBit();
     syncInputDeviceMode(selectedControlMode());
     updateGamepadStatus();
