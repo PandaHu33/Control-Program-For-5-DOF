@@ -1,0 +1,13 @@
+<launch>
+ 
+	<node name="rosbag" pkg="rosbag" type="play" respawn="false" args="--delay=1 --queue=1000 $(find tag_detector)/bag/images.bag" />
+    <!-- 从tag_detector/bag/images.bag中获取图像数据，并且显示出来-->
+ 
+    <!-- 运行节点tag_detector，将image_raw数据转换为“/camera/image”topic；cam_cal_file应该就是相机矫正的文件；board_config_file应该就是记录了MarkerID对应坐标（ID和四个角点） -->
+    <node pkg="mainpulator" type="tag_detector" name="tag_detector" output="screen">
+        <remap from="~image_raw" to="/camera/image"/>
+        <param name="cam_cal_file" type="string" value="$(find tag_detector)/config/camera.yml"/>
+        <param name="board_config_file" type="string" value="$(find tag_detector)/config/a.yml"/>
+    </node>
+ 
+</launch>

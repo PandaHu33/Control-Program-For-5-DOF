@@ -1,0 +1,17 @@
+<launch>
+    <!--打开小海龟画面-->
+    <node pkg="turtlesim" type="turtlesim_node" name="turtlesim_node"/>
+    <!--打开手柄控制节点-->
+    <node pkg="wheeltec_joy" type="joycontrol" name="joy_control" output="screen">
+       <param name="axis_linear"   type="int"      value="1" />
+       <param name="axis_angular"  type="int"      value="0"/>
+       <param name="scale_linear"   type="int"      value="2"/>
+       <param name="scale_angular"  type="int"      value="3"/>
+
+       <param name="vlinear"       type="double"   value="2" />
+       <param name="vangular"      type="double"   value="3"/>
+       <remap from="/cmd_vel" to="/turtle1/cmd_vel" />
+    </node>
+    <!--获取手柄数据节点-->
+    <node  respawn="true" pkg="joy" type="joy_node" name="joystick" /> 
+</launch>

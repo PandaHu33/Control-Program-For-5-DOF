@@ -1,5 +1,5 @@
 param(
-    [string]$User = "mumu",
+    [string]$User = "night",
     [string]$HostIp = "192.168.1.35"
 )
 
@@ -50,7 +50,7 @@ if ($LASTEXITCODE -ne 0) {
 
 # 5. Copy public key to Jetson
 Write-Host "[INFO] Installing public key to Jetson..."
-Write-Host "[INFO] 这一步会要求输入一次板卡 mumu 用户密码。"
+Write-Host "[INFO] 这一步会要求输入一次板卡 night 用户密码。"
 
 Get-Content $pubKeyPath | ssh -o StrictHostKeyChecking=accept-new "$User@$HostIp" "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"
 

@@ -28,10 +28,10 @@ api:
 
 jetson:
   host: "192.168.1.35"
-  user: "mumu"
-  start_script: "/home/mumu/robot/start_arm.sh"
-  stop_script: "/home/mumu/robot/stop_arm.sh"
-  check_script: "/home/mumu/robot/check_arm.sh"
+  user: "night"
+  start_script: "/home/night/robot/start_arm.sh"
+  stop_script: "/home/night/robot/stop_arm.sh"
+  check_script: "/home/night/robot/check_arm.sh"
 
 programs:
   hand_exe: "wa100-sdk-publish\\build\\bin\\udp_receiver_unity.exe"

@@ -243,12 +243,12 @@ try {
     Write-Host ""
     Write-Host "Common causes:" -ForegroundColor Yellow
     Write-Host "  1. Windows to Jetson SSH key login is not configured."
-    Write-Host "  2. /home/mumu/robot/start_arm.sh is not deployed on Jetson."
+    Write-Host "  2. /home/night/robot/start_arm.sh is not deployed on Jetson."
     Write-Host "  3. Ports 8080, 8090, or 14550 are occupied."
     Write-Host "  4. Jetson ROS workspace or launch file names are wrong."
     Write-Host ""
     Write-Host "Manual SSH test:"
-    Write-Host '  ssh -o BatchMode=yes -o ConnectTimeout=5 mumu@192.168.1.35 "echo SSH_OK"'
+    Write-Host '  ssh -o BatchMode=yes -o ConnectTimeout=5 -o UserKnownHostsFile=NUL -o StrictHostKeyChecking=no -o LogLevel=ERROR night@192.168.1.35 "echo SSH_OK"'
     exit 1
 } finally {
     Stop-SystemIfNeeded

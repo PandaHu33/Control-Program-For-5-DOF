@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ROS1 on Ubuntu 20.04 uses Noetic.
-export ROS_DISTRO="${ROS_DISTRO:-noetic}"
+# ROS1 on Ubuntu 18.04 uses Melodic.
+export ROS_DISTRO="${ROS_DISTRO:-melodic}"
 export ROS_SETUP="/opt/ros/${ROS_DISTRO}/setup.bash"
 export ROS_MASTER_URI="${ROS_MASTER_URI:-http://192.168.1.35:11311}"
 export ROS_IP="${ROS_IP:-192.168.1.35}"
 
 # Change this to your real catkin workspace on your system.
-export ROBOT_WS="${ROBOT_WS:-/home/mumu/DataSet_ws}"
+export ROBOT_WS="${ROBOT_WS:-/home/night/DataSet_ws}"
 export ROBOT_WS_SETUP="${ROBOT_WS}/devel/setup.bash"
 
 # Runtime files.
-export ROBOT_RUNTIME_DIR="${ROBOT_RUNTIME_DIR:-/home/mumu/robot/runtime}"
-export ROBOT_LOG_DIR="${ROBOT_LOG_DIR:-/home/mumu/robot/logs}"
+export ROBOT_RUNTIME_DIR="${ROBOT_RUNTIME_DIR:-/home/night/robot/runtime}"
+export ROBOT_LOG_DIR="${ROBOT_LOG_DIR:-/home/night/robot/logs}"
 
 # Replace these commands with your actual ROS package/node or roslaunch commands.
 export CAN_CMD="${CAN_CMD:-roslaunch mainpulator socketcan.launch}"

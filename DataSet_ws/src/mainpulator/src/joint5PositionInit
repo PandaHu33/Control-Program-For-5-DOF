@@ -1,0 +1,26 @@
+
+if(joint.getid()==5)
+        {
+            memset(frames.data,0,sizeof(frames.data));
+            memset(reframes.data,0,sizeof(reframes.data));   
+            TPDOmap[1] = 0x01;
+            TPDOmap[3] = 0x01;
+            TPDOmap[4] = 0x10;
+            TPDOmap[6] = 0x78;
+            TPDOmap[7] = 0x60;
+            memcpy(frames.data,TPDOmap,sizeof(TPDOmap));
+            SocketWrite(frames,sock_fd);
+            SocketRead(reframes,sock_fd);
+        }else{
+
+            memset(frames.data,0,sizeof(frames.data));
+            memset(reframes.data,0,sizeof(reframes.data));   
+            TPDOmap[1] = 0x01;
+            TPDOmap[3] = 0x01;
+            TPDOmap[4] = 0x10;
+            TPDOmap[6] = 0x40;
+            TPDOmap[7] = 0x60;
+            memcpy(frames.data,TPDOmap,sizeof(TPDOmap));
+            SocketWrite(frames,sock_fd);
+            SocketRead(reframes,sock_fd);
+        }

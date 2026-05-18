@@ -1,0 +1,5 @@
+<launch>    
+    <node pkg="mainpulator" type="test_node" name="test_node" output="screen" >
+        <param name = "control_type"  type = "string" value = "PID" />
+    </node>
+</launch>

@@ -1,4 +1,5 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 from __future__ import print_function
 
 import binascii
@@ -193,6 +194,7 @@ class H5UdpBridge(object):
         self.last_ind = 0
         self.last_selector = 0
         self.telemetry_ind = 0
+        self.last_imitation_state_time = 0.0
 
     def next_telemetry_ind(self):
         value = self.telemetry_ind
@@ -222,8 +224,10 @@ class H5UdpBridge(object):
             self.publish_status("ERROR", "BAD_TELEMETRY_JSON", str(exc))
 
     def on_matlab_dataplot(self, msg):
+        if time.time() - self.last_imitation_state_time < 1.0:
+            return
         # test_node.cpp publishes /Matlab/dataplot as:
-        # position[1]=joint5 actual, [3:6]=expected q, [6:9]=actual q.
+        # position[2]=joint4 actual, [3:6]=expected q, [6:9]=actual q.
         # velocity[0:3]=expected dq, [3:6]=actual dq.
         # effort[0:3]=force feedback, [6:9]=q error.
         position = list(msg.position)
@@ -240,7 +244,7 @@ class H5UdpBridge(object):
         payload = {
             "ind": self.next_telemetry_ind(),
             "time": stamp_ms(msg),
-            "angle": actual_q + [at(position, 1)] + expected_q,
+            "angle": actual_q + [at(position, 2)] + expected_q,
             "current": actual_dq + [0.0] + expected_dq,
             "torque": force_feedback + [0.0] + q_error,
             "pose_ee": [0.0] * 6,
@@ -252,14 +256,15 @@ class H5UdpBridge(object):
 
     def on_imitation_state(self, msg):
         # test_node.cpp publishes /robot/imitation_state as current q/dq:
-        # position[0:3]=actual q, position[3]=gripper/KB_D, velocity[0:3]=actual dq.
+        # position[0:3]=actual q, position[3]=joint4, velocity[0:3]=actual dq.
         position = list(msg.position)
         velocity = list(msg.velocity)
+        self.last_imitation_state_time = time.time()
         payload = {
             "ind": self.next_telemetry_ind(),
             "time": stamp_ms(msg),
             "angle": [at(position, 0), at(position, 1), at(position, 2), at(position, 3), -1.0, -1.0, -1.0],
-            "current": [at(velocity, 0), at(velocity, 1), at(velocity, 2), 0.0, -1.0, -1.0, -1.0],
+            "current": [at(velocity, 0), at(velocity, 1), at(velocity, 2), at(velocity, 3, 0.0), -1.0, -1.0, -1.0],
             "torque": [-1.0] * 7,
             "pose_ee": [0.0] * 6,
             "pose_elbow": [0.0] * 6,
@@ -278,26 +283,30 @@ class H5UdpBridge(object):
                 pick_named_or_index(names, position, ["shoulder_lift", "shoulder_lift_joint", "joint2", "joint_2", "J2"], 1),
                 pick_named_or_index(names, position, ["elbow_flex", "elbow_flex_joint", "joint3", "joint_3", "J3"], 2),
             ]
-            gripper = pick_named_or_index(
-                names, position, ["gripper", "gripper_joint", "joint5", "joint_5", "finger", "KB_D"], 3, 0.0
+            joint4 = pick_named_or_index(
+                names, position, ["wrist_roll", "wrist_roll_joint", "joint4", "joint_4", "J4"], 3, 0.0
             )
             actual_dq = [
                 pick_named_or_index(names, velocity, ["shoulder_pan", "shoulder_pan_joint", "joint1", "joint_1", "J1"], 0, 0.0),
                 pick_named_or_index(names, velocity, ["shoulder_lift", "shoulder_lift_joint", "joint2", "joint_2", "J2"], 1, 0.0),
                 pick_named_or_index(names, velocity, ["elbow_flex", "elbow_flex_joint", "joint3", "joint_3", "J3"], 2, 0.0),
             ]
+            joint4_dq = pick_named_or_index(
+                names, velocity, ["wrist_roll", "wrist_roll_joint", "joint4", "joint_4", "J4"], 3, 0.0
+            )
         else:
             if len(position) < 3:
                 return
             actual_q = [at(position, 0), at(position, 1), at(position, 2)]
-            gripper = at(position, 3, 0.0)
+            joint4 = at(position, 3, 0.0)
             actual_dq = [at(velocity, 0, 0.0), at(velocity, 1, 0.0), at(velocity, 2, 0.0)]
+            joint4_dq = at(velocity, 3, 0.0)
 
         payload = {
             "ind": self.next_telemetry_ind(),
             "time": stamp_ms(msg),
-            "angle": actual_q + [gripper, -1.0, -1.0, -1.0],
-            "current": actual_dq + [0.0, -1.0, -1.0, -1.0],
+            "angle": actual_q + [joint4, -1.0, -1.0, -1.0],
+            "current": actual_dq + [joint4_dq, -1.0, -1.0, -1.0],
             "torque": [-1.0] * 7,
             "pose_ee": [0.0] * 6,
             "pose_elbow": [0.0] * 6,
@@ -345,7 +354,7 @@ class H5UdpBridge(object):
         imu_msg.orientation.x = command["order"][0]  # expect_q1
         imu_msg.orientation.y = command["order"][1]  # expect_q2
         imu_msg.orientation.z = command["order"][2]  # expect_q3
-        imu_msg.orientation.w = command["order"][3]  # gripper (KB_D)
+        imu_msg.orientation.w = command["order"][3]  # expect_q4
         imu_msg.angular_velocity.x = command["order"][4]   # expect_dq1
         imu_msg.angular_velocity.y = command["order"][5]   # expect_dq2
         imu_msg.angular_velocity.z = command["order"][6]   # expect_dq3

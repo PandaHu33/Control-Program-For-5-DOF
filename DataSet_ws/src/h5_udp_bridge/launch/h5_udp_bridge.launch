@@ -1,0 +1,23 @@
+<launch>
+  <arg name="listen_ip" default="0.0.0.0" />
+  <arg name="listen_port" default="$(optenv H5_UDP_LISTEN_PORT 14551)" />
+  <arg name="telemetry_target_ip" default="$(optenv H5_TELEMETRY_TARGET_IP 192.168.1.11)" />
+  <arg name="telemetry_target_port" default="$(optenv H5_TELEMETRY_TARGET_PORT 14550)" />
+
+  <node pkg="h5_udp_bridge" type="h5_udp_bridge_node.py" name="h5_udp_bridge" output="screen">
+    <param name="listen_ip" value="$(arg listen_ip)" />
+    <param name="listen_port" value="$(arg listen_port)" />
+    <param name="telemetry_target_ip" value="$(arg telemetry_target_ip)" />
+    <param name="telemetry_target_port" value="$(arg telemetry_target_port)" />
+    <param name="command_topic" value="/h5/arm_command" />
+    <param name="status_topic" value="/h5/udp_status" />
+    <param name="telemetry_topic" value="/arm/h5_telemetry" />
+    <param name="matlab_dataplot_topic" value="/Matlab/dataplot" />
+    <param name="imitation_state_topic" value="/robot/imitation_state" />
+    <param name="drop_bad_crc" value="true" />
+    <param name="command_timeout_sec" value="1.0" />
+    <param name="send_heartbeat" value="true" />
+    <param name="heartbeat_hz" value="2.0" />
+    <param name="learn_telemetry_target" value="true" />
+  </node>
+</launch>

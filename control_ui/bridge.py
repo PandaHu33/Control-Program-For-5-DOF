@@ -122,6 +122,14 @@ jetson_cfg = cfg.get("jetson", {})
 program_cfg = cfg.get("programs", {})
 local_check_cfg = cfg.get("local_checks", {})
 
+SSH_COMMON_OPTIONS = [
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=5",
+    "-o", "UserKnownHostsFile=NUL",
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "LogLevel=ERROR",
+]
+
 WS_HOST = ws_cfg.get("host", "0.0.0.0")
 WS_PORT = int(ws_cfg.get("port", 8080))
 UDP_PATH = ws_cfg.get("path", "/udp")
@@ -281,7 +289,7 @@ def ping_host(host):
 
 def ssh_run(script_key):
     host = jetson_cfg.get("host")
-    user = jetson_cfg.get("user", "mumu")
+    user = jetson_cfg.get("user", "night")
     script = jetson_cfg.get(script_key)
     if not host or not script:
         return False, f"Jetson 配置不完整: host 或 {script_key}"
@@ -290,10 +298,10 @@ def ssh_run(script_key):
 
 def ssh_run_command(command, timeout=20):
     host = jetson_cfg.get("host")
-    user = jetson_cfg.get("user", "mumu")
+    user = jetson_cfg.get("user", "night")
     if not host or not user:
         return False, "Jetson SSH config missing host or user"
-    return run_cmd(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", f"{user}@{host}", command], timeout=timeout)
+    return run_cmd(["ssh", *SSH_COMMON_OPTIONS, f"{user}@{host}", command], timeout=timeout)
 
 
 def parse_arm_status(text):
@@ -638,12 +646,15 @@ def do_command(method, path, body=None):
             return command_result(False, ERROR_HINTS["JETSON_UNREACHABLE"])
         set_module("jetson", "ONLINE", "Jetson ping 正常")
         set_module("network", "ONLINE", "网络链路可达")
-        ok, msg = ssh_run("start_script")
-        if not ok:
-            set_state("ERROR", msg)
-            return command_result(False, f"Jetson 节点启动失败: {msg}")
-        ok_check, check_out = ssh_run("check_script")
-        arm_ok = parse_arm_status(check_out) if ok_check else False
+        jetson_start_ok, jetson_start_msg = ssh_run("start_script")
+        if not jetson_start_ok:
+            set_module("arm", "ERROR", f"Jetson 节点启动失败: {jetson_start_msg}", "CAN_STOPPED")
+            set_module("udp_bridge", "ERROR", "Jetson 节点启动失败")
+            check_out = jetson_start_msg
+            arm_ok = False
+        else:
+            ok_check, check_out = ssh_run("check_script")
+            arm_ok = parse_arm_status(check_out) if ok_check else False
         if LOCAL_PROGRAM_DELAY_SEC > 0:
             log_event("INFO", f"等待 {LOCAL_PROGRAM_DELAY_SEC:g} 秒后启动本地手/手套程序")
             time.sleep(LOCAL_PROGRAM_DELAY_SEC)
@@ -652,7 +663,11 @@ def do_command(method, path, body=None):
         set_module("matlab", "ONLINE", "USB 手柄由显控浏览器读取，主手/Simulink 已移入 Debug")
         ready = arm_ok and hand_ok and glove_ok
         set_state("READY" if ready else "ERROR", "初始化/启动流程完成，部分模块可能失败")
-        return command_result(ready, "初始化/启动流程完成", {"jetson_check": check_out})
+        return command_result(
+            ready,
+            "初始化/启动流程完成",
+            {"jetson_start": jetson_start_msg, "jetson_check": check_out},
+        )
     if path == "/api/system/stop":
         ssh_run("stop_script")
         send_udp(MATLAB_HOST, MATLAB_PORT, "STOP")

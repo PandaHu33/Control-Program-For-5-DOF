@@ -1,0 +1,1823 @@
+#include "mainpulator/mainpulator_param.h"
+#include "mainpulator/mainpulator_control.h"
+#include "mainpulator/MyRoboticKinematics.h"
+
+#include <socketcan_bridge/topic_to_socketcan.h>
+#include <socketcan_bridge/socketcan_to_topic.h>
+#include <Eigen/Eigen>
+#include <Eigen/Dense>
+#include <Eigen/Geometry>
+#include <Eigen/Eigenvalues>
+//用到传9消息,需要一个合适的消息类型
+#include <sensor_msgs/Imu.h>
+#define PI acos(-1)
+using namespace std;
+using namespace Eigen;
+string control_type;
+control::mainpulator joint1(1, 262144); //pi   //12509
+control::mainpulator joint2(2, 262144); //pi
+control::mainpulator joint3(3, 196608); //196608//0.75pi   //236009//367081//新机械臂327680向下，65536向上
+
+control::mainpulator joint4(4, 262144);
+control::mainpulator joint5(5, 2000);
+std_msgs::Bool stop_flag;
+double expect_q1 = 0, expect_q2 = 0, expect_q3 = 0, enpect_q5 = -2;
+double expect_dq1 = 0, expect_dq2 = 0, expect_dq3 = 0;
+double expect_ddq1 = 0, expect_ddq2 = 0, expect_ddq3 = 0;
+bool joint5_state = false;
+//bool joint5_open = false;
+
+bool joint5_open = false;
+bool joint5_homing = false;
+double joint5_catch_TeleOpe = 0.0;
+
+int count_time_teleope = 0;
+double tol3 = 0;
+double tol5 = 0;
+int trajectory_flag = 0;
+
+Vector3d Kinematics_Solver(double q1, double q2, double q3, double KB_W, double KB_A, double KB_Q, double KB_SPEEDUP, double SPEEDUP1, double SPEEDUP2, double SPEEDUP3);
+Vector3d KinematicsSolverTarget(Vector3d actual_q, double joint4_actual_angle, double KB_W_, double KB_A_, double KB_Q_, double KB_SPEEDUP_, double SPEEDUP1, double SPEEDUP2, double SPEEDUP3);
+Vector3d Kinematics_theta_update;
+Vector3d Kinematics_expect_q;
+
+Vector3d arc(Vector3d &expect_q, Vector3d &expect_qd, Vector3d &expect_qdd, Vector3d &q, Vector3d &qd, double t);
+Vector3d slidemodecontrol(Vector3d &expect_q, Vector3d &expect_qd, Vector3d &expect_qdd, Vector3d &q, Vector3d &qd, double t);
+void param_init();
+int demoKinematics();
+
+/********************************************/
+//键盘控制相关增量变量
+double q_TeleopeKB = 0.00001;
+double KB_W = 0.0;
+double KB_S = 0.0;
+double KB_A = 0.0;
+double KB_D = 0.0;
+double KB_Q = 0.0;
+double KB_E = 0.0;
+double Aceleration_KB = 0.0;
+double Velocity_KB = 0.0;
+
+double joint4angle = 0.0;
+double joint5angle = 0.0;
+
+double gripper_ultimate = 5.2;
+
+double joint4_actual_angle = 0.0001;
+double joint5_actual_angle = 0.0;
+double joint4_actual_velocity = 0.0;
+double joint5_actual_current = 0.0;
+
+double Kinematics_r = 0.0;
+double Kinematics_x = 0.0;
+double Kinematics_y = 0.0;
+double Kinematics_z = 0.0;
+
+double KB_SPEEDUP = 0.0;
+double KB_TURNLR = 0.0;
+
+double dthp1 = 0;
+double dthp2 = 0;
+
+double dthp3 = 0;
+double dthp4 = 0;
+double thp1 = 15.5;
+double thp2 = 13;
+double thp3 = 15;
+double thp4 = 0;
+
+double us1_1 = 0;
+double ua_1 = 0;
+double us3 = 0;
+double u_1 = 0;
+
+double q1 = 0.001;
+double q2 = -1.57;
+double q3 = -1.57;
+double gamma1 = 200;
+double gamma2 = 100;
+double gamma3 = 100;
+double gamma4 = 500;
+/************************************************/
+/********************矩阵定义*********************/
+double m1 = 10;
+double m2 = 1.7;
+double l1 = 0.424;
+//double l2 = 0.268;
+double l2 = 0.325;
+
+vector<double> visual_received_angle(5, 0);
+
+//g根据安装方向修改 橙色底座为-------
+double g = -9.8;
+//实际角度
+Vector3d q;
+//急停瞬间的初始角度
+vector<double> initial_q(5, 0.0);
+//实际角速度
+Vector3d qd;
+//期望角度
+Vector3d expect_q;
+//期望角速度
+Vector3d expect_qd;
+//期望角加速度
+Vector3d expect_qdd;
+Vector3d err;
+Vector3d derr;
+
+Vector2d M;
+
+//参数表
+Matrix3d k1;
+Matrix3d k2;
+
+Vector3d qr;
+Vector3d dqr;
+Vector3d qr_dot;
+Vector3d dqr_dot;
+
+VectorXd theta_d(11);
+VectorXd theta(11);
+VectorXd theta_max(11);
+VectorXd theta_min(11);
+VectorXd slidetheta(11);
+
+Vector3d tol;
+
+Vector3d sgns;
+Vector3d us1;
+Vector3d ua;
+Vector3d u;
+//Eigen::Matrix<double, 8, 8> gammamamm;
+
+MatrixXd gammamamm(11, 11);
+//Eigen::Matrix<double, 2, 8> fai_Te;
+MatrixXd fai(3, 11);
+//Eigen::Matrix<double, 2, 8> fai_T;
+MatrixXd fai_dot(3, 11);
+Matrix3Xd theta_max1(3, 3);
+Matrix3Xd Xite(3, 3);
+
+///240704
+//来自qgc上位机的数据变量保存
+double RE_q1 = 0.0;
+double RE_q2 = 0.0;
+double RE_q3 = 0.0;
+double RE_q4 = 0.0;
+double RE_q5 = 0.0;
+double RE_qd1 = 0.0;
+double RE_qd2 = 0.0;
+double RE_qd3 = 0.0;
+double RE_qd4 = 0.0;
+double RE_Current5 = 0.0;
+
+double RE_KB_W = 0.0;
+double RE_KB_A = 0.0;
+double RE_KB_S = 0.0;
+double RE_KB_D = 0.0;
+double RE_KB_Q = 0.0;
+double RE_KB_E = 0.0;
+
+double RE_KB_L = 0.0;
+double RE_KB_R = 0.0;
+double RE_KB_C = 0.0;
+double RE_KB_O = 0.0;
+
+double RE_status = 0.0;
+bool RE_status_changed = false;
+double RE_Buttom = 0.0;
+double PU_status = 0.0;
+
+double RE_status_lock_st0 = 0;
+double RE_status_lock_st1 = 0;
+double RE_status_lock_st2 = 0;
+double RE_status_lock_st7 = 0;
+double Status3_lock = 0;
+double Status4_lock = 0;
+double RE_Flag1 = 0.0;
+double RE_Flag2 = 0.0;
+double RE_Flag3 = 0.0;
+
+int INTTT_q1 = 0;
+int INTTT_q2 = 0;
+int INTTT_q3 = 0;
+int INTTT_q4 = 0;
+int INTTT_q5 = 0;
+
+vector<double> jointActualAngles(4, 0), jointDesiredAngles, endPose;
+
+void sotp_falg(const std_msgs::Bool &flag)
+{
+    //stop_flag.data = flag.data;
+    //  ROS_INFO("stop");
+}
+//收到cameranode 话题发来的数据
+void Mainpulator_ser(const sensor_msgs::JointState &joint_state)
+{
+    //expect_q = joint_state.position[0];
+    //expect_qd = joint_state.velocity[0];
+    //expect_qdd = joint_state.effort[0];
+    //此处需要更改,为expectq读取cameranode pub回来的9+1个数据
+    expect_q(0, 0) = joint_state.position[1] / 180 * 3.14;
+    expect_q(1, 0) = joint_state.position[2] / 180 * 3.14;
+    expect_q(2, 0) = joint_state.position[3] / 180 * 3.14;
+
+    //expect_qd(0,0)  = joint_state.velocity[0]/180*3.14;
+    //expect_qd(1,0) = joint_state.velocity[1]/180*3.14;
+    //expect_qd(2,0) = joint_state.velocity[2]/180*3.14;
+
+    //expect_qdd(0,0) = joint_state.effort[0]/180*3.14;
+    //expect_qdd(1,0) = joint_state.effort[1]/180*3.14;
+    //expect_qdd(2,0) = joint_state.effort[2]/180*3.14;
+
+    //收到cameranode发来的第四位为int=1,即为可以进行抓取操作
+    if (abs(joint_state.position[3] - 1.0) < 0.1)
+    {
+        //joint5_open = true;
+        joint5_open = true;
+    }
+    //ROS_INFO("joint5  state  %lf",joint_state.position[4]);
+    if (abs(joint_state.position[3] - 2.0) < 0.1)
+    {
+        //joint5_open = true;
+        joint5_homing = true;
+    }
+}
+/** 
+ * @brief 位置模式回调函数,编码器返回速度、位置等信息
+ * @param receive_message ros_canopen类对象
+ * @return 
+ */
+void MainpulatorCallback(const can_msgs::Frame &receive_message);
+/** 
+ * @brief 位置模式回调函数,编码器返回速度、位置等信息
+ * @param receive_message ros_canopen类对象
+ * @return 
+ */
+void VisualAngleCallback(const sensor_msgs::JointState &joint_state);
+
+void QGC_Callback(const sensor_msgs::JointState &msg);
+
+void decide_and_plan();
+
+void stopcallback(const std_msgs::Bool &flag)
+{
+    //joint5_open = true;
+    joint5_open = true;
+    ROS_INFO("joint5 open begin");
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+int main(int argc, char *argv[])
+{
+    // demoKinematics();
+    //实际角度初始化
+    q(0, 0) = 0.00001;
+    q(1, 0) = 0.00001;
+    q(2, 0) = 0.00001;
+    //执行 ros 节点初始化
+    ros::init(argc, argv, "mainpulator_param_node");
+    //创建 ros 节点句柄(非必须)
+    ros::NodeHandle nh("~");
+    ros::NodeHandle socketcan_send;
+    ros::NodeHandle socketcan_receive;
+    ros::NodeHandle receive_stop;
+    ros::NodeHandle trajectory_receive;
+    ros::NodeHandle mainpulator_receive_sub;
+    ros::NodeHandle mainpul_ser;
+    ros::Subscriber socketcan_receive_sub;
+    ros::Subscriber trajectory_receive_sub;
+
+    stop_flag.data = false;
+    //机械臂控制方式 位置控制 力矩控制
+    nh.getParam("control_type", control_type);
+    //控制器发布数据至机械臂
+    ROS_INFO("control_type = %s", control_type.c_str());
+    ros::Publisher socketcan_send_pub = socketcan_send.advertise<can_msgs::Frame>("sent_messages", 10);
+
+    //创建一个visual订阅者
+    ros::NodeHandle visual_angle;
+    //ros::Subscriber visual_angle_sub = visual_angle.subscribe("visual_angle_topic", 100, VisualAngleCallback);
+    ros::Subscriber visual_angle_sub = visual_angle.subscribe("Visual_Servo_", 100, VisualAngleCallback);
+
+    //SH
+    ros::NodeHandle QGC_Info;
+    ros::Subscriber QGC_Info_sub = QGC_Info.subscribe("MVLink_Pub_To_Main_Node", 10, QGC_Callback);
+
+    //控制接收机械臂数据
+    socketcan_receive_sub = socketcan_receive.subscribe("received_messages", 1000, MainpulatorCallback);
+
+    //发布机械臂当前角度信息
+    ros::Publisher pub = nh.advertise<sensor_msgs::JointState>("chatter", 100);
+
+    //以下是角度发布部分，用于向其他控制节点发送机械臂关节信息
+    ros::NodeHandle trajectory_pub;
+    ros::Publisher Angle_Pub_To_All_Nodes = trajectory_pub.advertise<sensor_msgs::JointState>("Angle_Pub_To_All_Nodes", 100);
+
+    ros::Rate loop_rate(100);
+    int socket_can = param::SocketCANInit();
+    ROS_INFO("socket_can = %d", socket_can);
+    ROS_INFO("control_type  =  %s", control_type.c_str());
+
+    can_msgs::Frame send_message;
+
+    //机械臂输出化配置
+    ROS_INFO("init");
+    param::MomentInit(joint5, socket_can);
+    param::PositionInit(joint1, socket_can);
+    param::PositionInit(joint2, socket_can);
+    param::PositionInit(joint3, socket_can);
+    param::PositionInit(joint4, socket_can);
+    // param::PositionInit(joint5,socket_can);
+
+    //param::MomentInit(joint1,socket_can);
+    //ROS_INFO("MomentInit is doing!!");
+    //param::MomentInit(joint2,socket_can);
+    //param::MomentInit(joint3,socket_can);
+    //param::PositionInit(joint4,socket_can);
+
+    usleep(500000);
+    //机械臂使能
+    param::Enable(socket_can, 6, joint1);
+    param::Enable(socket_can, 6, joint2);
+    param::Enable(socket_can, 6, joint3);
+    param::Enable(socket_can, 6, joint4);
+    param::Enable(socket_can, 6, joint5);
+    usleep(500000);
+    ROS_INFO("init end");
+    ////////////////////////////////////////////
+    int running_times_record = 0;
+    int running_times_problem = -1;
+    double q1_last, q2_last, q1_problem, q2_problem;
+    int problem_times = 0;
+
+    int switch_thresh = 2200;
+    int gripper_current_now = 0.0;
+    int gripper_current_last = 0.0;
+
+    while (ros::ok)
+    {
+        static long run_times = 0;
+        if (run_times++ % 100 == 0)
+        {
+            cout << "\033c";
+        }
+        // cout << "\033[2J\033[1;1H";
+        cout << "\033[0;0H";
+        //处理排队的回调函数
+        ros::spinOnce();
+        //根据QGC显控指令，规划机械臂关节角度
+        decide_and_plan();
+
+        ROS_INFO("Expected: %f, %f, %f, %f, %f", expect_q(0, 0), expect_q(1, 0), expect_q(2, 0), joint4angle, joint5angle);
+        ROS_INFO("Real: %f, %f, %f, %f, %f", q(0, 0), q(1, 0), q(2, 0), joint4_actual_angle, joint5_actual_angle);
+        ROS_INFO("Visual_angle:%f,%f,%f,%f", visual_received_angle[0], visual_received_angle[1], visual_received_angle[2], visual_received_angle[3]);
+        //发布详细信息
+        sensor_msgs::JointState joint_state;
+        joint_state.header.stamp = ros::Time::now();
+        joint_state.position.resize(8);
+        joint_state.velocity.resize(16);
+        joint_state.effort.resize(5);
+        joint_state.position[0] = joint4.get_current_angle();
+        joint_state.position[1] = q(0, 0);
+        joint_state.position[2] = q(1, 0);
+        joint_state.position[3] = q(2, 0);
+        joint_state.position[4] = expect_q(0, 0);
+        joint_state.position[5] = expect_q(1, 0);
+        joint_state.position[6] = expect_q(2, 0);
+        joint_state.position[7] = joint5.get_ActualCurrent();
+        joint_state.velocity[0] = q(0, 0);
+        joint_state.velocity[1] = q(1, 0);
+        joint_state.velocity[2] = q(2, 0);
+        joint_state.velocity[3] = joint4_actual_angle;
+        joint_state.velocity[4] = joint5_actual_angle;
+        joint_state.velocity[5] = qd(0, 0);
+        joint_state.velocity[6] = qd(1, 0);
+        joint_state.velocity[7] = qd(2, 0);
+        joint_state.velocity[8] = joint4_actual_velocity;
+        joint_state.velocity[9] = joint5_actual_current;
+        //计算正运动学
+        Kinematics_r = 1000 * l1 * cos(-q(1, 0)) + 1000 * l2 * cos(-q(1, 0) + q(2, 0));
+        Kinematics_x = Kinematics_r * cos(q(0, 0));
+        Kinematics_y = Kinematics_r * sin(q(0, 0));
+        Kinematics_z = 1000 * l1 * sin(-q(1, 0)) + 1000 * l2 * sin(-q(1, 0) + q(2, 0));
+        joint_state.velocity[10] = Kinematics_x;
+        joint_state.velocity[11] = Kinematics_y;
+        joint_state.velocity[12] = Kinematics_z;
+        //
+        joint_state.velocity[13] = PU_status;
+        //遥操作指令
+        joint_state.effort[0] = RE_qd1;
+        joint_state.effort[1] = RE_qd2;
+        joint_state.effort[2] = RE_qd3;
+        joint_state.effort[3] = RE_q4;
+        joint_state.effort[4] = RE_Buttom;
+        pub.publish(joint_state);
+        Angle_Pub_To_All_Nodes.publish(joint_state);
+        //Kinematics_expect_q=Kinematics_Solver(expect_q(0,0),expect_q(1,0),expect_q(2,0),KB_W,KB_A,KB_Q,KB_SPEEDUP,1,1,1);
+
+        //微调5关节指令：通过导纳算法
+        gripper_current_now = joint5.get_ActualCurrent();
+        if (RE_status == 1 || RE_status == 2 || RE_status == 7)
+        {
+            //if(gripper_current_last != 0.0 && gripper_current_now - gripper_current_last >= 20 && gripper_current_now >= 0)
+            //   gripper_ultimate -= 0.0015;
+            if (KB_D > 0.01)
+            {
+                joint5angle += 0.003;
+                // if(gripper_current_now>=switch_thresh)
+                //     gripper_ultimate -= 0.003;
+                // else
+                //     gripper_ultimate += 0.003;
+            }
+            else if (KB_D < -0.01)
+            {
+                joint5angle -= 0.003;
+                // gripper_ultimate -= 0.003;
+            }
+            // if(gripper_current_now>=switch_thresh)
+            //     joint5angle = gripper_ultimate - gripper_current_now*0.0000000 - (gripper_current_now-switch_thresh) * 0.00004;
+            // else if (gripper_current_now<=-switch_thresh)
+            //     joint5angle = gripper_ultimate - gripper_current_now*0.0000000 - (gripper_current_now+switch_thresh) * 0.0000001;
+            // else
+            //     joint5angle = gripper_ultimate - gripper_current_now*0.0000000;
+        }
+        gripper_current_last = gripper_current_now;
+        //解析4关节指令
+        if (KB_TURNLR > 0.01)
+        {
+            joint4angle = joint4angle + 0.00008;
+        }
+        else if (KB_TURNLR < -0.01)
+        {
+            joint4angle = joint4angle - 0.00008;
+        }
+        else
+        {
+            joint4angle = joint4angle;
+        }
+        //关节4、5指令限位
+        if (control_type == "PID")
+        {
+            // 一关节限位（原先为-pi/7 ~ 9pi/12 ....?）
+            if (expect_q(0, 0) < -PI / 2)
+            {
+                expect_q(0, 0) = -PI / 2;
+            }
+            else if (expect_q(0, 0) > 3 * PI / 4)
+            {
+                expect_q(0, 0) = 3 * PI / 4;
+            }
+            if (joint4angle < -6.2)
+            {
+                joint4angle = -6.2;
+            }
+            if (joint4angle > 6.2)
+            {
+                joint4angle = 6.2;
+            }
+            if (joint5angle < 0.6)
+            {
+                // 达到0.6限位后，不允许再张开
+                // if(tol5 < 0){
+                //     tol5 = 0;
+                // }
+                joint5angle = 0.6;
+            }
+            if (joint5angle > 6.2)
+            {
+                // 达到5.2限位后，不允许再夹紧
+                // if(tol5 > 0){
+                //     tol5 = 0;
+                // }
+                joint5angle = 6.2;
+            }
+
+            // 误差范围内不输出电流，否则根据目标位置输出恒定电流
+            if (abs(joint5_actual_angle - joint5angle) < 0.05)
+            {
+                tol5 = 0;
+            }
+            else if (joint5angle > joint5_actual_angle)
+            {
+                tol5 = 23;
+            }
+            else if (joint5angle < joint5_actual_angle)
+            {
+                tol5 = -25;
+            }
+            // ROS_INFO("tol5 = %f !!!!!!!!!!!!!!!!!!!!!!!!!!!", tol5);
+        }
+        //发送控制指令
+        can_msgs::Frame frames;
+        //若q经过初始化全为零还未读到真实的帧，则不发送控制指令
+        if (q(0, 0) == 0.00001 || q(1, 0) == 0.00001 || q(2, 0) == 0.00001 || joint4_actual_angle == 0.0001)
+        {
+        }
+        else
+        {
+            send_message = joint1.set_angle_for_new_joint(expect_q(0, 0));
+            socketcan_send_pub.publish(send_message);
+            send_message = joint1.set_angle(expect_q(0, 0));
+            socketcan_send_pub.publish(send_message);
+
+            send_message = joint2.set_angle_for_new_joint(expect_q(1, 0));
+            socketcan_send_pub.publish(send_message);
+            send_message = joint2.set_angle(expect_q(1, 0));
+            socketcan_send_pub.publish(send_message);
+
+            send_message = joint3.set_angle_for_new_joint(expect_q(2, 0));
+            socketcan_send_pub.publish(send_message);
+            send_message = joint3.set_angle(expect_q(2, 0));
+            socketcan_send_pub.publish(send_message);
+
+            send_message = joint4.set_angle_for_new_joint(joint4angle);
+            socketcan_send_pub.publish(send_message);
+            send_message = joint4.set_angle(joint4angle);
+            socketcan_send_pub.publish(send_message);
+
+            send_message = joint5.MomentOutput(tol5);
+            socketcan_send_pub.publish(send_message);
+            // send_message = joint5.set_angle_for_new_joint(joint5angle);
+            // socketcan_send_pub.publish(send_message);
+            // send_message =joint5.set_angle(joint5angle);
+            // socketcan_send_pub.publish(send_message);
+            frames.id = 0x80;
+            frames.dlc = 0;
+            socketcan_send_pub.publish(frames);
+        }
+    }
+
+    // //当ROS循环掉帧时，输出井号
+    // if(！loop_rate.sleep())
+    // {
+    //     cout<<"####################"<<endl;
+    // }
+}
+
+//机械臂内部返回实际角度的回调函数，用于取得实际q 实际dq
+void MainpulatorCallback(const can_msgs::Frame &receive_message)
+{
+    if (control_type == "PID")
+    {
+        switch (receive_message.id)
+        {
+        case 0x181:
+            joint1.current_angle(receive_message);
+            q(0, 0) = joint1.get_current_angle();
+            break;
+        case 0x182:
+            joint2.current_angle(receive_message);
+            q(1, 0) = joint2.get_current_angle();
+            break;
+        case 0x183:
+            joint3.current_angle(receive_message);
+            q(2, 0) = joint3.get_current_angle();
+            break;
+        case 0x184:
+            joint4.current_angle(receive_message);
+            joint4_actual_angle = joint4.get_current_angle();
+            break;
+        case 0x185:
+            joint5.current_angle(receive_message);
+            joint5_actual_angle = joint5.get_current_angle();
+            // ROS_INFO("joint5angle: %f, joint5_expect_angle: %f", joint5_actual_angle, joint5angle);
+            break;
+
+        case 0x281:
+            joint1.current_velocity(receive_message);
+            qd(0, 0) = joint1.get_current_velocity();
+            break;
+        case 0x282:
+            joint2.current_velocity(receive_message);
+            qd(1, 0) = joint2.get_current_velocity();
+            break;
+        case 0x283:
+            joint3.current_velocity(receive_message);
+            qd(2, 0) = joint3.get_current_velocity();
+            break;
+        case 0x284:
+            joint4.current_velocity(receive_message);
+            joint4_actual_velocity = joint4.get_current_velocity();
+            break;
+        case 0x285:
+            joint5.ActualCurrent(receive_message);
+            joint5_actual_current = joint5.get_ActualCurrent();
+            break;
+
+        default:
+            break;
+        }
+    }
+    else
+    {
+        switch (receive_message.id)
+        {
+        case 0x181:
+            joint1.current_angle(receive_message);
+            q(0, 0) = joint1.get_current_angle();
+            break;
+        case 0x182:
+            joint2.current_angle(receive_message);
+            q(1, 0) = joint2.get_current_angle();
+            break;
+        case 0x183:
+            joint3.current_angle(receive_message);
+            q(2, 0) = joint3.get_current_angle();
+            break;
+        case 0x184:
+            joint4.current_angle(receive_message);
+            joint4_actual_angle = joint4.get_current_angle();
+            break;
+        case 0x185:
+            joint5.current_angle(receive_message);
+            joint5_actual_angle = joint5.get_current_angle();
+            break;
+
+        case 0x281:
+            joint1.current_velocity(receive_message);
+            qd(0, 0) = joint1.get_current_velocity();
+            break;
+        case 0x282:
+            joint2.current_velocity(receive_message);
+            qd(1, 0) = joint2.get_current_velocity();
+            break;
+        case 0x283:
+            joint3.current_velocity(receive_message);
+            qd(2, 0) = joint3.get_current_velocity();
+        case 0x284:
+            joint4.current_velocity(receive_message);
+            joint4_actual_velocity = joint4.get_current_velocity();
+        case 0x285:
+            joint5.ActualCurrent(receive_message);
+            joint5_actual_current = joint5.get_ActualCurrent();
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+//关节空间顺序轨迹
+class joint_command
+{
+public:
+    vector<int> joint_inds;
+    vector<double> desired_angs;
+    joint_command(int id, double ang);
+    joint_command(vector<int> joint_inds, vector<double> desired_angs);
+    size_t size();
+};
+joint_command::joint_command(int id, double ang) : joint_inds({id}), desired_angs({ang}){};
+joint_command::joint_command(vector<int> joint_inds, vector<double> desired_angs) : joint_inds(joint_inds), desired_angs(desired_angs){};
+size_t joint_command::size()
+{
+    return joint_inds.size();
+}
+class jointspace_seq_traj
+{
+public:
+    //构造轨迹
+    jointspace_seq_traj(vector<joint_command> joints_commands = {}, double tolerance = 0.05);
+    ~jointspace_seq_traj(){};
+    vector<joint_command> traj;
+    size_t command_ind;
+    double tolerance;
+    //执行轨迹，若 execute_traj 为真，则仅执行运行状态检测
+    bool run();
+    bool verify_complete();
+    void reinit()
+    {
+        this->command_ind = 0;
+    }
+};
+
+jointspace_seq_traj::jointspace_seq_traj(vector<joint_command> joints_commands, double tolerance)
+{
+    this->traj = joints_commands;
+    this->command_ind = 0;
+    this->tolerance = tolerance;
+}
+
+bool jointspace_seq_traj::run()
+{
+    double actual_ang = 0;
+    double *desired_ang;
+    while (command_ind < traj.size())
+    {
+        bool this_command_complete = true;
+        for (int i = 0; i < traj[command_ind].size(); i++)
+        {
+            if (traj[command_ind].joint_inds[i] == 3)
+            {
+                actual_ang = joint4_actual_angle;
+                desired_ang = &joint4angle;
+            }
+            else if (traj[command_ind].joint_inds[i] == 4)
+            {
+                actual_ang = joint5_actual_angle;
+                desired_ang = &joint5angle;
+            }
+            else
+            {
+                actual_ang = q(traj[command_ind].joint_inds[i], 0);
+                desired_ang = &expect_q(traj[command_ind].joint_inds[i], 0);
+            }
+            *desired_ang = traj[command_ind].desired_angs[i];
+            if (abs(actual_ang - traj[command_ind].desired_angs[i]) > tolerance)
+            {
+                this_command_complete = false;
+            }
+        }
+        if (this_command_complete)
+        {
+            command_ind++;
+        }
+        else
+        {
+            break;
+        }
+    }
+    if (command_ind == traj.size())
+    {
+        cout << "Running Complete" << endl;
+        return true; //已经运行结束
+    }
+    else
+    {
+        //*desired_ang = traj[command_ind].second;
+        cout << "Running " << command_ind + 1 << "th traj: ";
+        for (int i = 0; i < traj[command_ind].size(); i++)
+        {
+            cout << "joint" << traj[command_ind].joint_inds[i] + 1 << " TO " << traj[command_ind].desired_angs[i] << " ";
+        }
+        cout << endl;
+        return false; //还得接着运行
+    }
+}
+
+bool jointspace_seq_traj::verify_complete()
+{
+    double actual_ang = 0;
+    double *desired_ang;
+    while (command_ind < traj.size())
+    {
+        bool this_command_complete = true;
+        for (int i = 0; i < traj[command_ind].size(); i++)
+        {
+            if (traj[command_ind].joint_inds[i] == 3)
+            {
+                actual_ang = joint4_actual_angle;
+            }
+            else if (traj[command_ind].joint_inds[i] == 4)
+            {
+                actual_ang = joint5_actual_angle;
+            }
+            else
+            {
+                actual_ang = q(traj[command_ind].joint_inds[i], 0);
+            }
+            if (abs(actual_ang - traj[command_ind].desired_angs[i]) > tolerance)
+            {
+                this_command_complete = false;
+                ROS_INFO("Joint%d Tolerance Unsatisfied!", traj[command_ind].joint_inds[i]);
+            }
+        }
+        if (this_command_complete)
+        {
+            command_ind++;
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    if (command_ind == traj.size())
+    {
+        cout << "Running Complete Verified" << endl;
+        return true; //已经运行结束
+    }
+    else
+    {
+        return false; //还得接着运行
+    }
+}
+
+//申昊显控信息回调
+void QGC_Callback(const sensor_msgs::JointState &msg)
+{
+    RE_q1 = msg.velocity[0];
+    RE_q2 = msg.velocity[1];
+    RE_q3 = msg.velocity[2];
+    RE_q4 = msg.velocity[3];
+    RE_q5 = msg.velocity[4];
+    RE_qd1 = msg.velocity[5];
+    RE_qd2 = msg.velocity[6];
+    RE_qd3 = msg.velocity[7];
+    RE_qd4 = msg.velocity[8];
+    RE_Current5 = msg.velocity[9];
+    RE_KB_W = msg.velocity[10];
+    RE_KB_A = msg.velocity[11];
+    RE_KB_S = msg.velocity[12];
+    RE_KB_D = msg.velocity[13];
+    RE_KB_Q = msg.velocity[14];
+    RE_KB_E = msg.velocity[15];
+    RE_KB_O = msg.velocity[16];
+    RE_KB_C = msg.velocity[17];
+    RE_KB_R = msg.velocity[18];
+    RE_KB_L = msg.velocity[19];
+    RE_status_changed = RE_status == msg.velocity[20] ? false : true;
+    RE_status = msg.velocity[20];
+    RE_Buttom = msg.velocity[21];
+}
+//根据显控指定的控制模式与指令，规划机械臂期望角度
+void decide_and_plan()
+{
+    ROS_INFO("Start Decision with RE_STATUS = %f", RE_status);
+
+    static jointspace_seq_traj traj_from_caikuang_to_retract({// joint_command(4, 5.2),
+                                                              joint_command(3, 0.0001),
+                                                              joint_command(1, 1.92),
+                                                              joint_command(2, 3.14),
+                                                              joint_command(1, 1.57),
+                                                              joint_command(0, 0.0001),
+                                                              joint_command(1, 0.0001)},
+                                                             0.05);
+
+    static jointspace_seq_traj traj_from_zhuaxiaoche_to_retract({
+                                                                    joint_command(4, 5.2),
+                                                                    joint_command(3, 0.0001),
+                                                                    joint_command(2, 3.14),
+                                                                    joint_command({0, 1}, {0.0001, 0.0001}),
+                                                                },
+                                                                0.05);
+    // static jointspace_seq_traj traj_from_kaiji_to_extended({  // 原来的伸出位置
+    //         joint_command({0,1}, {1.57,1.57}),
+    //         joint_command(1, 1.92),
+    //         joint_command(2, 1.92),
+    //         joint_command({3,4}, {0.0001,0.6})
+    // },0.05);
+
+    // 抓小车的预备轨迹
+    static jointspace_seq_traj traj_from_kaiji_to_extended({joint_command({0, 1}, {0.30, 0.66}),
+                                                            joint_command({2, 3}, {2.12, 1.85}),
+                                                            joint_command({4}, {0.6})},
+                                                           0.05);
+    static jointspace_seq_traj traj_from_zhuaxiaoche_to_extended({joint_command(3, 0.0001),
+                                                                  joint_command(2, 2.826),
+                                                                  joint_command(1, 1.92),
+                                                                  joint_command(0, 1.57),
+                                                                  joint_command(2, 1.92),
+                                                                  joint_command(4, 0.6)},
+                                                                 0.05);
+    static jointspace_seq_traj traj_from_caikuang_to_extended({joint_command(2, 0.0001),
+                                                               joint_command(3, 0.0001),
+                                                               joint_command(1, 1.92),
+                                                               joint_command(0, 1.57),
+                                                               joint_command(2, 1.92),
+                                                               joint_command(4, 0.6)},
+                                                              0.05);
+
+    // 放置小车的轨迹
+    static jointspace_seq_traj traj_from_extended_to_place({joint_command({1, 2}, {0.8, 2.3}),
+                                                            joint_command(0, 0),
+                                                            joint_command({2, 3}, {0.56, 3.07}),
+                                                            joint_command(0, -1.57)},
+                                                           0.05);
+
+    // 取回小车的轨迹
+    static jointspace_seq_traj traj_from_place_to_extended({// 取回小车的轨迹，还需结合ROV实际情况确定具体角度
+                                                            joint_command(0, 0),
+                                                            joint_command(3, 1.57),
+                                                            joint_command({1, 2}, {0.8, 2.3}),
+                                                            joint_command(0, 0.30),
+                                                            joint_command(3, 1.85),
+                                                            joint_command({1, 2}, {0.66, 2.12})},
+                                                           0.05);
+    if (RE_status_changed)
+    {
+        traj_from_caikuang_to_retract.reinit();
+        traj_from_zhuaxiaoche_to_retract.reinit();
+        traj_from_kaiji_to_extended.reinit();
+        traj_from_zhuaxiaoche_to_extended.reinit();
+        traj_from_caikuang_to_extended.reinit();
+        traj_from_extended_to_place.reinit();
+        RE_status_lock_st0 = 0;
+    }
+
+    //急停
+    if (RE_status == 0)
+    {
+        RE_status_lock_st1 = 0;
+        RE_status_lock_st2 = 0;
+        RE_status_lock_st7 = 0;
+        PU_status = 0;
+        //若q经过初始化全为零还未读到真实的帧，则不断读取新的值
+        if (q(0, 0) == 0.00001 || q(1, 0) == 0.00001 || q(2, 0) == 0.00001 || joint4_actual_angle == 0.0001)
+        {
+        }
+        //读到真实数据后，判断目前是否为第一次读到真实数据，若是，则记录该真实数据为初始位置
+        else if (RE_status_lock_st0 == 0)
+        {
+            initial_q[0] = q(0, 0);
+            initial_q[1] = q(1, 0);
+            initial_q[2] = q(2, 0);
+            initial_q[3] = joint4_actual_angle;
+            initial_q[4] = joint5_actual_angle;
+            RE_status_lock_st0 = 1;
+            // expect_q(0,0)=initial_q[0];
+            // expect_q(1,0)=initial_q[1];
+            // expect_q(2,0)=initial_q[2];
+            // joint4angle=initial_q[3];
+            // joint5angle=initial_q[4];
+        }
+        // 将初始位置作为目标位置，防止漂移
+        else
+        {
+            expect_q(0, 0) = initial_q[0];
+            expect_q(1, 0) = initial_q[1];
+            expect_q(2, 0) = initial_q[2];
+            joint4angle = initial_q[3];
+            joint5angle = initial_q[4];
+            // tol5 = 0;
+        }
+    }
+    //遥操作
+    else if (RE_status == 1)
+    {
+        //遥操作
+        RE_status_lock_st0 = 0;
+        RE_status_lock_st2 = 0;
+        RE_status_lock_st7 = 0;
+        PU_status = 1;
+        //？？
+        if (RE_status_lock_st1 == 0)
+        {
+            expect_q(0, 0) = q(0, 0);
+            expect_q(1, 0) = q(1, 0);
+            expect_q(2, 0) = q(2, 0);
+            //INTTT_q4=(int)(joint4_actual_angle*10000);
+            //INTTT_q5=(int)(joint5_actual_angle*10000);
+            RE_status_lock_st1 = 1;
+        }
+        //左右 左-1 右1
+        if (RE_qd1 >= 5 && abs(RE_qd1) > abs(RE_qd2) && abs(RE_qd1) > abs(RE_qd3))
+        {
+            KB_W = -1;
+        }
+        else if (RE_qd1 <= -5 && abs(RE_qd1) > abs(RE_qd2) && abs(RE_qd1) > abs(RE_qd3))
+        {
+            KB_W = 1;
+        }
+        else
+        {
+            KB_W = 0;
+        }
+        //前后 上-1 下1
+        if (RE_qd2 >= 5 && abs(RE_qd2) > abs(RE_qd1) && abs(RE_qd2) > abs(RE_qd3))
+        {
+            KB_A = -1;
+        }
+        else if (RE_qd2 <= -5 && abs(RE_qd2) > abs(RE_qd1) && abs(RE_qd2) > abs(RE_qd3))
+        {
+            KB_A = 1;
+        }
+        else
+        {
+            KB_A = 0;
+        }
+        //上下 前-1 后1
+        if (RE_qd3 >= 5 && abs(RE_qd3) > abs(RE_qd1) && abs(RE_qd3) > abs(RE_qd2))
+        {
+            KB_Q = 1;
+        }
+        else if (RE_qd3 <= -5 && abs(RE_qd3) > abs(RE_qd1) && abs(RE_qd3) > abs(RE_qd2))
+        {
+            KB_Q = -1;
+        }
+        else
+        {
+            KB_Q = 0;
+        }
+
+        if (RE_q4 < -2.4)
+        {
+            KB_TURNLR = -1;
+        }
+        else if (RE_q4 > 2.4)
+        {
+            KB_TURNLR = 1;
+        }
+        else
+        {
+            KB_TURNLR = 0;
+        }
+
+        //抓手
+        if (RE_Buttom == 1)
+        {
+            KB_D = 1;
+        }
+        else if (RE_Buttom == 2)
+        {
+            KB_D = -1;
+        }
+        else
+        {
+            KB_D = 0;
+        }
+
+        //    左右 前后 上下    /左右  前后  上下
+        // Kinematics_expect_q = Kinematics_Solver(expect_q(0, 0), expect_q(1, 0), expect_q(2, 0), KB_W, KB_A, KB_Q, 1.0, RE_qd1 * 0.025, RE_qd2 * 0.07, RE_qd3 * 0.04);
+        // 末端坐标系下 暂未测试
+        Kinematics_expect_q = KinematicsSolverTarget(q, joint4_actual_angle, KB_W, KB_A, KB_Q, 1.0, RE_qd1 * 0.07, RE_qd2 * 0.07, RE_qd3 * 0.07);
+
+        expect_q = Kinematics_expect_q;
+        //ROS_INFO("Kinematics_44444444444=%f,%f,%f,%f",RE_q4,KB_TURNLR,RE_Buttom,KB_D);
+    }
+    //键盘笛卡尔空间操作 末端坐标系
+    else if (RE_status == 2)
+    {
+        RE_status_lock_st0 = 0;
+        RE_status_lock_st1 = 0;
+        RE_status_lock_st7 = 0;
+        PU_status = 2;
+
+        if (RE_status_lock_st2 == 0)
+        {
+            expect_q(0, 0) = q(0, 0);
+            expect_q(1, 0) = q(1, 0);
+            expect_q(2, 0) = q(2, 0);
+            //INTTT_q4=(int)(joint4_actual_angle*10000);
+            //INTTT_q5=(int)(joint5_actual_angle*10000);
+            RE_status_lock_st2 = 1;
+        }
+
+        //前后
+        if (RE_KB_Q == 0 && RE_KB_E == 1)
+        {
+            KB_Q = -1;
+        }
+        else if (RE_KB_Q == 1 && RE_KB_E == 0)
+        {
+            KB_Q = 1;
+        }
+        else
+        {
+            KB_Q = 0;
+        }
+        //上下
+        if (RE_KB_W == 0 && RE_KB_S == 1)
+        {
+            KB_A = 1;
+        }
+        else if (RE_KB_W == 1 && RE_KB_S == 0)
+        {
+            KB_A = -1;
+        }
+        else
+        {
+            KB_A = 0;
+        }
+        //左右
+        if (RE_KB_A == 0 && RE_KB_D == 1)
+        {
+            KB_W = 1;
+        }
+        else if (RE_KB_A == 1 && RE_KB_D == 0)
+        {
+            KB_W = -1;
+        }
+        else
+        {
+            KB_W = 0;
+        }
+        //转动
+        if (RE_KB_L == 1 && RE_KB_R == 0)
+        {
+            KB_TURNLR = 1;
+        }
+        else if (RE_KB_L == 0 && RE_KB_R == 1)
+        {
+            KB_TURNLR = -1;
+        }
+        else
+        {
+            KB_TURNLR = 0;
+        }
+        //抓手
+        if (RE_KB_O == 1 && RE_KB_C == 0)
+        {
+            KB_D = 1;
+        }
+        else if (RE_KB_O == 0 && RE_KB_C == 1)
+        {
+            KB_D = -1;
+        }
+        else
+        {
+            KB_D = 0;
+        }
+        //ROS_INFO("INTTT_qqqqqq=%f,%f,%f",expect_q(0,0),expect_q(1,0),expect_q(2,0));
+        // Kinematics_expect_q = Kinematics_Solver(expect_q(0, 0), expect_q(1, 0), expect_q(2, 0), KB_W, KB_A, KB_Q, 1.0, 1.0, 1.0, 1.0);
+        Kinematics_expect_q = KinematicsSolverTarget(q, joint4_actual_angle, KB_W, KB_A, KB_Q, 1.0, 1.0, 1.0, 1.0);
+
+        expect_q = Kinematics_expect_q;
+        //ROS_INFO("240710info=%f,%f,%f,%f,%f",joint5angle,joint5_actual_angle,RE_status,KB_TURNLR,KB_D);
+        //ROS_INFO("Kinematics_33333333=%f,%f,%f",RE_KB_O,RE_KB_C,KB_D);
+        //ROS_INFO("Kinematics_expect_q=%f,%f,%f,%f",expect_q(0,0),expect_q(1,0),expect_q(2,0),PU_status);
+    }
+    //收回
+    else if (RE_status == 3)
+    {
+        ROS_INFO("PU_status: %f", PU_status);
+        PU_status = 3;
+        gripper_ultimate = joint5_actual_angle;
+        RE_status_lock_st0 = 0;
+        RE_status_lock_st1 = 0;
+        RE_status_lock_st2 = 0;
+        RE_status_lock_st7 = 0;
+        jointspace_seq_traj traj_retract_ultimate({joint_command(0, 0.0001),
+                                                   joint_command(1, 0.0001),
+                                                   joint_command(2, 3.14),
+                                                   joint_command(3, 0.0001),
+                                                   joint_command(4, 5.2)},
+                                                  0.05);
+        //最终在0，0，3.14，0，6.2的收回位置
+
+        if (RE_status_changed)
+        {
+            ROS_INFO("status==changed ");
+            Status3_lock = 0;
+        }
+
+        bool has_complete_retract = traj_retract_ultimate.verify_complete();
+        if (has_complete_retract)
+        {
+            ROS_INFO("traj_retract_ultimate verify completed!!!");
+            PU_status = 5;
+            Status3_lock = 0;
+            traj_retract_ultimate.reinit();
+            traj_from_caikuang_to_retract.reinit();
+            traj_from_zhuaxiaoche_to_retract.reinit();
+            return;
+        }
+
+        // 三关节向外伸 采矿工况下收回
+        if ((q(1, 0) - q(2, 0) >= 0 && (Status3_lock == 0 || Status3_lock == 1)) || Status3_lock == 1)
+        {
+            Status3_lock = 1;
+            // has_complete_retract = traj_from_caikuang_to_retract.run();
+            //ROS_INFO("DDDDDDDDD===  ,%f ,%f,%f,%f ",q(0,0),q(1,0),q(2,0),Status3_lock);
+        }
+        //三关节向内伸 抓小车工况下收回
+        else if ((q(1, 0) - q(2, 0) < 0 && (Status3_lock == 0 || Status3_lock == 2)) || Status3_lock == 2)
+        {
+            Status3_lock = 2;
+            has_complete_retract = traj_from_zhuaxiaoche_to_retract.run();
+            // ROS_INFO("EEEEEEEEEEE===  ,%f ,%f,%f,%f ",q(0,0),q(1,0),q(2,0),Status3_lock);
+        }
+    }
+    //伸出！
+    else if (RE_status == 4)
+    {
+        ROS_INFO("PU_status: %f", PU_status);
+        PU_status = 4;
+        gripper_ultimate = joint5_actual_angle;
+        RE_status_lock_st0 = 0;
+        RE_status_lock_st1 = 0;
+        RE_status_lock_st2 = 0;
+        RE_status_lock_st7 = 0;
+        //static jointspace_seq_traj;
+        //如果已经伸出完成，后面那些判断就不需要进了，提前结束，并重置3种轨迹
+        // jointspace_seq_traj traj_extended_ultimate({
+        //     joint_command(0, 1.57),
+        //     joint_command(1, 1.92),
+        //     joint_command(2, 1.92),
+        //     joint_command(3, 0.0001),
+        //     joint_command(4, 0.6)
+        // },0.05);
+        jointspace_seq_traj traj_extended_ultimate({joint_command(0, 0.30),
+                                                    joint_command(1, 0.66),
+                                                    joint_command(2, 2.12),
+                                                    joint_command(3, 1.85),
+                                                    joint_command(4, 0.6)},
+                                                   0.05);
+        if (RE_status_changed)
+        {
+            ROS_INFO("status==changed ");
+            Status4_lock = 0;
+        }
+
+        bool has_complete_extend = traj_extended_ultimate.verify_complete();
+        //traj_extended_ultimate.run检测轨迹返回真，则已达到伸出，发送状态量PU_status，重置所有轨迹，跳出回调函数。
+        if (has_complete_extend)
+        {
+            ROS_INFO("traj_extend_ultimate verify completed!!!");
+            PU_status = 6;
+            Status4_lock = 0;
+            traj_extended_ultimate.reinit();
+            traj_from_kaiji_to_extended.reinit();
+            traj_from_zhuaxiaoche_to_extended.reinit();
+            traj_from_caikuang_to_extended.reinit();
+            return;
+        }
+        //从开机/收回状态开始伸出
+        if (Status4_lock == 1 || (abs(q(0, 0) - 0.0001) < 0.05 && abs(q(1, 0) - 0.0001) < 0.05 && abs(q(2, 0) - 3.14) < 0.08 && abs(joint5_actual_angle - 5.2) < 0.05 && Status4_lock == 0))
+        {
+            ROS_INFO("traj from kaiji to extended");
+            Status4_lock = 1;
+            has_complete_extend = traj_from_kaiji_to_extended.run();
+        }
+        //从三关节比较靠内的状态(如抓小车)开始伸出，3关节先直接往里多收一点
+        else if (Status4_lock == 3 || (q(1, 0) - q(2, 0) <= 0 && Status4_lock == 0))
+        {
+            ROS_INFO("traj from zhuaxiaoche to extended");
+            Status4_lock = 3;
+            // has_complete_extend = traj_from_zhuaxiaoche_to_extended.run();
+        }
+        //从三关节比较靠外的状态（如采集海底沉积物）开始伸出，3关节先直接往外转到底以防撞地
+        else if (Status4_lock == 2 || (q(1, 0) - q(2, 0) > 0 && Status4_lock == 0))
+        {
+            ROS_INFO("traj from caikuang to extended");
+            Status4_lock = 2;
+            // has_complete_extend = traj_from_caikuang_to_extended.run();
+        }
+    }
+    //抓到小车了，夹手后退，往前拉出小车并准备放在管道上
+    else if (RE_status == 5)
+    {
+        ROS_INFO("PU_status: %f", PU_status);
+        PU_status = 4;
+        gripper_ultimate = joint5_actual_angle;
+        RE_status_lock_st0 = 0;
+        RE_status_lock_st1 = 0;
+        RE_status_lock_st2 = 0;
+        RE_status_lock_st7 = 0;
+
+        jointspace_seq_traj traj_place_ultimate({joint_command(0, -1.57),
+                                                 joint_command(1, 0.80),
+                                                 joint_command(2, 0.56),
+                                                 joint_command(3, 3.07)},
+                                                0.05);
+
+        if (RE_status_changed)
+        {
+            ROS_INFO("status==changed ");
+            Status4_lock = 0;
+        }
+
+        bool has_complete_place = traj_place_ultimate.verify_complete();
+        //traj_place_ultimate.run检测轨迹返回真，则已达到伸出，发送状态量PU_status，重置所有轨迹，跳出回调函数。
+        if (has_complete_place)
+        {
+            ROS_INFO("traj_place_ultimate verify completed!!!");
+            PU_status = 6;
+            Status4_lock = 0;
+            traj_place_ultimate.reinit();
+            traj_from_extended_to_place.reinit();
+            return;
+        }
+        //从抓小车状态开始放置
+        if (Status4_lock == 1 || (abs(q(0, 0) - 0.30) < 0.05 && abs(q(1, 0) - 0.66) < 0.05 && abs(q(2, 0) - 2.12) < 0.08 && Status4_lock == 0))
+        {
+            ROS_INFO("traj from extended to place");
+            Status4_lock = 1;
+            has_complete_place = traj_from_extended_to_place.run();
+        }
+    }
+    //从管道拿到小车了，将小车塞回肚子里
+    else if (RE_status == 6)
+    {
+        ROS_INFO("PU_status: %f", PU_status);
+        PU_status = 3;
+        gripper_ultimate = joint5_actual_angle;
+        RE_status_lock_st0 = 0;
+        RE_status_lock_st1 = 0;
+        RE_status_lock_st2 = 0;
+        RE_status_lock_st7 = 0;
+        // 取回小车的轨迹
+        jointspace_seq_traj traj_pick_ultimate({joint_command(0, 0.30),
+                                                joint_command(1, 0.66),
+                                                joint_command(2, 2.12),
+                                                joint_command(3, 1.85)},
+                                               0.05);
+
+        if (RE_status_changed)
+        {
+            ROS_INFO("status==changed ");
+            Status4_lock = 0;
+        }
+
+        bool has_complete_pick = traj_pick_ultimate.verify_complete();
+        //traj_place_ultimate.run检测轨迹返回真，则已达到伸出，发送状态量PU_status，重置所有轨迹，跳出回调函数。
+        if (has_complete_pick)
+        {
+            ROS_INFO("traj_pick_ultimate verify completed!!!");
+            PU_status = 5;
+            Status4_lock = 0;
+            traj_pick_ultimate.reinit();
+            traj_from_place_to_extended.reinit();
+            return;
+        }
+        //从放小车状态开始抓回
+        if (Status4_lock == 1 || (abs(q(0, 0) - (-1.57)) < 0.05 && abs(q(1, 0) - 0.80) < 0.05 && abs(q(2, 0) - 0.56) < 0.08 && Status4_lock == 0))
+        {
+            ROS_INFO("traj from place to extended");
+            Status4_lock = 1;
+            has_complete_pick = traj_from_place_to_extended.run();
+        }
+    }
+    //键盘关节空间操作
+    else if (RE_status == 7)
+    {
+        RE_status_lock_st0 = 0;
+        RE_status_lock_st1 = 0;
+        RE_status_lock_st2 = 0;
+        PU_status = 7;
+        if (RE_status_lock_st7 == 0)
+        {
+            expect_q(0, 0) = q(0, 0);
+            expect_q(1, 0) = q(1, 0);
+            expect_q(2, 0) = q(2, 0);
+            //INTTT_q4=(int)(joint4_actual_angle*10000);
+            //INTTT_q5=(int)(joint5_actual_angle*10000);
+            RE_status_lock_st7 = 1;
+        }
+
+        if (RE_KB_A == 1 && RE_KB_D == 0)
+        {
+            expect_q(0, 0) = expect_q(0, 0) + 0.00008;
+        }
+        else if (RE_KB_A == 0 && RE_KB_D == 1)
+        {
+            expect_q(0, 0) = expect_q(0, 0) - 0.00008;
+        }
+        else
+        {
+            expect_q(0, 0) = expect_q(0, 0);
+        }
+        
+
+        if (RE_KB_W == 0 && RE_KB_S == 1)
+        {
+            expect_q(1, 0) = expect_q(1, 0) + 0.00005;
+        }
+        else if (RE_KB_W == 1 && RE_KB_S == 0)
+        {
+            expect_q(1, 0) = expect_q(1, 0) - 0.00005;
+        }
+        else
+        {
+            expect_q(1, 0) = expect_q(1, 0);
+        }
+
+        if (RE_KB_Q == 1 && RE_KB_E == 0)
+        {
+            expect_q(2, 0) = expect_q(2, 0) + 0.00005;
+        }
+        else if (RE_KB_Q == 0 && RE_KB_E == 1)
+        {
+            expect_q(2, 0) = expect_q(2, 0) - 0.00005;
+        }
+        else
+        {
+            expect_q(2, 0) = expect_q(2, 0);
+        }
+
+        //转动
+        if (RE_KB_L == 1 && RE_KB_R == 0)
+        {
+            KB_TURNLR = 1;
+        }
+        else if (RE_KB_L == 0 && RE_KB_R == 1)
+        {
+            KB_TURNLR = -1;
+        }
+        else
+        {
+            KB_TURNLR = 0;
+        }
+        //抓手
+        if (RE_KB_O == 1 && RE_KB_C == 0)
+        {
+            KB_D = 1;
+        }
+        else if (RE_KB_O == 0 && RE_KB_C == 1)
+        {
+            KB_D = -1;
+        }
+        else
+        {
+            KB_D = 0;
+        }
+    }
+    //视觉测试
+    else if (RE_status == 8)
+    {
+        //状态改变
+        ROS_INFO("PU_status: %f", PU_status);
+        PU_status = 8; //？？
+
+        //状态锁
+        RE_status_lock_st0 = 0;
+        RE_status_lock_st1 = 0;
+        RE_status_lock_st2 = 0;
+        RE_status_lock_st7 = 0;
+
+        //状态改变后的操作
+        if (RE_status_changed)
+        {
+            ROS_INFO("status==changed ");
+        }
+
+        //更改期望角度为接收到的角度
+        const double vs_gain = 1000 /180.0 * PI;
+        expect_q(0, 0) = q(0,0) + 0.01 * vs_gain * visual_received_angle[0];
+        expect_q(1, 0) = q(1,0) + 0.01 * vs_gain * visual_received_angle[1];
+        expect_q(2, 0) = q(2,0) + 0.01 * vs_gain * visual_received_angle[2];
+        joint4angle = joint4_actual_angle + 0.01 * vs_gain * visual_received_angle[3];
+        //joint5angle = visual_received_angle[4];
+    }
+    //状态锁重置🔓
+    else
+    {
+        // RE_status_lock_st* 为几个非轨迹操作的急停锁，进入急停/遥操作/笛卡尔/关节时急停
+        RE_status_lock_st0 = 0;
+        RE_status_lock_st1 = 0;
+        RE_status_lock_st2 = 0;
+        RE_status_lock_st7 = 0;
+        PU_status = 888;
+    }
+}
+
+Vector3d Kinematics_Solver(double q1, double q2, double q3, double KB_W_, double KB_A_, double KB_Q_, double KB_SPEEDUP_, double SPEEDUP1, double SPEEDUP2, double SPEEDUP3)
+{
+    double a1 = 424.0;
+    //double a2 = 268.0;
+    double a2 = 325.0;
+    double update_x;
+    double update_y;
+    double update_z;
+    double actual_x;
+    double actual_y;
+    double actual_z;
+    double actual_r;
+    double W;
+    double A;
+    double theta_T;
+    double theta1;
+    double theta2;
+    double theta3;
+    double upd_disx = 0.48;
+    double upd_dis = 0.48;
+    double N_1;
+    double N_2;
+    double N_3;
+    double N_4;
+    double KB_W_Kinematics;
+    double KB_A_Kinematics;
+    double KB_Q_Kinematics;
+    double KB_SPEEDUP_coefficient;
+    double upd_dis1, upd_dis2, upd_dis3;
+    KB_W_Kinematics = KB_W_;
+    KB_A_Kinematics = KB_A_;
+    KB_Q_Kinematics = KB_Q_;
+    KB_SPEEDUP_coefficient = KB_SPEEDUP_;
+    upd_dis1 = abs(SPEEDUP1) * upd_disx;
+    upd_dis2 = abs(SPEEDUP2) * upd_disx;
+    upd_dis3 = abs(SPEEDUP3) * upd_disx;
+
+    //正运动学求解
+    actual_r = a1 * cos(-q2) + a2 * cos(-q2 + q3);
+    actual_x = actual_r * cos(q1);
+    actual_y = actual_r * sin(q1);
+    actual_z = a1 * sin(-q2) + a2 * sin(-q2 + q3);
+
+    upd_dis = KB_SPEEDUP_coefficient * upd_disx;
+
+    // 满足工作空间内的笛卡尔空间更新
+    if (abs(KB_W_Kinematics + 1) < 0.1 && ((actual_x - upd_dis) * (actual_x - upd_dis) + actual_y * actual_y + actual_z * actual_z) <= 561001 && ((actual_x - upd_dis) * (actual_x - upd_dis) + actual_y * actual_y + actual_z * actual_z) >= 9801)
+    //if(abs(KB_W_Kinematics+1)<0.1)
+    {
+        update_x = actual_x - upd_dis1;
+    }
+    else if (abs(KB_W_Kinematics - 1) < 0.1 && ((actual_x + upd_dis) * (actual_x + upd_dis) + actual_y * actual_y + actual_z * actual_z) <= 561001 && ((actual_x + upd_dis) * (actual_x + upd_dis) + actual_y * actual_y + actual_z * actual_z) >= 9801)
+    //else  if(abs(KB_W_Kinematics-1)<0.1)
+    {
+        update_x = actual_x + upd_dis1;
+    }
+    else
+    {
+        update_x = actual_x;
+    }
+
+    if (abs(KB_A_Kinematics + 1) < 0.1 && ((actual_x) * (actual_x) + (actual_y + upd_dis) * (actual_y + upd_dis) + actual_z * actual_z) <= 561001 && ((actual_x) * (actual_x) + (actual_y + upd_dis) * (actual_y + upd_dis) + actual_z * actual_z) >= 9801)
+    //if(abs(KB_W_Kinematics+1)<0.1)
+    {
+        update_y = actual_y + upd_dis2;
+    }
+    else if (abs(KB_A_Kinematics - 1) < 0.1 && ((actual_x) * (actual_x) + (actual_y - upd_dis) * (actual_y - upd_dis) + actual_z * actual_z) <= 475610018864 && ((actual_x) * (actual_x) + (actual_y - upd_dis) * (actual_y - upd_dis) + actual_z * actual_z) >= 9801)
+    //else  if(abs(KB_W_Kinematics-1)<0.1)
+    {
+        update_y = actual_y - upd_dis2;
+    }
+    else
+    {
+        update_y = actual_y;
+    }
+
+    if (abs(KB_Q_Kinematics + 1) < 0.1 && ((actual_x) * (actual_x) + (actual_y) * (actual_y) + (actual_z - upd_dis) * (actual_z - upd_dis)) <= 561001 && ((actual_x) * (actual_x) + (actual_y) * (actual_y) + (actual_z - upd_dis) * (actual_z - upd_dis)) >= 9801)
+    //if(abs(KB_W_Kinematics+1)<0.1)
+    {
+        update_z = actual_z - upd_dis3;
+    }
+    else if (abs(KB_Q_Kinematics - 1) < 0.1 && ((actual_x) * (actual_x) + (actual_y) * (actual_y) + (actual_z + upd_dis) * (actual_z + upd_dis)) <= 561001 && ((actual_x) * (actual_x) + (actual_y) * (actual_y) + (actual_z + upd_dis) * (actual_z + upd_dis)) >= 9801)
+    //else  if(abs(KB_W_Kinematics-1)<0.1)
+    {
+        update_z = actual_z + upd_dis3;
+    }
+    else
+    {
+        update_z = actual_z;
+    }
+
+    // 逆运动学求解
+    W = sqrt(update_x * update_x + update_y * update_y);
+    A = sqrt(update_x * update_x + update_y * update_y + update_z * update_z);
+
+    N_1 = update_z / A;
+    if (N_1 > 1.00)
+    {
+        N_1 = 1.00;
+    }
+    else if (N_1 < -1.00)
+    {
+        N_1 = -1.00;
+    }
+
+    N_2 = update_y / W;
+    if (N_2 > 1.00)
+    {
+        N_2 = 1.00;
+    }
+    else if (N_2 < -1.00)
+    {
+        N_2 = -1.00;
+    }
+
+    N_3 = (a1 * a1 + A * A - a2 * a2) / (2 * a1 * A);
+    if (N_3 > 1.00)
+    {
+        N_3 = 1.00;
+    }
+    else if (N_3 < -1.00)
+    {
+        N_3 = -1.00;
+    }
+
+    N_4 = (A * A - a1 * a1 - a2 * a2) / (2 * a1 * a2);
+    if (N_4 > 1.00)
+    {
+        N_4 = 1.00;
+    }
+    else if (N_4 < -1.00)
+    {
+        N_4 = -1.00;
+    }
+
+    //theta_T=asin(update_z/A);
+    theta_T = asin(N_1);
+
+    //theta1=asin(update_y/W);
+    //theta1=asin(N_2);
+
+    theta1 = atan2(update_y, update_x);
+    if (theta1 >= PI * 9 / 12 || theta1 <= -PI / 7)
+    //if(theta1>PI/2||theta1<0)
+    {
+        theta1 = q1;
+        theta2 = q2;
+        theta3 = q3;
+    }
+    else
+    {
+        //theta2=(-1.0)*acos((a1*a1+A*A-a2*a2)/(2*a1*A))+theta_T;
+        theta2 = (-1.0) * acos(N_3) + theta_T;
+        //theta3=(1.0)*acos((A*A-a1*a1-a2*a2)/(2*a1*a2));
+        theta3 = (1.0) * acos(N_4);
+    }
+    Kinematics_theta_update(0, 0) = theta1;
+    Kinematics_theta_update(1, 0) = -theta2;
+    Kinematics_theta_update(2, 0) = theta3;
+    //ROS_INFO("xyz===  %f , %f , %f ,//, %f , %f , %f ",actual_x,actual_y,actual_z,update_x,update_y,update_z);
+    //ROS_INFO("q1q2q3===  %f , %f , %f ,//, %f , %f , %f ",q1,q2,q3,theta1,-theta2,theta3);
+    //ROS_INFO("JOY_WAQ===  %f , %f ,%f  ",KB_W,KB_A,KB_Q);
+    return Kinematics_theta_update;
+}
+void VisualAngleCallback(const sensor_msgs::JointState &joint_state)
+{
+    for (int i = 0; i < 4; i++)
+    {
+        visual_received_angle[i] = joint_state.velocity[i];
+    }
+}
+
+//在末端坐标系下控制，求关节角度变化
+//输入三个关节角度、上下左右指令、键盘速度(？暂时没用)、速度（？调用时候暂设为1）
+
+Vector3d KinematicsSolverTarget(Vector3d actual_q, double joint4_actual_angle, double KB_W_, double KB_A_, double KB_Q_, double KB_SPEEDUP_, double SPEEDUP1, double SPEEDUP2, double SPEEDUP3)
+{
+    RoboticKinematics KinematicsTarget = RoboticKinematics();
+    KinematicsTarget.setDefaultRobot();
+
+    double upd_disx = 0.48; //要改成0.48
+    double upd_dis = 0.48;
+    double KB_W_Kinematics;
+    double KB_A_Kinematics;
+    double KB_Q_Kinematics;
+    KB_W_Kinematics = KB_W_;
+    KB_A_Kinematics = KB_A_;
+    KB_Q_Kinematics = KB_Q_;
+
+    double upd_dis1, upd_dis2, upd_dis3;
+
+    upd_dis1 = abs(SPEEDUP1) * upd_disx;
+    upd_dis2 = abs(SPEEDUP2) * upd_disx;
+    upd_dis3 = abs(SPEEDUP3) * upd_disx;
+
+    PoseMatrix basis_target_position;
+    Vector3d desired_angles_output;
+    vector<double> actual_angles(4, 0), endPose(4, 0), target_pose(4, 0), basis_target_pose(4, 0), desired_angles(4, 0);
+    //转化为角度
+    for (int i = 0; i < 3; i++)
+    {
+        actual_angles[i] = actual_q[i] * 180 / 3.1415926535;
+    }
+    actual_angles[3] = joint4_actual_angle * 180 / 3.1415926535;
+    // cout << "actual_angles:" << actual_angles[0] << ", " << actual_angles[1] << ", " << actual_angles[2] << endl;
+
+    //正运动学求解得转换矩阵
+    PoseMatrix basis_to_end_transmat = PoseMatrix();
+    basis_to_end_transmat = KinematicsTarget.ForwardKinematics(actual_angles, endPose);
+    // cout << "end pose:" << endPose[0] << ", " << endPose[1] << ", " << endPose[2] << endl;
+    //键盘输入转化为位移量 未限制
+    if (abs(KB_W_Kinematics - 1) < 0.1) //x
+    {
+        target_pose[0] = upd_dis1;
+    }
+    else if (abs(KB_W_Kinematics + 1) < 0.1)
+    {
+        target_pose[0] = -upd_dis1;
+    }
+    else
+    {
+        target_pose[0] = 0.0;
+    }
+
+    if (abs(KB_A_Kinematics - 1) < 0.1) //y
+    {
+        target_pose[1] = upd_dis2;
+    }
+    else if (abs(KB_A_Kinematics + 1) < 0.1)
+    {
+        target_pose[1] = -upd_dis2;
+    }
+    else
+    {
+        target_pose[1] = 0.0;
+    }
+
+    if (abs(KB_Q_Kinematics - 1) < 0.1) //z
+    {
+        target_pose[2] = upd_dis3;
+    }
+    else if (abs(KB_Q_Kinematics + 1) < 0.1)
+    {
+        target_pose[2] = -upd_dis3;
+    }
+    else
+    {
+        target_pose[2] = 0.0;
+    }
+    // cout << "target pose:" << target_pose[0] << ", " << target_pose[1] << ", " << target_pose[2] << endl;
+
+    //转换到基坐标下
+    basis_target_position = basis_to_end_transmat * (TransMat(target_pose[0], target_pose[1], target_pose[2]));
+
+    basis_target_pose[0] = basis_target_position.getPosition()[0];
+    basis_target_pose[1] = basis_target_position.getPosition()[1];
+    basis_target_pose[2] = basis_target_position.getPosition()[2];
+    // cout << "basis target pose:" << basis_target_pose[0] << ", " << basis_target_pose[1] << ", " << basis_target_pose[2] << endl;
+
+    //逆运动学求解得期望角度
+    KinematicsTarget.InverseKinematics3DofPosition(desired_angles, basis_target_pose, actual_angles, 0);
+
+    //转化为弧度
+    for (int i = 0; i < 3; i++)
+    {
+        desired_angles_output(i, 0) = desired_angles[i] * 3.1415926535 / 180;
+    }
+
+    return desired_angles_output;
+}
+
+//demo
+int demoKinematics()
+{
+    try
+    {
+        RoboticKinematics KinematicsObj = RoboticKinematics();
+        KinematicsObj.setDefaultRobot();
+
+        PoseMatrix basePoseMat;
+        basePoseMat.IdentityMat();
+
+        cout << "================================================================================================" << endl;
+        vector<double> endPose;
+        double KB_W = 1, KB_A = 0, KB_Q = 0;
+        Vector3d target_angles;
+        Vector3d actual_q;
+        actual_q(0, 0) = 0.30;
+        actual_q(1, 0) = 0.66;
+        actual_q(2, 0) = 2.12;
+
+        target_angles = KinematicsSolverTarget(actual_q, joint4_actual_angle, KB_W, KB_A, KB_Q, 1.0, 1.0, 1.0, 1.0);
+
+        cout << "When joint angles = [" << actual_q(0, 0) << " " << actual_q(1, 0) << " " << actual_q(2, 0) << "]" << endl;        //��ʾ�ؽڽǶ�
+        cout << "Keyboard: X = " << KB_W << ", Y = " << KB_A << ", Z = " << KB_Q << endl;                                          //endPose��ǰ3��Ϊxyz����
+        cout << "Desired angles = " << target_angles(0, 0) << ", " << target_angles(1, 0) << ",  " << target_angles(2, 0) << endl; //endPose�ĺ�3��Ϊ����ǡ������ǡ������
+        cout << "================================================================================================" << endl;
+
+        KB_W = 0, KB_A = 1, KB_Q = 0;
+        //抓小车
+        actual_q(0, 0) = 0.30;
+        actual_q(1, 0) = 0.66;
+        actual_q(2, 0) = 2.12;
+
+        target_angles = KinematicsSolverTarget(actual_q, joint4_actual_angle, KB_W, KB_A, KB_Q, 1.0, 1.0, 1.0, 1.0);
+
+        cout << "When joint angles = [" << actual_q(0, 0) << " " << actual_q(1, 0) << " " << actual_q(2, 0) << "]" << endl;        //��ʾ�ؽڽǶ�
+        cout << "Keyboard: X = " << KB_W << ", Y = " << KB_A << ", Z = " << KB_Q << endl;                                          //endPose��ǰ3��Ϊxyz����
+        cout << "Desired angles = " << target_angles(0, 0) << ", " << target_angles(1, 0) << ",  " << target_angles(2, 0) << endl; //endPose�ĺ�3��Ϊ����ǡ������ǡ������
+
+        cout << "================================================================================================" << endl;
+
+        KB_W = 0, KB_A = 0, KB_Q = 1;
+        //抓小车
+        actual_q(0, 0) = 0.30;
+        actual_q(1, 0) = 0.66;
+        actual_q(2, 0) = 2.12;
+
+        target_angles = KinematicsSolverTarget(actual_q, joint4_actual_angle, KB_W, KB_A, KB_Q, 1.0, 1.0, 1.0, 1.0);
+
+        cout << "When joint angles = [" << actual_q(0, 0) << " " << actual_q(1, 0) << " " << actual_q(2, 0) << "]" << endl;        //��ʾ�ؽڽǶ�
+        cout << "Keyboard: X = " << KB_W << ", Y = " << KB_A << ", Z = " << KB_Q << endl;                                          //endPose��ǰ3��Ϊxyz����
+        cout << "Desired angles = " << target_angles(0, 0) << ", " << target_angles(1, 0) << ",  " << target_angles(2, 0) << endl; //endPose�ĺ�3��Ϊ����ǡ������ǡ������
+        cout << "================================================================================================" << endl;
+
+        KB_W = -1, KB_A = 0, KB_Q = 0;
+        //放小车
+        actual_q(0, 0) = -1.57;
+        actual_q(1, 0) = 0.8;
+        actual_q(2, 0) = 0.56;
+
+        target_angles = KinematicsSolverTarget(actual_q, joint4_actual_angle, KB_W, KB_A, KB_Q, 1.0, 1.0, 1.0, 1.0);
+
+        cout << "When joint angles = [" << actual_q(0, 0) << " " << actual_q(1, 0) << " " << actual_q(2, 0) << "]" << endl;        //��ʾ�ؽڽǶ�
+        cout << "Keyboard: X = " << KB_W << ", Y = " << KB_A << ", Z = " << KB_Q << endl;                                          //endPose��ǰ3��Ϊxyz����
+        cout << "Desired angles = " << target_angles(0, 0) << ", " << target_angles(1, 0) << ",  " << target_angles(2, 0) << endl; //endPose�ĺ�3��Ϊ����ǡ������ǡ������
+        cout << "================================================================================================" << endl;
+
+        KB_W = 0, KB_A = -1, KB_Q = 0;
+        //放小车
+        actual_q(0, 0) = -1.57;
+        actual_q(1, 0) = 0.8;
+        actual_q(2, 0) = 0.56;
+
+        target_angles = KinematicsSolverTarget(actual_q, joint4_actual_angle, KB_W, KB_A, KB_Q, 1.0, 1.0, 1.0, 1.0);
+
+        cout << "When joint angles = [" << actual_q(0, 0) << " " << actual_q(1, 0) << " " << actual_q(2, 0) << "]" << endl;        //��ʾ�ؽڽǶ�
+        cout << "Keyboard: X = " << KB_W << ", Y = " << KB_A << ", Z = " << KB_Q << endl;                                          //endPose��ǰ3��Ϊxyz����
+        cout << "Desired angles = " << target_angles(0, 0) << ", " << target_angles(1, 0) << ",  " << target_angles(2, 0) << endl; //endPose�ĺ�3��Ϊ����ǡ������ǡ������
+        cout << "================================================================================================" << endl;
+
+        KB_W = 0, KB_A = 0, KB_Q = -1;
+        //放小车
+        actual_q(0, 0) = -1.57;
+        actual_q(1, 0) = 0.8;
+        actual_q(2, 0) = 0.56;
+
+        target_angles = KinematicsSolverTarget(actual_q, joint4_actual_angle, KB_W, KB_A, KB_Q, 1.0, 1.0, 1.0, 1.0);
+
+        cout << "When joint angles = [" << actual_q(0, 0) << " " << actual_q(1, 0) << " " << actual_q(2, 0) << "]" << endl;        //��ʾ�ؽڽǶ�
+        cout << "Keyboard: X = " << KB_W << ", Y = " << KB_A << ", Z = " << KB_Q << endl;                                          //endPose��ǰ3��Ϊxyz����
+        cout << "Desired angles = " << target_angles(0, 0) << ", " << target_angles(1, 0) << ",  " << target_angles(2, 0) << endl; //endPose�ĺ�3��Ϊ����ǡ������ǡ������
+    }
+    catch (...)
+    {
+        return -1;
+    }
+    return 0;
+}

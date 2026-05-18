@@ -8,5 +8,4 @@
 
 工程人员手动 SSH 测试命令：
 
-ssh -o BatchMode=yes -o ConnectTimeout=5 mumu@192.168.1.35 "echo SSH_OK"
-
+ssh -o BatchMode=yes -o ConnectTimeout=5 -o UserKnownHostsFile=NUL -o StrictHostKeyChecking=no -o LogLevel=ERROR night@192.168.1.35 "echo SSH_OK"

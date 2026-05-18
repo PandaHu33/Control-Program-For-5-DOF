@@ -1,0 +1,12 @@
+<launch>    
+    <node pkg="mainpulator" type="trajectory_node" name="trajectory_node" output="screen" />      
+    <param name = "trajectory_type"  type = "string" value = "trapezoid" />
+    <param name = "trapezoid_qmax"  type = "double" value = "1.25" />
+    <param name = "trapezoid_speet"  type = "double" value = "2" />
+    <param name = "trapezoid_acceleration"  type = "double" value = "0.5" />
+    <param name = "circular_x"  type = "double" value = "460" />
+    <param name = "circular_y"  type = "double" value = "0" />
+    <param name = "circular_z"  type = "double" value = "488" />
+    <param name = "circular_radius"  type = "double" value = "50" />
+    <param name = "circular_speet"  type = "double" value = "31.4" />
+</launch>

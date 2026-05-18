@@ -1,43 +1,42 @@
 # 显控界面按钮说明
 
-本文只说明显控界面中的常用按钮。现场硬件操作流程和 Debug 内容请在下方预留位置补充。
+### 硬件操作流程
 
-## 硬件操作流程
+##### 1.机械臂电源拨到右边上电
 
-1.机械臂电源拨到右边上电
+![31259623543b830b3ad0c663202dd5e](https://gitee.com/iiimp1/images/raw/master/imgs/31259623543b830b3ad0c663202dd5e.jpg)
 
-![31259623543b830b3ad0c663202dd5e](C:/Users/胡心成/Documents/WeChat Files/wxid_db3szcmz83o422/FileStorage/Temp/31259623543b830b3ad0c663202dd5e.jpg)
+##### 2.灵巧手电池连接上电
 
-2.灵巧手电池连接上电
+![69d10d890d364f8cb9e5fb2f33a7125](https://gitee.com/iiimp1/images/raw/master/imgs/69d10d890d364f8cb9e5fb2f33a7125.jpg)
 
-![69d10d890d364f8cb9e5fb2f33a7125](C:/Users/胡心成/Documents/WeChat Files/wxid_db3szcmz83o422/FileStorage/Temp/69d10d890d364f8cb9e5fb2f33a7125.jpg)
+##### 3.点击手套按钮，绿灯快闪说明已经连接
 
-3.点击手套按钮，绿灯快闪说明已经连接
+![手套(1)](https://gitee.com/iiimp1/images/raw/master/imgs/%E6%89%8B%E5%A5%97(1).jpg)
 
-![image-20260502134141845](C:/Users/胡心成/AppData/Roaming/Typora/typora-user-images/image-20260502134141845.png)
+##### 4.打开“主端程序beta for 5-dof”文件夹，点击程序 一键启动显控启动程序
 
-4.点击程序 一键启动显控启动程序
+![image-20260502112623840](https://gitee.com/iiimp1/images/raw/master/imgs/image-20260502112623840.png)
 
-![image-20260502112623840](C:/Users/胡心成/AppData/Roaming/Typora/typora-user-images/image-20260502112623840.png)
-
-5.选择允许使用相机![image-20260502112656691](C:/Users/胡心成/AppData/Roaming/Typora/typora-user-images/image-20260502112656691.png)
+##### 5.选择允许使用相机![image-20260502112656691](https://gitee.com/iiimp1/images/raw/master/imgs/image-20260502112656691.png)
 
 此时会弹出另外3个窗口，保持在后端即可
 
-成功启动会显示如下界面：
-![image-20260502112900532](C:/Users/胡心成/AppData/Roaming/Typora/typora-user-images/image-20260502112900532.png)
+##### 6. 成功启动会显示如下界面：
 
-默认为键盘控制，点击手柄可切换为手柄控制
+![image-20260502112900532](https://gitee.com/iiimp1/images/raw/master/imgs/image-20260502112900532.png)
 
-使用手柄控制前，确保下方文字显示xbox 360 Controller(说明手柄已经连接) 否则请勿切换手柄控制！！！
+##### 默认为键盘控制，点击手柄可切换为手柄控制
 
-![image-20260502133821123](C:/Users/胡心成/AppData/Roaming/Typora/typora-user-images/image-20260502133821123.png)
+##### 使用手柄控制前，确保下方文字显示xbox 360 Controller(说明手柄已经连接) 否则请勿切换手柄控制！！！
 
-若显示已达到工作空间外边界，目标被限制，需要往回运动![image-20260502133101782](C:/Users/胡心成/AppData/Roaming/Typora/typora-user-images/image-20260502133101782.png)
+![image-20260502133821123](https://gitee.com/iiimp1/images/raw/master/imgs/image-20260502133821123.png)
 
-若显示已达到内肘/自碰安全边界，目标被限制，则需要往外运动
+##### 若显示已达到工作空间外边界，目标被限制，需要往回运动![image-20260502133101782](https://gitee.com/iiimp1/images/raw/master/imgs/image-20260502133101782.png)
 
-![image-20260502133553504](C:/Users/胡心成/AppData/Roaming/Typora/typora-user-images/image-20260502133553504.png)
+##### 若显示已达到内肘/自碰安全边界，目标被限制，则需要往外运动
+
+![image-20260502133553504](https://gitee.com/iiimp1/images/raw/master/imgs/image-20260502133553504.png)
 
 具体控制方式如下：
 
@@ -54,11 +53,13 @@
 
 
 
-点击复位按钮则能复位机械臂和灵巧手到初始位置（复位前注意运动过程中不会碰撞）
+##### 点击复位按钮则能复位机械臂和灵巧手到初始位置（复位前注意运动过程中不会碰撞）
 
 
 
-结束实验后，点击关闭系统关闭所有后台程序，确认关闭后关闭显控网页界面，并给各设备断电
+##### 结束实验后，点击关闭系统关闭所有后台程序，确认全部程序关闭后
+
+##### 关闭显控网页界面，并给各设备（机械臂电源、灵巧手电池）断电
 
 ## Debug
 
