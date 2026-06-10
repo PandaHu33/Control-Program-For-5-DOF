@@ -1,0 +1,45 @@
+service:
+  host: "127.0.0.1"
+  port: 8091
+  event_hz: 20
+  mjpeg_hz: 15
+  jpeg_quality: 80
+
+camera:
+  index: "auto"
+  min_detection_confidence: 0.7
+  min_tracking_confidence: 0.7
+  show_timing: true
+
+control:
+  # Hold this gesture to toggle lock/unlock. Options: victory, open_palm, fist, pinch.
+  unlock_gesture: "victory"
+  unlock_hold_sec: 0.35
+  # Ignore lock/unlock changes for this long after a state change.
+  state_toggle_cooldown_sec: 5.0
+  # Keep motion active briefly if victory is missed for one or two frames.
+  control_clutch_grace_sec: 0.35
+  pinch_threshold: 0.45
+
+  # Hand offset deadzones. Image x/y are normalized coordinates; depth is estimated in meters.
+  deadzone_xy: 0.06
+  deadzone_depth: 0.04
+  smoothing_alpha: 0.18
+
+  # Converts hand offset into soft-limited dimensionless XYZ input axes.
+  axis_gain_x: 1.5
+  axis_gain_y: 1.8
+  axis_gain_z: 1.8
+  max_axis: 0.45
+
+  # UI position-control step per 100 ms tick. Kept smaller than keyboard/gamepad initially.
+  position_step_m: 0.02
+
+  # After unlock, victory is the motion clutch. Pinch closes the gripper in the UI; open_palm opens it.
+  # Tracker axes: axis.x from hand depth, axis.y from image x, axis.z from image y.
+  # The control UI remaps them to arm axes: image y -> arm X, image x -> arm Y, depth -> arm Z.
+  # Flip signs here if the observed direction is opposite to the desired direction.
+  axis_sign:
+    x_from_depth: 1
+    y_from_image_x: -1
+    z_from_image_y: 1

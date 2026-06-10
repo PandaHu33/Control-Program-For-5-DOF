@@ -256,18 +256,20 @@ int main(int argc, char *argv[])
         // 【新增代码】发布机械臂的当前关节状态给模仿学习节点
         sensor_msgs::JointState current_imitation_state;
         current_imitation_state.header.stamp = ros::Time::now();
-        current_imitation_state.position.resize(4);
-        current_imitation_state.velocity.resize(4);
+        current_imitation_state.position.resize(5);
+        current_imitation_state.velocity.resize(5);
         
         current_imitation_state.position[0] = q(0,0);
         current_imitation_state.position[1] = q(1,0);
         current_imitation_state.position[2] = q(2,0);
         current_imitation_state.position[3] = joint4_actual_angle;
+        current_imitation_state.position[4] = joint5_actual_angle;
 
         current_imitation_state.velocity[0] = dq(0,0);
         current_imitation_state.velocity[1] = dq(1,0);
         current_imitation_state.velocity[2] = dq(2,0);
         current_imitation_state.velocity[3] = joint4_actual_velocity;
+        current_imitation_state.velocity[4] = 0.0;
         
         imitation_state_pub.publish(current_imitation_state);
         
@@ -506,6 +508,22 @@ void TeleOperationCallback(const  sensor_msgs::Imu& msg){
     expect_ddq(0,0) = msg.linear_acceleration.x;
     expect_ddq(1,0) = msg.linear_acceleration.y;
     expect_ddq(2,0) = msg.linear_acceleration.z;
+
+    // H5 hand-vision gripper command, forwarded by h5_udp_bridge from order[10].
+    //  1: close, 0: hold/no move, -1: open.
+    KB_D = msg.orientation_covariance[0];
+    if (KB_D > 1.0)
+    {
+        KB_D = 1.0;
+    }
+    else if (KB_D < -1.0)
+    {
+        KB_D = -1.0;
+    }
+    if (KB_D > -0.01 && KB_D < 0.01)
+    {
+        KB_D = 0.0;
+    }
 }
 // 【修改代码】接收模仿学习节点下发的期望轨迹的回调函数（已集成抓手信号）
 void ImitationCallback(const sensor_msgs::JointState::ConstPtr& msg)

@@ -1,0 +1,11 @@
+name: hand-tracker-arm
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - pyyaml
+  - pip:
+      - opencv-python>=4.8,<5
+      - mediapipe==0.10.14

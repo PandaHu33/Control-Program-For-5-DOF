@@ -256,15 +256,15 @@ class H5UdpBridge(object):
 
     def on_imitation_state(self, msg):
         # test_node.cpp publishes /robot/imitation_state as current q/dq:
-        # position[0:3]=actual q, position[3]=joint4, velocity[0:3]=actual dq.
+        # position[0:3]=actual q, position[3]=joint4, position[4]=joint5, velocity[0:3]=actual dq.
         position = list(msg.position)
         velocity = list(msg.velocity)
         self.last_imitation_state_time = time.time()
         payload = {
             "ind": self.next_telemetry_ind(),
             "time": stamp_ms(msg),
-            "angle": [at(position, 0), at(position, 1), at(position, 2), at(position, 3), -1.0, -1.0, -1.0],
-            "current": [at(velocity, 0), at(velocity, 1), at(velocity, 2), at(velocity, 3, 0.0), -1.0, -1.0, -1.0],
+            "angle": [at(position, 0), at(position, 1), at(position, 2), at(position, 3), at(position, 4, -1.0), -1.0, -1.0],
+            "current": [at(velocity, 0), at(velocity, 1), at(velocity, 2), at(velocity, 3, 0.0), at(velocity, 4, -1.0), -1.0, -1.0],
             "torque": [-1.0] * 7,
             "pose_ee": [0.0] * 6,
             "pose_elbow": [0.0] * 6,
@@ -361,6 +361,7 @@ class H5UdpBridge(object):
         imu_msg.linear_acceleration.x = command["order"][7]  # expect_ddq1
         imu_msg.linear_acceleration.y = command["order"][8]  # expect_ddq2
         imu_msg.linear_acceleration.z = command["order"][9]  # expect_ddq3
+        imu_msg.orientation_covariance[0] = at(command["order"], 10, 0.0)  # KB_D gripper: 1 close, 0 idle, -1 open
         self.teleop_pub.publish(imu_msg)
 
         if command["emergency_stop"]:

@@ -119,6 +119,57 @@
     .stick-label { font-size: 11px; color: var(--muted); letter-spacing: 0.06em; }
     .trigger-panel { display: flex; flex-direction: column; align-items: center; gap: 6px; }
     .trigger-grid { display: grid; grid-template-columns: repeat(2, 60px); gap: 6px; }
+    .hand-axis-grid { display: grid; grid-template-columns: repeat(2, minmax(84px, 1fr)); gap: 8px; margin-top: 8px; }
+    .hand-axis-grid div {
+      padding: 8px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .hand-axis-grid strong { display: block; color: var(--text); font-size: 16px; margin-top: 4px; }
+    .hand-vision-panel {
+      display: grid;
+      grid-template-columns: minmax(360px, 480px) minmax(0, 1fr);
+      gap: 12px;
+      align-items: start;
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(255,255,255,0.06);
+    }
+    .hand-vision-title {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    .hand-vision-frame {
+      position: relative;
+      width: 100%;
+      min-height: 230px;
+      aspect-ratio: 4 / 3;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #0b1221;
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .hand-vision-frame img {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #0b1221;
+    }
+    .hand-vision-telemetry { min-width: 0; }
+    .hand-vision-telemetry .hand-axis-grid {
+      grid-template-columns: repeat(2, minmax(84px, 1fr));
+      margin-top: 0;
+    }
+    #usbCameraFrame {
+      max-height: 240px;
+      padding-top: 42%;
+    }
     .stick-base {
       position: relative;
       width: 72px;
@@ -230,13 +281,13 @@
     }
     .arm-preset-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
       gap: 8px;
     }
     .arm-preset {
       display: grid;
-      gap: 8px;
-      padding: 10px;
+      gap: 6px;
+      padding: 8px;
       border-radius: 8px;
       background: rgba(255,255,255,0.03);
       border: 1px solid rgba(255,255,255,0.06);
@@ -244,7 +295,7 @@
     .arm-preset strong { font-size: 13px; }
     .arm-preset-fields {
       display: grid;
-      grid-template-columns: repeat(4, minmax(48px, 1fr));
+      grid-template-columns: repeat(2, minmax(52px, 1fr));
       gap: 6px;
     }
     .arm-preset-fields label {
@@ -253,6 +304,7 @@
       color: var(--muted);
       font-size: 11px;
     }
+    .arm-preset button { padding: 8px; font-size: 13px; }
     .demo-actions button.primary {
       background: rgba(52,211,153,.16);
       border-color: rgba(52,211,153,.42);
@@ -346,6 +398,7 @@
       .kbd { width: 48px; height: 38px; }
       .trigger-grid { grid-template-columns: repeat(2, 48px); }
       .stick-base { width: 60px; height: 60px; }
+      .hand-vision-panel { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -386,6 +439,7 @@
         <div class="keyboard-mode-selector" id="inputDeviceMode" aria-label="input device mode">
           <label><input type="radio" name="inputDeviceMode" value="keyboard" checked />键盘</label>
           <label><input type="radio" name="inputDeviceMode" value="gamepad" />手柄</label>
+          <label><input type="radio" name="inputDeviceMode" value="hand_vision" />手部识别</label>
         </div>
         <div class="keyboard-mode-selector" id="keyboardControlMode" aria-label="keyboard control mode">
           <label><input type="radio" name="keyboardControlMode" value="position" checked />位置控制</label>
@@ -404,6 +458,8 @@
           <div class="kbd" data-key="KeyA">A</div>
           <div class="kbd" data-key="KeyS">S</div>
           <div class="kbd" data-key="KeyD">D</div>
+          <div class="kbd" data-key="ArrowUp">&#8593;</div>
+          <div class="kbd" data-key="ArrowDown">&#8595;</div>
           <div class="kbd" data-key="ArrowLeft">&#8592;</div>
           <div class="kbd" data-key="ArrowRight">&#8594;</div>
         </div>
@@ -419,6 +475,8 @@
             <div class="trigger-grid">
               <div class="kbd" id="triggerL">L</div>
               <div class="kbd" id="triggerL2">L2</div>
+              <div class="kbd" id="dpadUp">D&#8593;</div>
+              <div class="kbd" id="dpadDown">D&#8595;</div>
               <div class="kbd" id="dpadLeft">D&#8592;</div>
               <div class="kbd" id="dpadRight">D&#8594;</div>
             </div>
@@ -428,14 +486,31 @@
       </div>
       <p class="status-line" id="keyboardTargetHint">位置控制</p>
       <p class="status-line" id="gamepadStatusHint">USB 手柄未连接</p>
+      <div class="hand-vision-panel" id="handVisionPanel">
+        <div>
+          <div class="hand-vision-title">手部识别视角</div>
+          <div class="hand-vision-frame">
+            <img id="handVisionPreview" alt="hand skeleton preview" style="display:none;" />
+          </div>
+        </div>
+        <div class="hand-vision-telemetry">
+          <div class="hand-axis-grid" id="handVisionReadout">
+            <div>X 前后<strong id="handAxisX">0.000</strong></div>
+            <div>Y 左右<strong id="handAxisY">0.000</strong></div>
+            <div>Z 上下<strong id="handAxisZ">0.000</strong></div>
+            <div>夹爪<strong id="handGripperCommand">0</strong></div>
+          </div>
+          <p class="status-line" id="handVisionHint">手部识别服务未连接</p>
+        </div>
+      </div>
     </div>
 
     <div class="card" id="usbCameraCard">
-      <h2>USB 摄像头</h2>
+      <h2>腕部相机</h2>
       <div class="video-frame" id="usbCameraFrame">
         <video id="usbCameraPreview" autoplay muted playsinline></video>
       </div>
-      <p class="status-line" id="usbCameraHint">等待摄像头...</p>
+      <p class="status-line" id="usbCameraHint">等待腕部相机...</p>
     </div>
 
     <div class="card" id="armStatus">
@@ -445,6 +520,7 @@
         <div><strong>关节2</strong><span id="j2">0° / 0A</span></div>
         <div><strong>关节3</strong><span id="j3">0° / 0A</span></div>
         <div><strong>关节4</strong><span id="j4">0° / 0A</span></div>
+        <div><strong>关节5</strong><span id="j5">0° / 0A</span></div>
       </div>
       <p class="status-line" id="armStatusHint">等待遥测...</p>
     </div>
@@ -481,16 +557,6 @@
             <label>J4°<input data-joint="3" type="number" step="1" value="90" /></label>
           </div>
           <button data-send-arm-preset="handshake">发送</button>
-        </div>
-        <div class="arm-preset" data-arm-preset="release">
-          <strong>释放姿态</strong>
-          <div class="arm-preset-fields">
-            <label>J1°<input data-joint="0" type="number" step="1" value="25" /></label>
-            <label>J2°<input data-joint="1" type="number" step="1" value="-25" /></label>
-            <label>J3°<input data-joint="2" type="number" step="1" value="35" /></label>
-            <label>J4°<input data-joint="3" type="number" step="1" value="0" /></label>
-          </div>
-          <button data-send-arm-preset="release">发送</button>
         </div>
       </div>
       <p class="status-line">预设值按角度编辑，发送时转换为弧度下发。</p>
@@ -578,6 +644,7 @@
           <div class="radios" id="controlModeGroup">
             <label><input type="radio" name="controlMode" value="keyboard" checked /> 键盘操作</label>
             <label><input type="radio" name="controlMode" value="gamepad" /> USB 手柄操作</label>
+            <label><input type="radio" name="controlMode" value="hand_vision" /> 手部识别</label>
             <label><input type="radio" name="controlMode" value="teleop" /> 主手遥操(Debug)</label>
             <label><input type="radio" name="controlMode" value="vision" /> 视觉伺服</label>
             <label><input type="radio" name="controlMode" value="shared" /> 共享控制</label>
@@ -648,6 +715,12 @@
           <button id="toggleAuto" class="active">Auto-send: ON</button>
         </div>
         <p class="status-line" id="lastPacket">Last packet: -</p>
+        <div class="flex" style="margin-top: 8px;">
+          <button id="toggleDataLog">Start Log</button>
+          <button id="downloadDataLog">Download CSV</button>
+          <button id="clearDataLog">Clear Log</button>
+        </div>
+        <p class="status-line" id="dataLogStatus">Data log: stopped, 0 rows</p>
         <p class="status-line">Frame: JSON schema + CRC32 (fixed-length)</p>
       </div>
 
@@ -678,6 +751,7 @@
     const DEFAULT_WS_URL = "ws://localhost:8080/udp";
     const API_BASE = "http://localhost:8090";
     const STATUS_WS_URL = "ws://localhost:8080/status";
+    const HAND_SERVICE_BASE = "http://127.0.0.1:8091";
     // Frame schema (mirrors protocol/frame_config.json). We'll try fetch, fallback to inline.
     const FRAME_SCHEMA_INLINE = {
       endianness: "little",
@@ -693,7 +767,13 @@
             bits: { emergency_stop:7, joint_space:6, elbow_control:5, compliance:4 },
             selector_low_nibble: { none:0, trajectory_extend:1, trajectory_retract:2, keyboard:3, teleop:7, vision_servo:11, shared_control:15 }
           },
-          order: { layout: { keys:["Q","W","E","A","S","D","Up","Down","Left","Right"], axes:["x","y","z","roll","pitch","yaw"] } }
+          order: {
+            layout: {
+              keys:["Q","W","E","A","S","D","Up","Down","Left","Right"],
+              axes:["x","y","z","roll","pitch","yaw"],
+              gripper: { index: 10, close: 1, idle: 0, open: -1 }
+            }
+          }
         },
         sub: {
           valid_fields: ["ind","time","angle","current","torque","pose_ee","pose_elbow","mode","note","crc"],
@@ -721,6 +801,7 @@
     const keyMap = [
       "KeyQ", "KeyW", "KeyE",
       "KeyA", "KeyS", "KeyD",
+      "ArrowUp", "ArrowDown",
       "ArrowLeft", "ArrowRight"
     ];
     const pressed = new Set();
@@ -728,9 +809,26 @@
     let ws = null;
     let autoSend = true;
     let lastPayloadBits = null;
+    let dataLogRecording = false;
+    let dataLogRows = [];
+    const DATA_LOG_MAX_ROWS = 200000;
+    const DATA_LOG_COLUMNS = [
+      "time_ms", "time_iso", "sample_index", "mode", "mode_value",
+      "target_x_m", "target_y_m", "target_z_m",
+      "hand_est_x", "hand_est_y", "hand_est_z",
+      "hand_axis_x", "hand_axis_y", "hand_axis_z",
+      "hand_gesture", "hand_unlocked",
+      "target_j1_rad", "target_j2_rad", "target_j3_rad", "target_j4_rad",
+      "actual_j1_rad", "actual_j2_rad", "actual_j3_rad", "actual_j4_rad", "actual_j5_rad",
+      "gripper_cmd", "telemetry_time_ms"
+    ];
 
     const kbdGrid = document.getElementById("kbdGrid");
     const lastPacket = document.getElementById("lastPacket");
+    const toggleDataLogBtn = document.getElementById("toggleDataLog");
+    const downloadDataLogBtn = document.getElementById("downloadDataLog");
+    const clearDataLogBtn = document.getElementById("clearDataLog");
+    const dataLogStatus = document.getElementById("dataLogStatus");
     const wsState = document.getElementById("wsState");
     const mainView = document.getElementById("mainView");
     const debugView = document.getElementById("debugView");
@@ -757,10 +855,18 @@
     const rightStickCaption = document.getElementById("rightStickCaption");
     const triggerL = document.getElementById("triggerL");
     const triggerL2 = document.getElementById("triggerL2");
+    const dpadUp = document.getElementById("dpadUp");
+    const dpadDown = document.getElementById("dpadDown");
     const dpadLeft = document.getElementById("dpadLeft");
     const dpadRight = document.getElementById("dpadRight");
     const usbCameraPreview = document.getElementById("usbCameraPreview");
+    const handVisionPreview = document.getElementById("handVisionPreview");
     const usbCameraHint = document.getElementById("usbCameraHint");
+    const handVisionHint = document.getElementById("handVisionHint");
+    const handAxisXEl = document.getElementById("handAxisX");
+    const handAxisYEl = document.getElementById("handAxisY");
+    const handAxisZEl = document.getElementById("handAxisZ");
+    const handGripperCommandEl = document.getElementById("handGripperCommand");
 
     const armStatusHint = document.getElementById("armStatusHint");
     const jointSpans = [
@@ -768,6 +874,7 @@
       document.getElementById("j2"),
       document.getElementById("j3"),
       document.getElementById("j4"),
+      document.getElementById("j5"),
     ];
     const controlModeGroup = document.getElementById("controlModeGroup");
     const featureToggles = document.getElementById("featureToggles");
@@ -796,6 +903,10 @@
     let cameraLocalStatus = null;
     let cameraStream = null;
     let cameraDeviceId = null;
+    let cameraFailedDeviceIds = new Set();
+    let handVisionEvents = null;
+    let handVisionState = null;
+    let handVisionLastSeen = 0;
 
     function renderModuleCards(target, modules, keys, secondary=false) {
       if (!target || !modules) return;
@@ -859,6 +970,72 @@
       }
     }
 
+    function setHandVisionPreviewActive(active) {
+      if (handVisionPreview) {
+        handVisionPreview.style.display = active ? "block" : "none";
+        if (active && !handVisionPreview.src) handVisionPreview.src = `${HAND_SERVICE_BASE}/stream.mjpg?ts=${Date.now()}`;
+        if (!active) handVisionPreview.removeAttribute("src");
+      }
+    }
+
+    function updateHandVisionUi(data) {
+      if (!data) return;
+      handVisionState = data;
+      handVisionLastSeen = Date.now();
+      const axis = handVisionArmAxis(data);
+      if (handAxisXEl) handAxisXEl.textContent = axis.x.toFixed(3);
+      if (handAxisYEl) handAxisYEl.textContent = axis.y.toFixed(3);
+      if (handAxisZEl) handAxisZEl.textContent = axis.z.toFixed(3);
+      if (handGripperCommandEl) handGripperCommandEl.textContent = String(handVisionGripperCommandForState(data));
+      if (handVisionHint) {
+        const state = data.unlocked ? "已解锁 / unlocked" : "已锁定 / locked";
+        const hand = data.hand || {};
+        const handDetected = hand.x !== null && hand.x !== undefined;
+        handVisionHint.textContent = `手部识别状态: ${state} | 姿势 ${data.gesture || "-"} | 检测到手: ${handDetected ? "是" : "否"} | ${data.message || ""}`;
+        handVisionHint.classList.toggle("warning", !data.ok);
+      }
+    }
+
+    async function refreshHandVisionStatus() {
+      try {
+        const res = await fetch(`${HAND_SERVICE_BASE}/api/status`, { cache: "no-store" });
+        const data = await res.json();
+        setHandVisionPreviewActive(true);
+        updateHandVisionUi(data);
+      } catch (err) {
+        setHandVisionPreviewActive(false);
+        if (handVisionHint) {
+          handVisionHint.textContent = "手部识别服务未连接";
+          handVisionHint.classList.add("warning");
+        }
+      }
+    }
+
+    function connectHandVisionEvents() {
+      if (handVisionEvents) return;
+      try {
+        handVisionEvents = new EventSource(`${HAND_SERVICE_BASE}/events`);
+        handVisionEvents.onmessage = (event) => {
+          try {
+            updateHandVisionUi(JSON.parse(event.data));
+          } catch (err) {
+            appendConsoleLog("WARNING", "手部识别数据解析失败", err.message);
+          }
+        };
+        handVisionEvents.onerror = () => {
+          if (Date.now() - handVisionLastSeen > 2000) {
+            handVisionState = null;
+            if (handVisionHint) {
+              handVisionHint.textContent = "手部识别服务未连接";
+              handVisionHint.classList.add("warning");
+            }
+          }
+        };
+      } catch (err) {
+        appendConsoleLog("WARNING", "无法连接手部识别服务", err.message);
+      }
+    }
+
     async function refreshCameraStatus() {
       if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
         cameraLocalStatus = { status: "WARNING", message: "浏览器不支持摄像头检测" };
@@ -868,15 +1045,17 @@
           const devices = await navigator.mediaDevices.enumerateDevices();
           const cameras = devices.filter((item) => item.kind === "videoinput");
           if (cameras.length) {
+            const preferred = selectWristCamera(cameras);
             const labeled = cameras.find((item) => item.label);
             const message = labeled?.label
               ? `已连接: ${labeled.label}`
-              : `USB 摄像头已连接 (${cameras.length})`;
-            cameraLocalStatus = { status: "ONLINE", message };
-            const preferred = cameras.find((item) => item.deviceId === cameraDeviceId) || cameras[0];
-            await startUsbCameraPreview(preferred?.deviceId || null);
+              : `腕部相机已连接 (${cameras.length})`;
+            const started = await startUsbCameraPreview(preferred?.deviceId || null, cameras);
+            cameraLocalStatus = started
+              ? { status: "ONLINE", message }
+              : { status: "WARNING", message: "腕部相机预览失败，可能被手势识别相机占用" };
           } else {
-            cameraLocalStatus = { status: "OFFLINE", message: "未检测到 USB 摄像头" };
+            cameraLocalStatus = { status: "OFFLINE", message: "未检测到腕部相机" };
             stopUsbCameraPreview();
           }
         } catch (err) {
@@ -888,6 +1067,15 @@
       if (lastStatus) renderSupervisorStatus(lastStatus);
     }
 
+    function selectWristCamera(cameras) {
+      if (!Array.isArray(cameras) || !cameras.length) return null;
+      const current = cameras.find((item) => item.deviceId === cameraDeviceId);
+      if (current) return current;
+      const available = cameras.filter((item) => !cameraFailedDeviceIds.has(item.deviceId));
+      const pool = available.length ? available : cameras;
+      return pool[pool.length - 1];
+    }
+
     function stopUsbCameraPreview() {
       if (cameraStream) {
         cameraStream.getTracks().forEach((track) => track.stop());
@@ -895,31 +1083,58 @@
       cameraStream = null;
       cameraDeviceId = null;
       if (usbCameraPreview) usbCameraPreview.srcObject = null;
-      if (usbCameraHint) usbCameraHint.textContent = "未检测到 USB 摄像头";
+      if (usbCameraHint) usbCameraHint.textContent = "未检测到腕部相机";
     }
 
-    async function startUsbCameraPreview(deviceId) {
-      if (!usbCameraPreview || !navigator.mediaDevices?.getUserMedia) return;
+    function cameraCandidateIds(deviceId, cameras) {
+      const ids = [];
+      const add = (id) => {
+        if (id && !ids.includes(id)) ids.push(id);
+      };
+      add(deviceId);
+      if (Array.isArray(cameras)) {
+        cameras.forEach((camera) => {
+          if (!cameraFailedDeviceIds.has(camera.deviceId)) add(camera.deviceId);
+        });
+        cameras.forEach((camera) => add(camera.deviceId));
+      }
+      return ids;
+    }
+
+    async function startUsbCameraPreview(deviceId, cameras=[]) {
+      if (!usbCameraPreview || !navigator.mediaDevices?.getUserMedia) return false;
       if (cameraStream && (!deviceId || deviceId === cameraDeviceId)) {
-        if (usbCameraHint) usbCameraHint.textContent = "USB 摄像头预览中";
-        return;
+        if (usbCameraHint) usbCameraHint.textContent = "腕部相机预览中";
+        return true;
       }
-      stopUsbCameraPreview();
-      const constraints = deviceId
-        ? { video: { deviceId: { exact: deviceId } } }
-        : { video: true };
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        cameraStream = stream;
-        const track = stream.getVideoTracks()[0];
-        cameraDeviceId = track?.getSettings()?.deviceId || deviceId || null;
-        usbCameraPreview.srcObject = stream;
-        usbCameraPreview.play().catch(() => {});
-        if (usbCameraHint) usbCameraHint.textContent = "USB 摄像头预览中";
-      } catch (err) {
-        const detail = err && err.message ? err.message : String(err || "unknown");
-        if (usbCameraHint) usbCameraHint.textContent = `摄像头预览失败: ${detail}`;
+      const candidates = cameraCandidateIds(deviceId, cameras);
+      const attempts = candidates.length
+        ? candidates.map((id) => ({ id, constraints: { video: { deviceId: { exact: id } } } }))
+        : [{ id: null, constraints: { video: true } }];
+      if (!attempts.some((item) => item.id === null)) attempts.push({ id: null, constraints: { video: true } });
+
+      let lastDetail = "";
+      for (const attempt of attempts) {
+        stopUsbCameraPreview();
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia(attempt.constraints);
+          cameraStream = stream;
+          const track = stream.getVideoTracks()[0];
+          cameraDeviceId = track?.getSettings()?.deviceId || attempt.id || null;
+          if (cameraDeviceId) cameraFailedDeviceIds.delete(cameraDeviceId);
+          usbCameraPreview.srcObject = stream;
+          usbCameraPreview.play().catch(() => {});
+          if (usbCameraHint) usbCameraHint.textContent = "腕部相机预览中";
+          return true;
+        } catch (err) {
+          lastDetail = err && err.message ? err.message : String(err || "unknown");
+          if (attempt.id) cameraFailedDeviceIds.add(attempt.id);
+        }
       }
+      if (usbCameraHint) {
+        usbCameraHint.textContent = `腕部相机预览失败: ${lastDetail || "无法打开摄像头"}；已尝试其它摄像头`;
+      }
+      return false;
     }
 
     function updateButtonAvailability(_state) {
@@ -1020,11 +1235,14 @@
     }
     connectStatusWs();
     callApi("GET /api/status");
+    connectHandVisionEvents();
+    refreshHandVisionStatus();
     refreshCameraStatus();
     if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
       navigator.mediaDevices.addEventListener("devicechange", refreshCameraStatus);
     }
     setInterval(refreshCameraStatus, 8000);
+    setInterval(refreshHandVisionStatus, 8000);
 
     function logDebug(msg) {
       if (!debugLog) return;
@@ -1033,6 +1251,80 @@
       entry.textContent = `[${ts}] ${msg}`;
       debugLog.prepend(entry);
       while (debugLog.childElementCount > 80) debugLog.removeChild(debugLog.lastChild);
+    }
+
+    function updateDataLogStatus() {
+      if (!dataLogStatus) return;
+      const state = dataLogRecording ? "recording" : "stopped";
+      dataLogStatus.textContent = `Data log: ${state}, ${dataLogRows.length} rows`;
+      dataLogStatus.classList.toggle("warning", dataLogRecording);
+      if (toggleDataLogBtn) {
+        toggleDataLogBtn.textContent = dataLogRecording ? "Stop Log" : "Start Log";
+        toggleDataLogBtn.classList.toggle("active", dataLogRecording);
+      }
+    }
+
+    function csvCell(value) {
+      if (value === null || value === undefined) return "";
+      if (typeof value === "number") return Number.isFinite(value) ? String(value) : "";
+      const text = String(value);
+      return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    }
+
+    function downloadDataLog() {
+      if (!dataLogRows.length) {
+        updateDataLogStatus();
+        return;
+      }
+      const csv = [
+        DATA_LOG_COLUMNS.join(","),
+        ...dataLogRows.map((row) => row.map(csvCell).join(",")),
+      ].join("\r\n");
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      link.href = url;
+      link.download = `arm_control_log_${stamp}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      appendConsoleLog("OK", `已导出数据 ${dataLogRows.length} 行`);
+    }
+
+    function recordDataSample(tsMs, modeSel, modeVal, orderVec) {
+      if (!dataLogRecording) return;
+      if (dataLogRows.length >= DATA_LOG_MAX_ROWS) {
+        dataLogRecording = false;
+        updateDataLogStatus();
+        appendConsoleLog("WARNING", `数据记录已达到上限 ${DATA_LOG_MAX_ROWS} 行，已自动停止`);
+        return;
+      }
+      const target = targetPosition || [];
+      const desired = targetAngles || [];
+      const actual = armAngles || [];
+      const hand = handVisionState?.hand || {};
+      const handAxis = handVisionArmAxis(handVisionState);
+      const gripper = GRIPPER_ORDER_INDEX < orderVec.length ? Number(orderVec[GRIPPER_ORDER_INDEX] || 0) : 0;
+      const row = [
+        Number(tsMs),
+        new Date(Number(tsMs)).toISOString(),
+        dataLogRows.length,
+        modeSel,
+        Number(modeVal),
+        Number(target[0] || 0), Number(target[1] || 0), Number(target[2] || 0),
+        Number(hand.x ?? 0), Number(hand.y ?? 0), Number(hand.depth ?? 0),
+        Number(handAxis.x || 0), Number(handAxis.y || 0), Number(handAxis.z || 0),
+        handVisionState?.gesture || "",
+        handVisionState?.unlocked ? 1 : 0,
+        Number(desired[0] || 0), Number(desired[1] || 0), Number(desired[2] || 0), Number(desired[3] || 0),
+        Number(actual[0] || 0), Number(actual[1] || 0), Number(actual[2] || 0), Number(actual[3] || 0), Number(actual[4] || 0),
+        gripper,
+        lastTelemetryTimeMs || "",
+      ];
+      dataLogRows.push(row);
+      if (dataLogRows.length === 1 || dataLogRows.length % 20 === 0) updateDataLogStatus();
     }
 
     function radToDeg(value) {
@@ -1104,7 +1396,7 @@
           updateKeyUI();
           selectControlMode("keyboard");
           appendConsoleLog("WARNING", reason);
-        } else {
+        } else if (selectedControlMode() !== "hand_vision") {
           syncInputDeviceMode("keyboard");
         }
       }
@@ -1112,7 +1404,10 @@
     }
 
     function motionSourceLabel() {
-      return selectedControlMode() === "gamepad" ? "手柄" : "键盘";
+      const mode = selectedControlMode();
+      if (mode === "gamepad") return "手柄";
+      if (mode === "hand_vision") return "手部识别";
+      return "键盘";
     }
 
     function armForwardKinematics(qs) {
@@ -1207,6 +1502,7 @@
     }
 
     function getKeyboardControlMode() {
+      if (selectedControlMode() === "hand_vision") return "position";
       return keyboardModeGroup?.querySelector('input[name="keyboardControlMode"]:checked')?.value || "position";
     }
 
@@ -1214,6 +1510,18 @@
       const jointSpaceInput = featureToggles.querySelector('input[data-toggle="joint_space"]');
       const control = selectedControlMode();
       if (jointSpaceInput) jointSpaceInput.checked = (control === "keyboard" || control === "gamepad") && getKeyboardControlMode() === "joint";
+    }
+
+    function syncHandVisionPositionLock() {
+      if (!keyboardModeGroup) return;
+      const locked = selectedControlMode() === "hand_vision";
+      const positionInput = keyboardModeGroup.querySelector('input[name="keyboardControlMode"][value="position"]');
+      const jointInput = keyboardModeGroup.querySelector('input[name="keyboardControlMode"][value="joint"]');
+      if (locked && positionInput) positionInput.checked = true;
+      if (jointInput) {
+        jointInput.disabled = locked;
+        jointInput.closest("label")?.setAttribute("title", locked ? "手部识别固定使用位置控制" : "");
+      }
     }
 
     function ensurePositionTargetInitialized() {
@@ -1315,10 +1623,38 @@
       return (pressed.has("ArrowRight") ? 1 : 0) - (pressed.has("ArrowLeft") ? 1 : 0);
     }
 
+    function handVisionArmAxis(state) {
+      const axis = state?.axis || {};
+      return {
+        x: clampNumber(Number(axis.z) || 0, -1, 1), // image up/down -> arm forward/back
+        y: clampNumber(Number(axis.y) || 0, -1, 1), // image left/right -> arm left/right
+        z: clampNumber(Number(axis.x) || 0, -1, 1), // hand depth -> arm up/down
+      };
+    }
+
+    function keyboardGripperCommand() {
+      return (pressed.has("ArrowUp") ? 1 : 0) - (pressed.has("ArrowDown") ? 1 : 0);
+    }
+
     function gamepadJoint4Axis(gp) {
       const left = gamepadButtonValue(gp?.buttons?.[GAMEPAD_J4_NEG_BUTTON]);
       const right = gamepadButtonValue(gp?.buttons?.[GAMEPAD_J4_POS_BUTTON]);
       return applyGamepadDeadzone(right - left);
+    }
+
+    function gamepadGripperCommand(gp) {
+      const close = gamepadButtonValue(gp?.buttons?.[GAMEPAD_GRIPPER_CLOSE_BUTTON]);
+      const open = gamepadButtonValue(gp?.buttons?.[GAMEPAD_GRIPPER_OPEN_BUTTON]);
+      if (close > 0.1 && open <= 0.1) return 1;
+      if (open > 0.1 && close <= 0.1) return -1;
+      return 0;
+    }
+
+    function activeGripperCommand(mode) {
+      if (mode === "keyboard") return keyboardGripperCommand();
+      if (mode === "gamepad") return gamepadGripperCommand(getActiveGamepad());
+      if (mode === "hand_vision") return handVisionGripperCommand();
+      return 0;
     }
 
     function applyJoint4Axis(axis) {
@@ -1345,6 +1681,8 @@
       let z = 0;
       let downVal = 0;
       let upVal = 0;
+      let gripperCloseVal = 0;
+      let gripperOpenVal = 0;
       let j4LeftVal = 0;
       let j4RightVal = 0;
       if (mode === "gamepad") {
@@ -1357,6 +1695,8 @@
           z = gamepadZAxis(gp);
           downVal = gamepadButtonValue(gp.buttons?.[GAMEPAD_Z_DOWN_BUTTON]);
           upVal = gamepadButtonValue(gp.buttons?.[GAMEPAD_Z_UP_BUTTON]);
+          gripperCloseVal = gamepadButtonValue(gp.buttons?.[GAMEPAD_GRIPPER_CLOSE_BUTTON]);
+          gripperOpenVal = gamepadButtonValue(gp.buttons?.[GAMEPAD_GRIPPER_OPEN_BUTTON]);
           j4LeftVal = gamepadButtonValue(gp.buttons?.[GAMEPAD_J4_NEG_BUTTON]);
           j4RightVal = gamepadButtonValue(gp.buttons?.[GAMEPAD_J4_POS_BUTTON]);
         }
@@ -1366,24 +1706,38 @@
         z = (pressed.has("KeyE") ? 1 : 0) - (pressed.has("KeyQ") ? 1 : 0);
         downVal = pressed.has("KeyQ") ? 1 : 0;
         upVal = pressed.has("KeyE") ? 1 : 0;
+        gripperCloseVal = pressed.has("ArrowUp") ? 1 : 0;
+        gripperOpenVal = pressed.has("ArrowDown") ? 1 : 0;
         j4LeftVal = pressed.has("ArrowLeft") ? 1 : 0;
         j4RightVal = pressed.has("ArrowRight") ? 1 : 0;
+      } else if (mode === "hand_vision") {
+        const axis = handVisionArmAxis(handVisionState);
+        x = axis.y;
+        y = axis.x;
+        z = axis.z;
+        downVal = z < -0.05 ? Math.abs(z) : 0;
+        upVal = z > 0.05 ? z : 0;
       }
       setStickDot(leftStickDot, x, y);
       setStickDot(rightStickDot, 0, -z);
       if (triggerL) triggerL.classList.toggle("active", downVal > 0.1);
       if (triggerL2) triggerL2.classList.toggle("active", upVal > 0.1);
+      if (dpadUp) dpadUp.classList.toggle("active", gripperCloseVal > 0.1);
+      if (dpadDown) dpadDown.classList.toggle("active", gripperOpenVal > 0.1);
       if (dpadLeft) dpadLeft.classList.toggle("active", j4LeftVal > 0.1);
       if (dpadRight) dpadRight.classList.toggle("active", j4RightVal > 0.1);
       if (leftStickCaption && rightStickCaption) {
         if (mode === "gamepad") {
           leftStickCaption.textContent = jointMode ? "LX/LY -> J1/J2" : "LX/LY -> X/Y";
           rightStickCaption.textContent = jointMode
-            ? `${GAMEPAD_Z_DOWN_LABEL}/${GAMEPAD_Z_UP_LABEL} -> J3 | D←/D→ -> J4`
-            : `${GAMEPAD_Z_DOWN_LABEL}/${GAMEPAD_Z_UP_LABEL} -> Z | D←/D→ -> J4`;
+            ? `${GAMEPAD_Z_DOWN_LABEL}/${GAMEPAD_Z_UP_LABEL} -> J3 | D←/D→ -> J4 | D↑/D↓ -> 夹爪`
+            : `${GAMEPAD_Z_DOWN_LABEL}/${GAMEPAD_Z_UP_LABEL} -> Z | D←/D→ -> J4 | D↑/D↓ -> 夹爪`;
         } else if (mode === "keyboard") {
           leftStickCaption.textContent = jointMode ? "WASD -> J1/J2" : "WASD -> X/Y";
-          rightStickCaption.textContent = jointMode ? "Q/E -> J3 | ←/→ -> J4" : "Q/E -> Z | ←/→ -> J4";
+          rightStickCaption.textContent = jointMode ? "Q/E -> J3 | ←/→ -> J4 | ↑/↓ -> 夹爪" : "Q/E -> Z | ←/→ -> J4 | ↑/↓ -> 夹爪";
+        } else if (mode === "hand_vision") {
+          leftStickCaption.textContent = "手部识别 -> X/Y";
+          rightStickCaption.textContent = "手部识别 -> Z";
         } else {
           leftStickCaption.textContent = "inactive";
           rightStickCaption.textContent = "inactive";
@@ -1465,6 +1819,32 @@
       else applyGamepadPositionStep();
     }
 
+    function applyHandVisionStep() {
+      syncKeyboardModeFeatureBit();
+      ensurePositionTargetInitialized();
+      if (!handVisionState || !handVisionState.unlocked) {
+        updateKeyboardTargetHint();
+        return;
+      }
+      const axis = handVisionArmAxis(handVisionState);
+      const mapping = handVisionState.mapping || {};
+      const step = clampNumber(Number(mapping.position_step_m) || HAND_POSITION_STEP, 0.001, 0.02);
+      applyPositionDelta(axis.x * step, axis.y * step, axis.z * step);
+    }
+
+    function handVisionGripperCommandForState(state) {
+      if (!state || !state.unlocked) return 0;
+      const gesture = String(state.gesture || "");
+      if (gesture === "pinch") return 1;
+      if (gesture === "open_palm") return -1;
+      return 0;
+    }
+
+    function handVisionGripperCommand() {
+      if (selectedControlMode() !== "hand_vision") return 0;
+      return handVisionGripperCommandForState(handVisionState);
+    }
+
     function updateArmTelemetry(tsMs, angles, currents) {
       angles = angles || [];
       currents = currents || [];
@@ -1472,15 +1852,20 @@
       const j2 = radToDeg(angles[1] ?? 0);
       const j3 = radToDeg(angles[2] ?? 0);
       const j4 = radToDeg(angles[3] ?? 0);
+      const j5Raw = Number(angles[4]);
+      const j5 = Number.isFinite(j5Raw) && j5Raw > -0.999 ? radToDeg(j5Raw) : 0;
       const c1 = currents[0] ?? 0;
       const c2 = currents[1] ?? 0;
       const c3 = currents[2] ?? 0;
       const c4 = currents[3] ?? 0;
+      const c5Raw = Number(currents[4]);
+      const c5 = Number.isFinite(c5Raw) && c5Raw > -0.999 ? c5Raw : 0;
       const values = [
         [j1, c1],
         [j2, c2],
         [j3, c3],
         [j4, c4],
+        [j5, c5],
       ];
       jointSpans.forEach((el, idx) => {
         if (!el) return;
@@ -1535,20 +1920,25 @@
       return out;
     }
 
-    let armAngles = [0, 0, 0, 0];
+    let armAngles = [0, 0, 0, 0, 0];
+    let lastTelemetryTimeMs = null;
     let targetAngles = [0, 0, 0, 0]; // [J1, J2, J3, J4]
     let targetPosition = [0.6, 0, 0];
     let targetInitialized = false;
     let positionTargetInitialized = false;
     const ARM_LINK_3 = 0.424;
-    const ARM_LINK_5 = 0.424;
+    const ARM_LINK_5 = 0.268;//0.424;
     const ARM_MIN_ELBOW_ANGLE = Math.PI / 6;
-    const ARM_MIN_TARGET_Z = -0.250;
+    const ARM_MIN_TARGET_Z = -0.280;
     const POSITION_STEP = 0.01;
+    const HAND_POSITION_STEP = 0.006;
+    const GRIPPER_ORDER_INDEX = 10;
     const JOINT_STEP = 0.05;
     const GAMEPAD_DEADZONE = 0.15;
     const GAMEPAD_Z_DOWN_BUTTON = 4;
     const GAMEPAD_Z_UP_BUTTON = 6;
+    const GAMEPAD_GRIPPER_CLOSE_BUTTON = 12;
+    const GAMEPAD_GRIPPER_OPEN_BUTTON = 13;
     const GAMEPAD_J4_NEG_BUTTON = 14;
     const GAMEPAD_J4_POS_BUTTON = 15;
     const GAMEPAD_Z_DOWN_LABEL = "L";
@@ -1566,10 +1956,13 @@
       const heartbeatOnly = note === "ready" && f.angle && f.angle.slice(0, 3).every((v) => Number(v) === -1);
       const hasJointTelemetry = f.angle && f.angle.length >= 3 && !heartbeatOnly;
       if (hasJointTelemetry) {
+        lastTelemetryTimeMs = Number(f.time) || Date.now();
         armAngles[0] = f.angle[0] || 0;
         armAngles[1] = f.angle[1] || 0;
         armAngles[2] = f.angle[2] || 0;
         armAngles[3] = (f.angle[3] ?? 0);
+        const actualJ5 = Number(f.angle[4]);
+        if (Number.isFinite(actualJ5) && actualJ5 > -0.999) armAngles[4] = actualJ5;
 
         if (!targetInitialized) {
           targetAngles[0] = armAngles[0];
@@ -1633,7 +2026,8 @@
     function selectControlMode(mode) {
       const input = controlModeGroup.querySelector(`input[name=controlMode][value="${mode}"]`);
       if (input) input.checked = true;
-      if (mode === "keyboard" || mode === "gamepad") syncInputDeviceMode(mode);
+      if (mode === "keyboard" || mode === "gamepad" || mode === "hand_vision") syncInputDeviceMode(mode);
+      syncHandVisionPositionLock();
     }
 
     function setEmergencyStop(active) {
@@ -1753,6 +2147,7 @@
         selectControlMode("keyboard");
         updateGamepadStatus();
       }
+      syncHandVisionPositionLock();
       syncKeyboardModeFeatureBit();
       if (selectedControlMode() === "gamepad") {
         pressed.clear();
@@ -1760,6 +2155,12 @@
         if (getKeyboardControlMode() === "joint") ensureTargetInitialized();
         else ensurePositionTargetInitialized();
         updateGamepadStatus();
+      } else if (selectedControlMode() === "hand_vision") {
+        pressed.clear();
+        updateKeyUI();
+        ensurePositionTargetInitialized();
+        connectHandVisionEvents();
+        refreshHandVisionStatus();
       } else if (selectedControlMode() === "keyboard") {
         if (getKeyboardControlMode() === "position") ensurePositionTargetInitialized();
         else ensureTargetInitialized();
@@ -1767,7 +2168,8 @@
       updateKeyboardTargetHint();
       updateInputIndicators();
       const mode = selectedControlMode();
-      if (mode === "keyboard" || mode === "gamepad") syncInputDeviceMode(mode);
+      if (mode === "keyboard" || mode === "gamepad" || mode === "hand_vision") syncInputDeviceMode(mode);
+      refreshCameraStatus();
       if (autoSend) sendFrame();
     }
 
@@ -1802,6 +2204,7 @@
       });
     }
     updateGamepadAvailability();
+    syncHandVisionPositionLock();
     syncKeyboardModeFeatureBit();
     syncInputDeviceMode(selectedControlMode());
     updateGamepadStatus();
@@ -1897,6 +2300,22 @@
       e.target.classList.toggle("active", autoSend);
       e.target.textContent = autoSend ? "Auto-send: ON" : "Auto-send: OFF";
     });
+    if (toggleDataLogBtn) {
+      toggleDataLogBtn.addEventListener("click", () => {
+        dataLogRecording = !dataLogRecording;
+        updateDataLogStatus();
+        appendConsoleLog("INFO", dataLogRecording ? "开始记录控制数据" : "停止记录控制数据");
+      });
+    }
+    if (downloadDataLogBtn) downloadDataLogBtn.addEventListener("click", downloadDataLog);
+    if (clearDataLogBtn) {
+      clearDataLogBtn.addEventListener("click", () => {
+        dataLogRows = [];
+        updateDataLogStatus();
+        appendConsoleLog("INFO", "已清空控制数据记录");
+      });
+    }
+    updateDataLogStatus();
 
     // Build a custom payload: [mode:1][buttons:1 bitmask][keys:2 bitmask][timestamp:4]
     let frameCounter = 0;
@@ -1973,6 +2392,15 @@
           updateKeyboardTargetHint();
         }
       }
+      else if (modeSel === 'hand_vision') {
+        low4 = 0;
+        if (!emergencyChecked) {
+          syncHandVisionPositionLock();
+          applyHandVisionStep();
+        } else {
+          updateKeyboardTargetHint();
+        }
+      }
       else if (modeSel === 'teleop') low4 = 1;
       else if (modeSel === 'vision') low4 = 2;
       else if (modeSel === 'shared') low4 = 3;
@@ -2000,11 +2428,14 @@
         orderVec[idx] = val;
       };
 
-      if (modeSel === 'keyboard' || modeSel === 'gamepad') {
+      if (modeSel === 'keyboard' || modeSel === 'gamepad' || modeSel === 'hand_vision') {
         orderVec[0] = targetAngles[0]; // J1 Target Angle
         orderVec[1] = targetAngles[1]; // J2 Target Angle
         orderVec[2] = targetAngles[2]; // J3 Target Angle
         orderVec[3] = targetAngles[3]; // J4 Target Angle
+        if (GRIPPER_ORDER_INDEX < orderVec.length) {
+          orderVec[GRIPPER_ORDER_INDEX] = activeGripperCommand(modeSel); // KB_D gripper: 1 close, 0 idle, -1 open
+        }
         // You can still keep other mapping logic below if needed.
       } else {
         setPair(0, "KeyE", "KeyQ");
@@ -2024,11 +2455,14 @@
         mode: modeVal,
         order: orderVec,
         reserved: new Uint8Array(getSize("reserved",16)).fill(FRAME_SCHEMA.invalid_fill?.bytes ?? 255),
-        note: modeSel === "gamepad" ? "ui:gamepad" : "ui",
+        note: modeSel === "gamepad" ? "ui:gamepad" : (modeSel === "hand_vision" ? "ui:hand_vision" : "ui"),
       };
       const frame = packFrame(obj);
       lastPacket.textContent = `Last packet → mode:${modeVal} nibble:${(modeVal&0x0F)} ts:${tsMs}`;
-      if (ws && ws.readyState === WebSocket.OPEN) ws.send(frame);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(frame);
+        recordDataSample(tsMs, modeSel, modeVal, orderVec);
+      }
     }
 
     // Auto heartbeat

@@ -49,6 +49,13 @@
           ],
           "axes": ["x","y","z","roll","pitch","yaw"],
           "axes_index_start": 11,
+          "gripper": {
+            "index": 10,
+            "close": 1,
+            "idle": 0,
+            "open": -1,
+            "comment": "KB_D gripper command: 1 close, 0 no move, -1 open"
+          },
           "comment": "主端 order 定义：1-7 为关节控制按键成对的 ±1；11-16 为 xyzrpy；其余填 0.0"
         }
       }

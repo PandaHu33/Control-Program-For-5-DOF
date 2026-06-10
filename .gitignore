@@ -3,3 +3,11 @@
 
 # Ignore log files
 *.log
+
+# Python caches and local conda environments
+__pycache__/
+.conda/
+Hand_Tracker/.conda/
+Hand_Tracker/.tmp/
+Hand_Tracker/build/
+Hand_Tracker/dist/

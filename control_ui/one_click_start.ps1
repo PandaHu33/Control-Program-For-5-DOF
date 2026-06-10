@@ -2,19 +2,30 @@ $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
+$ProjectRoot = Split-Path -Parent $Root
 
 $utf8 = [System.Text.UTF8Encoding]::new()
 [Console]::OutputEncoding = $utf8
 $OutputEncoding = $utf8
 
 $ApiBase = "http://127.0.0.1:8090"
+$HandTrackerBase = "http://127.0.0.1:8091"
+$HandTrackerEnvName = "hand-tracker-arm"
+$HandTrackerDir = Join-Path $ProjectRoot "Hand_Tracker"
+$HandTrackerLocalEnvDir = Join-Path $HandTrackerDir ".conda\hand-tracker-arm"
+$HandTrackerRequirements = Join-Path $HandTrackerDir "requirements.txt"
+$HandTrackerScript = Join-Path $HandTrackerDir "hand_arm_control.py"
+$HandTrackerConfig = Join-Path $HandTrackerDir "hand_control_config.yaml"
 $UiPath = Join-Path $Root "index.html"
 $LogDir = Join-Path $Root "logs"
 $BackendOut = Join-Path $LogDir "bridge_stdout.log"
 $BackendErr = Join-Path $LogDir "bridge_stderr.log"
+$HandTrackerOut = Join-Path $LogDir "hand_tracker_stdout.log"
+$HandTrackerErr = Join-Path $LogDir "hand_tracker_stderr.log"
 $script:StartedSystem = $false
 $script:StopObserved = $false
 $script:BackendProcess = $null
+$script:HandTrackerProcess = $null
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -40,6 +51,203 @@ function Get-ApiStatus {
     } catch {
         return $null
     }
+}
+
+function Get-HandTrackerStatus {
+    try {
+        return Invoke-RestMethod -Uri "$HandTrackerBase/api/status" -Method Get -TimeoutSec 2
+    } catch {
+        return $null
+    }
+}
+
+function Wait-HandTrackerReady($Seconds) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        $status = Get-HandTrackerStatus
+        if ($null -ne $status -and $status.ok -and $status.online) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
+function Get-CondaCommand {
+    $cmd = Get-Command conda -ErrorAction SilentlyContinue
+    if ($cmd) {
+        return $cmd.Source
+    }
+    $candidates = @(
+        "D:\anaconda\Scripts\conda.exe",
+        "D:\anaconda\condabin\conda.bat",
+        "$env:USERPROFILE\anaconda3\Scripts\conda.exe",
+        "$env:USERPROFILE\miniconda3\Scripts\conda.exe"
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
+function Quote-ProcessArg($Arg) {
+    $text = [string]$Arg
+    if ($text -notmatch '[\s"]') {
+        return $text
+    }
+    return '"' + ($text -replace '"', '\"') + '"'
+}
+
+function Invoke-LoggedProcess($FilePath, $ArgumentString, $WorkingDirectory, $TimeoutSec, $OutFile, $ErrFile, $TimeoutMessage) {
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $FilePath
+    $psi.Arguments = $ArgumentString
+    $psi.WorkingDirectory = $WorkingDirectory
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    try {
+        $psi.StandardOutputEncoding = $utf8
+        $psi.StandardErrorEncoding = $utf8
+    } catch {}
+
+    $proc = [System.Diagnostics.Process]::new()
+    $proc.StartInfo = $psi
+    if (-not $proc.Start()) {
+        throw "failed to start process: $FilePath"
+    }
+
+    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
+    $timeoutMs = if ($TimeoutSec -and $TimeoutSec -gt 0) {
+        [int][Math]::Min(([double]$TimeoutSec * 1000), [int]::MaxValue)
+    } else {
+        -1
+    }
+    $exited = if ($timeoutMs -ge 0) {
+        $proc.WaitForExit($timeoutMs)
+    } else {
+        $proc.WaitForExit()
+        $true
+    }
+    if (-not $exited) {
+        try { $proc.Kill() } catch {}
+        throw $TimeoutMessage
+    }
+    $proc.WaitForExit()
+
+    $stdout = $stdoutTask.Result
+    $stderr = $stderrTask.Result
+    [System.IO.File]::WriteAllText($OutFile, $stdout, $utf8)
+    [System.IO.File]::WriteAllText($ErrFile, $stderr, $utf8)
+
+    $allText = (($stdout + "`n" + $stderr).Trim())
+    if ($allText) {
+        Write-Host $allText
+    }
+    return @{
+        Ok = ($proc.ExitCode -eq 0)
+        ExitCode = $proc.ExitCode
+        Text = $allText
+    }
+}
+
+function Invoke-Conda($Conda, $Arguments, $TimeoutSec) {
+    $argString = (($Arguments | ForEach-Object { Quote-ProcessArg $_ }) -join " ")
+    $stamp = "{0:yyyyMMdd_HHmmss}_{1}" -f (Get-Date), ([Guid]::NewGuid().ToString("N").Substring(0, 8))
+    $outFile = Join-Path $LogDir "conda_${stamp}_stdout.log"
+    $errFile = Join-Path $LogDir "conda_${stamp}_stderr.log"
+
+    $oldNoPlugins = $env:CONDA_NO_PLUGINS
+    $env:CONDA_NO_PLUGINS = "true"
+    try {
+        return Invoke-LoggedProcess $Conda $argString $ProjectRoot $TimeoutSec $outFile $errFile "conda command timed out: $($Arguments -join ' ')"
+    } finally {
+        if ($null -eq $oldNoPlugins) {
+            Remove-Item Env:\CONDA_NO_PLUGINS -ErrorAction SilentlyContinue
+        } else {
+            $env:CONDA_NO_PLUGINS = $oldNoPlugins
+        }
+    }
+}
+
+function Invoke-EnvPython($PythonExe, $Arguments, $TimeoutSec) {
+    $argString = (($Arguments | ForEach-Object { Quote-ProcessArg $_ }) -join " ")
+    $stamp = "{0:yyyyMMdd_HHmmss}_{1}" -f (Get-Date), ([Guid]::NewGuid().ToString("N").Substring(0, 8))
+    $outFile = Join-Path $LogDir "hand_python_${stamp}_stdout.log"
+    $errFile = Join-Path $LogDir "hand_python_${stamp}_stderr.log"
+    return Invoke-LoggedProcess $PythonExe $argString $ProjectRoot $TimeoutSec $outFile $errFile "python command timed out: $($Arguments -join ' ')"
+}
+
+function Install-HandTrackerPythonDeps($PythonExe) {
+    if (-not (Test-Path $HandTrackerRequirements)) {
+        throw "Hand tracker requirements file not found: $HandTrackerRequirements"
+    }
+    Write-Info "Installing/updating hand-recognition Python dependencies..."
+    $installed = Invoke-EnvPython $PythonExe @("-m", "pip", "install", "--disable-pip-version-check", "--upgrade", "-r", $HandTrackerRequirements) 1800
+    if (-not $installed.Ok) {
+        throw "Failed to install hand tracker Python dependencies: $($installed.Text)"
+    }
+}
+
+function Start-HandTrackerChild($FilePath, $ArgumentList, $WorkingDirectory) {
+    return Start-Process -FilePath $FilePath `
+        -ArgumentList $ArgumentList `
+        -WorkingDirectory $WorkingDirectory `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $HandTrackerOut `
+        -RedirectStandardError $HandTrackerErr `
+        -PassThru
+}
+
+function Get-CondaEnvPathFromList($Text, $Name) {
+    foreach ($line in ($Text -split "`r?`n")) {
+        if ($line -match "^\s*$([regex]::Escape($Name))\s+(.+?)\s*$") {
+            return $Matches[1].Trim()
+        }
+    }
+    return $null
+}
+
+function Ensure-HandTrackerEnv {
+    $conda = Get-CondaCommand
+    if (-not $conda) {
+        throw "conda was not found. Install Anaconda/Miniconda or add conda to PATH."
+    }
+
+    Write-Info "Checking hand-recognition conda environment '$HandTrackerEnvName'..."
+    $envList = Invoke-Conda $conda @("env", "list") 30
+    $envPath = Get-CondaEnvPathFromList $envList.Text $HandTrackerEnvName
+    if (-not $envPath) {
+        Write-Info "Creating local conda environment for hand recognition..."
+        $created = Invoke-Conda $conda @("create", "-y", "-p", $HandTrackerLocalEnvDir, "python=3.10", "pip") 1800
+        if (-not $created.Ok) {
+            throw "Failed to create hand tracker conda environment: $($created.Text)"
+        }
+        $envPath = $HandTrackerLocalEnvDir
+    }
+
+    $pythonExe = Join-Path $envPath "python.exe"
+    if (-not (Test-Path $pythonExe)) {
+        throw "Hand tracker python was not found: $pythonExe"
+    }
+
+    $verifyCode = "import cv2, mediapipe as mp, yaml, numpy; assert hasattr(mp, 'solutions'), 'mediapipe.solutions missing'; print('HAND_TRACKER_ENV_OK')"
+    $verify = Invoke-EnvPython $pythonExe @("-c", $verifyCode) 60
+    if (-not $verify.Ok) {
+        Write-Warn "Hand tracker dependencies are incomplete. Repairing with pip requirements..."
+        Install-HandTrackerPythonDeps $pythonExe
+        $verify = Invoke-EnvPython $pythonExe @("-c", $verifyCode) 60
+        if (-not $verify.Ok) {
+            throw "Hand tracker conda environment verification failed: $($verify.Text)"
+        }
+    }
+
+    Write-Ok "Hand-recognition environment is ready."
+    return $pythonExe
 }
 
 function Wait-BackendReady($Seconds) {
@@ -77,6 +285,68 @@ function Stop-ExistingBackend {
     }
 
     Start-Sleep -Milliseconds 800
+}
+
+function Stop-ExistingHandTracker {
+    try {
+        Get-CimInstance Win32_Process -Filter "name = 'python.exe' or name = 'pythonw.exe' or name = 'conda.exe' or name = 'cmd.exe'" |
+            Where-Object { $_.CommandLine -like "*hand_arm_control.py*" } |
+            ForEach-Object {
+                Write-Info ("Stopping old hand tracker pid={0}" -f $_.ProcessId)
+                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+    } catch {}
+
+    try {
+        $ownerPids = Get-NetTCPConnection -LocalPort 8091 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess
+        foreach ($ownerPid in ($ownerPids | Sort-Object -Unique)) {
+            $proc = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
+            if ($proc -and $proc.ProcessName -in @("python", "pythonw", "conda", "cmd")) {
+                Write-Info ("Stopping process on hand tracker port pid={0} process={1}" -f $ownerPid, $proc.ProcessName)
+                Stop-Process -Id $ownerPid -Force -ErrorAction SilentlyContinue
+            }
+        }
+    } catch {}
+
+    Start-Sleep -Milliseconds 500
+}
+
+function Start-HandTracker {
+    Stop-ExistingHandTracker
+
+    Write-Info "Starting hand-recognition service..."
+    Remove-Item -LiteralPath $HandTrackerOut, $HandTrackerErr -Force -ErrorAction SilentlyContinue
+
+    try {
+        $pythonExe = Ensure-HandTrackerEnv
+    } catch {
+        Write-Warn ("Hand-recognition environment is not ready: {0}" -f $_.Exception.Message)
+        Write-Warn "Continuing without hand-recognition mode. Keyboard and gamepad control are still available."
+        return $false
+    }
+    $script:HandTrackerProcess = Start-HandTrackerChild $pythonExe "-u `"$HandTrackerScript`" --config `"$HandTrackerConfig`" --host 127.0.0.1 --port 8091" $ProjectRoot
+
+    if (-not (Wait-HandTrackerReady 25)) {
+        Write-Warn "Hand-recognition service did not become ready. The H5 page can still use keyboard/gamepad."
+        $status = Get-HandTrackerStatus
+        if ($status -and $status.message) {
+            Write-Warn ("Hand-recognition status: {0}" -f $status.message)
+        }
+        if (Test-Path $HandTrackerOut) {
+            Write-Host ""
+            Write-Host "hand tracker stdout log:" -ForegroundColor Yellow
+            Get-Content -Path $HandTrackerOut
+        }
+        if (Test-Path $HandTrackerErr) {
+            Write-Host ""
+            Write-Host "hand tracker stderr log:" -ForegroundColor Yellow
+            Get-Content -Path $HandTrackerErr
+        }
+        return $false
+    }
+
+    Write-Ok "Hand-recognition service is ready."
+    return $true
 }
 
 function Start-Backend {
@@ -136,6 +406,20 @@ function Stop-BackendProcess {
         }
     } catch {
         Write-Warn ("Failed to stop backend process: {0}" -f $_.Exception.Message)
+    }
+}
+
+function Stop-HandTrackerProcess {
+    if (-not $script:HandTrackerProcess) {
+        return
+    }
+    try {
+        if (-not $script:HandTrackerProcess.HasExited) {
+            Write-Info ("Stopping hand-recognition service pid={0}" -f $script:HandTrackerProcess.Id)
+            Stop-Process -Id $script:HandTrackerProcess.Id -Force
+        }
+    } catch {
+        Write-Warn ("Failed to stop hand-recognition service: {0}" -f $_.Exception.Message)
     }
 }
 
@@ -207,6 +491,7 @@ try {
     Write-Host ""
 
     Start-Backend
+    $handTrackerReady = Start-HandTracker
 
     Write-Info "Opening H5 console page..."
     Start-Process -FilePath $UiPath
@@ -235,6 +520,9 @@ try {
     } else {
         Write-Warn "H5 is open, but arm/hand/glove/UDP telemetry link is not fully online. Check the status above."
     }
+    if (-not $handTrackerReady) {
+        Write-Warn "Hand-recognition mode is unavailable until the local hand tracker service starts."
+    }
 
     Wait-SystemStop
 } catch {
@@ -252,5 +540,6 @@ try {
     exit 1
 } finally {
     Stop-SystemIfNeeded
+    Stop-HandTrackerProcess
     Stop-BackendProcess
 }
