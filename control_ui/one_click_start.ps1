@@ -22,10 +22,14 @@ $BackendOut = Join-Path $LogDir "bridge_stdout.log"
 $BackendErr = Join-Path $LogDir "bridge_stderr.log"
 $HandTrackerOut = Join-Path $LogDir "hand_tracker_stdout.log"
 $HandTrackerErr = Join-Path $LogDir "hand_tracker_stderr.log"
+$VrStaticOut = Join-Path $LogDir "vr_static_http_stdout.log"
+$VrStaticErr = Join-Path $LogDir "vr_static_http_stderr.log"
+$VrStaticPort = 8070
 $script:StartedSystem = $false
 $script:StopObserved = $false
 $script:BackendProcess = $null
 $script:HandTrackerProcess = $null
+$script:VrStaticServerProcess = $null
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -262,6 +266,130 @@ function Wait-BackendReady($Seconds) {
     return $false
 }
 
+function Find-Adb {
+    if ($env:ADB_EXE -and (Test-Path $env:ADB_EXE)) {
+        return $env:ADB_EXE
+    }
+
+    $cmd = Get-Command adb -ErrorAction SilentlyContinue
+    if ($cmd) {
+        return $cmd.Source
+    }
+
+    $candidates = @(
+        "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe",
+        "$env:ANDROID_HOME\platform-tools\adb.exe",
+        "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe",
+        "C:\Program Files\Unity\Hub\Editor\2022.3.15f1c1\Editor\Data\PlaybackEngines\AndroidPlayer\SDK\platform-tools\adb.exe"
+    )
+
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path $candidate)) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+function Get-AdbDeviceId($AdbPath) {
+    $deviceLines = & $AdbPath devices | Where-Object { $_ -match "^\S+\s+device$" }
+    $devices = @($deviceLines | ForEach-Object { ($_ -split "\s+")[0] })
+
+    if ($devices.Count -eq 1) {
+        return $devices[0]
+    }
+
+    if ($devices.Count -gt 1) {
+        Write-Warn "Multiple ADB devices found; using the first one: $($devices[0])"
+        return $devices[0]
+    }
+
+    return $null
+}
+
+function Start-AdbReverseForVr {
+    $adb = Find-Adb
+    if (-not $adb) {
+        Write-Warn "adb.exe was not found. Unity WebView can still start, but headset reverse ports were not configured."
+        return
+    }
+
+    $deviceId = Get-AdbDeviceId $adb
+    if (-not $deviceId) {
+        Write-Warn "No authorized ADB device found. Connect/authorize the headset, then run this script again for VR WebView."
+        return
+    }
+
+    Write-Info "Configuring ADB reverse ports for VR WebView on device $deviceId..."
+    foreach ($port in @(8070, 8080, 8090, 8091, 8081, 5005)) {
+        & $adb -s $deviceId reverse "tcp:$port" "tcp:$port" | Out-Host
+        if ($LASTEXITCODE -eq 0) {
+            Write-Ok "adb reverse tcp:$port tcp:$port"
+        } else {
+            Write-Warn "adb reverse failed on port $port"
+        }
+    }
+
+    & $adb -s $deviceId reverse --list | Out-Host
+}
+
+function Stop-ExistingVrStaticServer {
+    try {
+        $ownerPids = Get-NetTCPConnection -LocalPort $VrStaticPort -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess
+        foreach ($ownerPid in ($ownerPids | Sort-Object -Unique)) {
+            $proc = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
+            if ($proc -and $proc.ProcessName -in @("python", "pythonw")) {
+                Write-Info ("Stopping old VR static server pid={0} process={1}" -f $ownerPid, $proc.ProcessName)
+                Stop-Process -Id $ownerPid -Force -ErrorAction SilentlyContinue
+            } elseif ($proc) {
+                Write-Warn ("VR static port {0} is occupied by pid={1} process={2}; not stopping it automatically." -f $VrStaticPort, $ownerPid, $proc.ProcessName)
+            }
+        }
+    } catch {}
+    Start-Sleep -Milliseconds 300
+}
+
+function Start-VrStaticServer {
+    Stop-ExistingVrStaticServer
+
+    $existing = Get-NetTCPConnection -LocalPort $VrStaticPort -State Listen -ErrorAction SilentlyContinue
+    if ($existing) {
+        Write-Warn "VR static server was not started because port $VrStaticPort is already occupied."
+        return
+    }
+
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $python) {
+        Write-Warn "Python was not found. Unity WebView static H5 server was not started."
+        return
+    }
+
+    Remove-Item -LiteralPath $VrStaticOut, $VrStaticErr -Force -ErrorAction SilentlyContinue
+    Write-Info "Starting VR static H5 server on http://127.0.0.1:$VrStaticPort/control_ui/index.html ..."
+    $script:VrStaticServerProcess = Start-Process -FilePath $python.Source `
+        -ArgumentList "-m http.server $VrStaticPort --bind 127.0.0.1" `
+        -WorkingDirectory $ProjectRoot `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $VrStaticOut `
+        -RedirectStandardError $VrStaticErr `
+        -PassThru
+
+    Start-Sleep -Milliseconds 800
+    $started = Get-NetTCPConnection -LocalPort $VrStaticPort -State Listen -ErrorAction SilentlyContinue
+    if ($started) {
+        Write-Ok "VR static H5 server is ready."
+    } else {
+        Write-Warn "VR static H5 server did not begin listening on port $VrStaticPort."
+    }
+}
+
+function Start-VrWebViewSupport {
+    Write-Info "Preparing Unity VR WebView support..."
+    Start-AdbReverseForVr
+    Start-VrStaticServer
+}
+
 function Stop-ExistingBackend {
     $ownerPids = @()
     try {
@@ -423,6 +551,20 @@ function Stop-HandTrackerProcess {
     }
 }
 
+function Stop-VrStaticServerProcess {
+    if (-not $script:VrStaticServerProcess) {
+        return
+    }
+    try {
+        if (-not $script:VrStaticServerProcess.HasExited) {
+            Write-Info ("Stopping VR static H5 server pid={0}" -f $script:VrStaticServerProcess.Id)
+            Stop-Process -Id $script:VrStaticServerProcess.Id -Force
+        }
+    } catch {
+        Write-Warn ("Failed to stop VR static H5 server: {0}" -f $_.Exception.Message)
+    }
+}
+
 function Invoke-Api($Method, $Path, $TimeoutSec) {
     return Invoke-RestMethod -Uri "$ApiBase$Path" -Method $Method -TimeoutSec $TimeoutSec
 }
@@ -490,6 +632,7 @@ try {
     Write-Host "========================================"
     Write-Host ""
 
+    Start-VrWebViewSupport
     Start-Backend
     $handTrackerReady = Start-HandTracker
 
@@ -542,4 +685,5 @@ try {
     Stop-SystemIfNeeded
     Stop-HandTrackerProcess
     Stop-BackendProcess
+    Stop-VrStaticServerProcess
 }

@@ -3,6 +3,18 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <script>
+    (function() {
+      var params = new URLSearchParams(window.location.search);
+      if (!params.has("vr")) return;
+
+      var viewport = document.querySelector('meta[name="viewport"]');
+      if (viewport) {
+        viewport.setAttribute("content", "width=1280, initial-scale=1.0, maximum-scale=1.0, user-scalable=no");
+      }
+      document.documentElement.classList.add("vr-webview");
+    })();
+  </script>
   <title>Remote Arm Control</title>
   <style>
     :root {
@@ -16,6 +28,13 @@
       --warning: #fbbf24;
     }
     * { box-sizing: border-box; }
+    html.vr-webview,
+    html.vr-webview body {
+      width: 1280px;
+      min-width: 1280px;
+      min-height: 720px;
+      overflow-x: hidden;
+    }
     body {
       margin: 0;
       background: radial-gradient(circle at 20% 20%, rgba(56,189,248,0.08), transparent 35%),
