@@ -437,9 +437,9 @@
       <h2>本地控制输入</h2>
       <div class="keyboard-mode-row">
         <div class="keyboard-mode-selector" id="inputDeviceMode" aria-label="input device mode">
-          <label><input type="radio" name="inputDeviceMode" value="keyboard" checked />键盘</label>
+          <label><input type="radio" name="inputDeviceMode" value="keyboard" />键盘</label>
           <label><input type="radio" name="inputDeviceMode" value="gamepad" />手柄</label>
-          <label><input type="radio" name="inputDeviceMode" value="hand_vision" />手部识别</label>
+          <label><input type="radio" name="inputDeviceMode" value="hand_vision" checked />VR</label>
         </div>
         <div class="keyboard-mode-selector" id="keyboardControlMode" aria-label="keyboard control mode">
           <label><input type="radio" name="keyboardControlMode" value="position" checked />位置控制</label>
@@ -488,7 +488,7 @@
       <p class="status-line" id="gamepadStatusHint">USB 手柄未连接</p>
       <div class="hand-vision-panel" id="handVisionPanel">
         <div>
-          <div class="hand-vision-title">手部识别视角</div>
+          <div class="hand-vision-title">VR wrist input</div>
           <div class="hand-vision-frame">
             <img id="handVisionPreview" alt="hand skeleton preview" style="display:none;" />
           </div>
@@ -500,7 +500,7 @@
             <div>Z 上下<strong id="handAxisZ">0.000</strong></div>
             <div>夹爪<strong id="handGripperCommand">0</strong></div>
           </div>
-          <p class="status-line" id="handVisionHint">手部识别服务未连接</p>
+          <p class="status-line" id="handVisionHint">VR wrist service disconnected</p>
         </div>
       </div>
     </div>
@@ -642,9 +642,9 @@
         <div class="card">
           <h2>控制面板</h2>
           <div class="radios" id="controlModeGroup">
-            <label><input type="radio" name="controlMode" value="keyboard" checked /> 键盘操作</label>
+            <label><input type="radio" name="controlMode" value="keyboard" /> 键盘操作</label>
             <label><input type="radio" name="controlMode" value="gamepad" /> USB 手柄操作</label>
-            <label><input type="radio" name="controlMode" value="hand_vision" /> 手部识别</label>
+            <label><input type="radio" name="controlMode" value="hand_vision" checked /> VR</label>
             <label><input type="radio" name="controlMode" value="teleop" /> 主手遥操(Debug)</label>
             <label><input type="radio" name="controlMode" value="vision" /> 视觉伺服</label>
             <label><input type="radio" name="controlMode" value="shared" /> 共享控制</label>
@@ -1406,7 +1406,7 @@
     function motionSourceLabel() {
       const mode = selectedControlMode();
       if (mode === "gamepad") return "手柄";
-      if (mode === "hand_vision") return "手部识别";
+      if (mode === "hand_vision") return "VR";
       return "键盘";
     }
 

@@ -1,3 +1,6 @@
+input:
+  source: "vr"
+
 service:
   host: "127.0.0.1"
   port: 8091
@@ -43,3 +46,23 @@ control:
     x_from_depth: 1
     y_from_image_x: -1
     z_from_image_y: 1
+
+vr:
+  # TCP server receiving Unity wrist pose through: adb reverse tcp:5005 tcp:5005
+  host: "127.0.0.1"
+  port: 5005
+  hand: "right"
+  stale_timeout_sec: 0.6
+  deadzone_m: 0.015
+  smoothing_alpha: 0.18
+  max_axis: 0.45
+  axis_gain_x: 2.0
+  axis_gain_y: 2.0
+  axis_gain_z: 2.0
+  axis_sign:
+    # Service axis.x maps to arm Z in the H5 UI. Use VR Y for up/down.
+    x_from_vr_y: 1
+    # Service axis.y maps to arm Y in the H5 UI. Use VR X for left/right.
+    y_from_vr_x: 1
+    # Service axis.z maps to arm X in the H5 UI. Use VR Z for forward/back.
+    z_from_vr_z: 1
