@@ -405,8 +405,6 @@ class VRWristPoseReceiver:
         with self.lock:
             if key in self.latest_by_hand:
                 return copy.deepcopy(self.latest_by_hand[key])
-            if self.latest_by_hand:
-                return copy.deepcopy(next(iter(self.latest_by_hand.values())))
             return None
 
     def status(self) -> Dict[str, Any]:
@@ -534,22 +532,24 @@ class VRWristAxisController:
             float(signs.get("z_from_vr_z", 1.0)),
         ], dtype=float)
         self.anchor: Optional[np.ndarray] = None
+        self.active = False
         self.axis = np.zeros(3, dtype=float)
         self.raw_axis = np.zeros(3, dtype=float)
 
     def update(self, pose: Optional[Dict[str, Any]], receiver_status: Dict[str, Any]) -> Dict[str, Any]:
         now = time.monotonic()
         if pose is None:
-            self._zero()
+            self._stop_control()
             return self.snapshot(False, None, "waiting for VR wrist pose; " + str(receiver_status.get("message", "")))
 
         age = now - float(pose.get("received_at", 0.0))
         if age > self.stale_timeout_sec:
-            self._zero()
+            self._stop_control()
             return self.snapshot(False, pose, f"VR wrist stale {age:.2f}s")
 
         point = np.asarray(pose["position"], dtype=float)
-        if self.anchor is None:
+        if not self.active or self.anchor is None:
+            self.active = True
             self.anchor = point.copy()
             self._zero()
             return self.snapshot(True, pose, "VR wrist neutral set")
@@ -572,9 +572,15 @@ class VRWristAxisController:
         self.axis[:] = 0.0
         self.raw_axis[:] = 0.0
 
+    def _stop_control(self) -> None:
+        self.active = False
+        self.anchor = None
+        self._zero()
+
     def recenter(self, pose: Optional[Dict[str, Any]]) -> None:
         if pose is not None:
             self.anchor = np.asarray(pose["position"], dtype=float).copy()
+            self.active = True
         self._zero()
 
     def snapshot(self, online: bool, pose: Optional[Dict[str, Any]], message: str) -> Dict[str, Any]:
@@ -588,6 +594,8 @@ class VRWristAxisController:
             "gesture": "vr_wrist" if online else "no_vr_wrist",
             "required_gesture": "none",
             "unlocked": online,
+            "control_active": bool(self.active and online),
+            "tracking_active": bool(online),
             "message": message,
             "axis": {"x": float(self.axis[0]), "y": float(self.axis[1]), "z": float(self.axis[2])},
             "raw_axis": {"x": float(self.raw_axis[0]), "y": float(self.raw_axis[1]), "z": float(self.raw_axis[2])},
@@ -603,6 +611,8 @@ class VRWristAxisController:
                 "hand": self.hand,
                 "seq": int(pose.get("seq", -1)) if pose is not None else -1,
                 "age_sec": float(time.monotonic() - pose["received_at"]) if pose is not None else None,
+                "active": bool(self.active and online),
+                "anchor_set": self.anchor is not None,
             },
         }
 
@@ -866,6 +876,8 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
             "gesture": "error",
             "required_gesture": "none",
             "unlocked": False,
+            "control_active": False,
+            "tracking_active": False,
             "message": str(exc),
             "axis": {"x": 0.0, "y": 0.0, "z": 0.0},
             "raw_axis": {"x": 0.0, "y": 0.0, "z": 0.0},
@@ -873,6 +885,7 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
             "offset": {"x": 0.0, "y": 0.0, "depth": 0.0},
             "fingers": {},
             "mapping": {"position_step_m": settings.position_step_m, "max_axis": settings.max_axis},
+            "vr": {"hand": str(cfg_get(config, ("vr", "hand"), "right")).lower(), "seq": -1, "age_sec": None, "active": False, "anchor_set": False},
         })
         print(f"[VRWrist] fatal: {exc}")
         while not stopped.is_set():
@@ -940,6 +953,8 @@ def main() -> int:
             "gesture": "starting",
             "required_gesture": "none",
             "unlocked": False,
+            "control_active": False,
+            "tracking_active": False,
             "message": "starting VR wrist service",
             "axis": {"x": 0.0, "y": 0.0, "z": 0.0},
             "raw_axis": {"x": 0.0, "y": 0.0, "z": 0.0},
@@ -947,6 +962,7 @@ def main() -> int:
             "offset": {"x": 0.0, "y": 0.0, "depth": 0.0},
             "fingers": {},
             "mapping": {"position_step_m": settings.position_step_m, "max_axis": settings.max_axis},
+            "vr": {"hand": str(cfg_get(config, ("vr", "hand"), "right")).lower(), "seq": -1, "age_sec": None, "active": False, "anchor_set": False},
         }
     else:
         initial_status = controller.snapshot("starting", {}, None, "starting hand vision service")
