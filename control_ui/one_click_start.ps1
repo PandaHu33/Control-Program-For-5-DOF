@@ -26,7 +26,11 @@ $HandTrackerOut = Join-Path $LogDir "hand_tracker_stdout.log"
 $HandTrackerErr = Join-Path $LogDir "hand_tracker_stderr.log"
 $VrStaticOut = Join-Path $LogDir "vr_static_http_stdout.log"
 $VrStaticErr = Join-Path $LogDir "vr_static_http_stderr.log"
+$RtspCameraStartOut = Join-Path $LogDir "rtsp_camera_start_stdout.log"
+$RtspCameraStartErr = Join-Path $LogDir "rtsp_camera_start_stderr.log"
+$RtspCameraPidFile = Join-Path $LogDir "rtsp_camera_pids.json"
 $VrStaticPort = 8070
+$UiUrl = "http://127.0.0.1:$VrStaticPort/control_ui/index.html"
 $script:StartedSystem = $false
 $script:StopObserved = $false
 $script:BackendProcess = $null
@@ -400,6 +404,18 @@ function Start-VrWebViewSupport {
     Start-VrStaticServer
 }
 
+function Open-H5Console {
+    Write-Info "Opening H5 console page..."
+    try {
+        Start-Process -FilePath $UiUrl
+        Write-Ok "H5 console page requested: $UiUrl"
+    } catch {
+        Write-Warn ("Failed to open H5 URL: {0}" -f $_.Exception.Message)
+        Write-Warn "Falling back to local index.html."
+        Start-Process -FilePath $UiPath
+    }
+}
+
 function Stop-ExistingBackend {
     $ownerPids = @()
     try {
@@ -455,12 +471,22 @@ function Start-HandTracker {
     Write-Info "Starting VR wrist coordinate service..."
     Remove-Item -LiteralPath $HandTrackerOut, $HandTrackerErr -Force -ErrorAction SilentlyContinue
 
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $python) {
+    $pythonExe = $null
+    try {
+        $pythonExe = Ensure-HandTrackerEnv
+    } catch {
+        Write-Warn ("Hand tracker conda environment is unavailable: {0}" -f $_.Exception.Message)
+        $python = Get-Command python -ErrorAction SilentlyContinue
+        if ($python) {
+            Write-Warn "Falling back to PATH python for VR wrist coordinate service."
+            $pythonExe = $python.Source
+        }
+    }
+    if (-not $pythonExe) {
         Write-Warn "Python was not found. VR wrist coordinate service was not started."
         return $false
     }
-    $script:HandTrackerProcess = Start-HandTrackerChild $python.Source "-u `"$HandTrackerScript`" --config `"$HandTrackerConfig`" --host 0.0.0.0 --port 8091 --input-source vr --vr-host 127.0.0.1 --vr-port 5005" $ProjectRoot
+    $script:HandTrackerProcess = Start-HandTrackerChild $pythonExe "-u `"$HandTrackerScript`" --config `"$HandTrackerConfig`" --host 0.0.0.0 --port 8091 --input-source vr --vr-host 127.0.0.1 --vr-port 5005" $ProjectRoot
 
     if (-not (Wait-HandTrackerReady 25)) {
         Write-Warn "VR wrist coordinate service did not become ready. The H5 page can still use keyboard/gamepad."
@@ -492,12 +518,71 @@ function Start-RtspCameraStream {
     }
 
     Write-Info "Starting RTSP USB camera stream..."
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $RtspCameraStartScript | Out-Host
-    if ($LASTEXITCODE -eq 0) {
+    Remove-Item -LiteralPath $RtspCameraStartOut, $RtspCameraStartErr -Force -ErrorAction SilentlyContinue
+    $powershellExe = Join-Path $PSHOME "powershell.exe"
+    if (-not (Test-Path $powershellExe)) {
+        $powershellCmd = Get-Command powershell.exe -ErrorAction SilentlyContinue
+        if ($powershellCmd) {
+            $powershellExe = $powershellCmd.Source
+        }
+    }
+    if (-not (Test-Path $powershellExe)) {
+        Write-Warn "powershell.exe was not found. RTSP USB camera stream was not started."
+        return $false
+    }
+    $args = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $RtspCameraStartScript)
+    $argString = (($args | ForEach-Object { Quote-ProcessArg $_ }) -join " ")
+    $startTime = Get-Date
+    $proc = Start-Process -FilePath $powershellExe `
+        -ArgumentList $argString `
+        -WorkingDirectory $Root `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $RtspCameraStartOut `
+        -RedirectStandardError $RtspCameraStartErr `
+        -PassThru
+
+    $ready = $false
+    $deadline = (Get-Date).AddSeconds(45)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path $RtspCameraPidFile) {
+            try {
+                $pidFile = Get-Item -LiteralPath $RtspCameraPidFile -ErrorAction Stop
+                if ($pidFile.LastWriteTime -ge $startTime.AddSeconds(-2)) {
+                    $pids = Get-Content -Path $RtspCameraPidFile -Raw | ConvertFrom-Json
+                    $ffmpegProc = if ($pids.ffmpegPid) { Get-Process -Id $pids.ffmpegPid -ErrorAction SilentlyContinue } else { $null }
+                    $mediaMtxProc = if ($pids.mediaMtxPid) { Get-Process -Id $pids.mediaMtxPid -ErrorAction SilentlyContinue } else { $null }
+                    if ($ffmpegProc -and $mediaMtxProc) {
+                        $ready = $true
+                        break
+                    }
+                }
+            } catch {}
+        }
+        if ($proc.HasExited -and -not $ready) {
+            break
+        }
+        Start-Sleep -Milliseconds 300
+    }
+
+    Start-Sleep -Milliseconds 300
+    if (Test-Path $RtspCameraStartOut) {
+        Get-Content -Path $RtspCameraStartOut | Out-Host
+    }
+    if (Test-Path $RtspCameraStartErr) {
+        Get-Content -Path $RtspCameraStartErr | Out-Host
+    }
+
+    if ($ready) {
+        if (-not $proc.HasExited) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        }
         $script:RtspCameraStarted = $true
         return $true
     }
 
+    if (-not $proc.HasExited) {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    }
     Write-Warn "RTSP USB camera stream was not started. Unity LibVLC panel will stay offline until MediaMTX/FFmpeg are available."
     return $false
 }
@@ -671,11 +756,9 @@ try {
 
     Start-VrWebViewSupport
     Start-Backend
+    Open-H5Console
     $wristServiceReady = Start-HandTracker
     $rtspCameraReady = Start-RtspCameraStream
-
-    Write-Info "Opening H5 console page..."
-    Start-Process -FilePath $UiPath
 
     Write-Info "Starting Jetson nodes and local hand/glove programs through supervisor..."
     $startResult = Invoke-Api Post "/api/system/start" 90

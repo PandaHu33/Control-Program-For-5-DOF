@@ -518,6 +518,10 @@
           </div>
         </div>
         <div class="hand-vision-telemetry">
+          <div class="keyboard-mode-selector" id="handVisionMappingMode" aria-label="VR wrist mapping mode">
+            <label><input type="radio" name="handVisionMappingMode" value="position" checked />Position</label>
+            <label><input type="radio" name="handVisionMappingMode" value="velocity" />Delta</label>
+          </div>
           <div class="hand-axis-grid" id="handVisionReadout">
             <div>X 前后<strong id="handAxisX">0.000</strong></div>
             <div>Y 左右<strong id="handAxisY">0.000</strong></div>
@@ -888,6 +892,7 @@
     const handVisionPreview = document.getElementById("handVisionPreview");
     const usbCameraHint = document.getElementById("usbCameraHint");
     const handVisionHint = document.getElementById("handVisionHint");
+    const handVisionMappingMode = document.getElementById("handVisionMappingMode");
     const handAxisXEl = document.getElementById("handAxisX");
     const handAxisYEl = document.getElementById("handAxisY");
     const handAxisZEl = document.getElementById("handAxisZ");
@@ -938,6 +943,7 @@
     let handVisionEvents = null;
     let handVisionState = null;
     let handVisionLastSeen = 0;
+    let handVisionMappingInitialized = false;
 
     function renderModuleCards(target, modules, keys, secondary=false) {
       if (!target || !modules) return;
@@ -1013,10 +1019,15 @@
       if (!data) return;
       handVisionState = data;
       handVisionLastSeen = Date.now();
+      syncHandVisionMappingModeFromState(data);
       const axis = handVisionArmAxis(data);
-      if (handAxisXEl) handAxisXEl.textContent = axis.x.toFixed(3);
-      if (handAxisYEl) handAxisYEl.textContent = axis.y.toFixed(3);
-      if (handAxisZEl) handAxisZEl.textContent = axis.z.toFixed(3);
+      const mappedTarget = selectedHandVisionMappingMode() === "position" ? handVisionMappedTargetPosition(data) : null;
+      const readout = mappedTarget
+        ? { x: mappedTarget.position[0], y: mappedTarget.position[1], z: mappedTarget.position[2] }
+        : axis;
+      if (handAxisXEl) handAxisXEl.textContent = readout.x.toFixed(3);
+      if (handAxisYEl) handAxisYEl.textContent = readout.y.toFixed(3);
+      if (handAxisZEl) handAxisZEl.textContent = readout.z.toFixed(3);
       if (handGripperCommandEl) handGripperCommandEl.textContent = String(handVisionGripperCommandForState(data));
       if (handVisionHint) {
         const state = data.unlocked ? "已解锁 / unlocked" : "已锁定 / locked";
@@ -1502,6 +1513,24 @@
       return inputDeviceMode?.querySelector('input[name="inputDeviceMode"]:checked')?.value || null;
     }
 
+    function normalizeHandVisionMappingMode(mode) {
+      return mode === "velocity" ? "velocity" : "position";
+    }
+
+    function selectedHandVisionMappingMode() {
+      const selected = handVisionMappingMode?.querySelector('input[name="handVisionMappingMode"]:checked')?.value;
+      const mode = normalizeHandVisionMappingMode(selected || handVisionState?.mapping?.vr_mapping_default);
+      return handVisionState && handVisionState.source !== "vr" ? "velocity" : mode;
+    }
+
+    function syncHandVisionMappingModeFromState(data) {
+      if (handVisionMappingInitialized || !handVisionMappingMode) return;
+      const mode = normalizeHandVisionMappingMode(data?.mapping?.vr_mapping_default);
+      const input = handVisionMappingMode.querySelector(`input[name="handVisionMappingMode"][value="${mode}"]`);
+      if (input) input.checked = true;
+      handVisionMappingInitialized = true;
+    }
+
     function syncInputDeviceMode(mode) {
       if (!inputDeviceMode) return;
       const input = inputDeviceMode.querySelector(`input[name="inputDeviceMode"][value="${mode}"]`);
@@ -1611,8 +1640,7 @@
     }
 
     function clampTargetPositionToWorkspace(position) {
-      const maxReach = ARM_LINK_3 + ARM_LINK_5;
-      const minReach = Math.sqrt(ARM_LINK_3 * ARM_LINK_3 + ARM_LINK_5 * ARM_LINK_5 - 2 * ARM_LINK_3 * ARM_LINK_5 * Math.cos(ARM_MIN_ELBOW_ANGLE));
+      const { minReach, maxReach } = armReachLimits();
       const p = [Number(position?.[0]) || 0, Number(position?.[1]) || 0, Number(position?.[2]) || 0];
       let flag = 0;
       const clampZFloor = () => {
@@ -1709,20 +1737,27 @@
       }
     }
 
-    function applyPositionDelta(dx, dy, dz) {
+    function setPositionTarget(position, extraFlag=0) {
       ensurePositionTargetInitialized();
-      targetPosition[0] += dx;
-      targetPosition[1] += dy;
-      targetPosition[2] += dz;
-      const workspace = clampTargetPositionToWorkspace(targetPosition);
+      const workspace = clampTargetPositionToWorkspace(position);
       targetPosition = workspace.position;
 
       const ikResult = solveArmKinematics(targetPosition);
       if (workspace.flag && !ikResult.flag) ikResult.flag = workspace.flag;
+      if (extraFlag && !ikResult.flag) ikResult.flag = extraFlag;
       targetAngles[0] = ikResult.qs[0];
       targetAngles[1] = ikResult.qs[1];
       targetAngles[2] = ikResult.qs[2];
       updateKeyboardTargetHint(ikResult);
+    }
+
+    function applyPositionDelta(dx, dy, dz) {
+      ensurePositionTargetInitialized();
+      setPositionTarget([
+        targetPosition[0] + dx,
+        targetPosition[1] + dy,
+        targetPosition[2] + dz,
+      ]);
     }
 
     function applyPositionKeyboardStep() {
@@ -1779,10 +1814,121 @@
     function handVisionArmAxis(state) {
       const axis = state?.axis || {};
       return {
-        x: clampNumber(Number(axis.z) || 0, -1, 1), // image up/down -> arm forward/back
-        y: clampNumber(Number(axis.y) || 0, -1, 1), // image left/right -> arm left/right
-        z: clampNumber(Number(axis.x) || 0, -1, 1), // hand depth -> arm up/down
+        x: clampNumber(Number(axis.z) || 0, -1, 1), // source forward/back -> arm forward/back
+        y: clampNumber(-(Number(axis.y) || 0), -1, 1), // source left/right -> opposite arm left/right
+        z: clampNumber(Number(axis.x) || 0, -1, 1), // source height/depth -> arm up/down
       };
+    }
+
+    function handVisionRangeFromMapping(state, axis, fallback) {
+      const workspace = state?.mapping?.vr_wrist_workspace || {};
+      const raw = workspace[axis];
+      const minRaw = Array.isArray(raw) ? raw[0] : raw?.min;
+      const maxRaw = Array.isArray(raw) ? raw[1] : raw?.max;
+      const min = Number(minRaw ?? fallback[0]);
+      const max = Number(maxRaw ?? fallback[1]);
+      return Number.isFinite(min) && Number.isFinite(max) && max > min ? [min, max] : fallback;
+    }
+
+    function remapClamped(value, sourceRange, targetRange) {
+      const t = clampNumber((Number(value) - sourceRange[0]) / (sourceRange[1] - sourceRange[0]), 0, 1);
+      return targetRange[0] + t * (targetRange[1] - targetRange[0]);
+    }
+
+    function normalizedClamped(value, sourceRange) {
+      return clampNumber((Number(value) - sourceRange[0]) / (sourceRange[1] - sourceRange[0]), 0, 1);
+    }
+
+    function lerp(start, end, t) {
+      return start + (end - start) * t;
+    }
+
+    function splitRemapClamped(value, neutral, lowerTarget, neutralTarget, upperTarget) {
+      const n = clampNumber(Number(neutral), 0.0001, 0.9999);
+      const v = clampNumber(Number(value) || 0, 0, 1);
+      if (v <= n) return lerp(lowerTarget, neutralTarget, v / n);
+      return lerp(neutralTarget, upperTarget, (v - n) / (1 - n));
+    }
+
+    function armReachLimits() {
+      const maxReach = ARM_LINK_3 + ARM_LINK_5;
+      const minReach = Math.sqrt(
+        ARM_LINK_3 * ARM_LINK_3
+        + ARM_LINK_5 * ARM_LINK_5
+        - 2 * ARM_LINK_3 * ARM_LINK_5 * Math.cos(ARM_MIN_ELBOW_ANGLE)
+      );
+      return { minReach, maxReach };
+    }
+
+    function safeSqrt(value) {
+      return Math.sqrt(Math.max(0, Number(value) || 0));
+    }
+
+    function armElbowAngleFromExtension(extension) {
+      const maxFold = Math.PI - ARM_MIN_ELBOW_ANGLE;
+      return remapClamped(extension, [0, 1], [maxFold, 0]);
+    }
+
+    function armReachForElbowAngle(q3) {
+      return safeSqrt(
+        ARM_LINK_3 * ARM_LINK_3
+        + ARM_LINK_5 * ARM_LINK_5
+        + 2 * ARM_LINK_3 * ARM_LINK_5 * Math.cos(q3)
+      );
+    }
+
+    function armPlanarPhaseForElbowAngle(q3) {
+      return Math.atan2(
+        -ARM_LINK_5 * Math.sin(q3),
+        ARM_LINK_3 + ARM_LINK_5 * Math.cos(q3)
+      );
+    }
+
+    function shoulderPitchForTargetZ(q3, targetZ) {
+      const reach = armReachForElbowAngle(q3);
+      if (reach < 1e-6) return 0;
+      const phase = armPlanarPhaseForElbowAngle(q3);
+      const z = clampNumber(Number(targetZ) || 0, -reach, reach);
+      return Math.asin(z / reach) - phase;
+    }
+
+    function shoulderPitchFromWristHeight(height, neutralHeight, q3) {
+      const reach = armReachForElbowAngle(q3);
+      const lowPitch = shoulderPitchForTargetZ(q3, ARM_MIN_TARGET_Z);
+      const highPitch = shoulderPitchForTargetZ(q3, reach);
+      return splitRemapClamped(height, neutralHeight, lowPitch, 0, highPitch);
+    }
+
+    function handVisionMappedTargetPosition(state) {
+      if (!state || state.source !== "vr") return null;
+      const hand = state.hand || {};
+      const wristX = Number(hand.x);
+      const wristY = Number(hand.y);
+      const wristZ = Number(hand.depth ?? hand.z);
+      if (![wristX, wristY, wristZ].every(Number.isFinite)) return null;
+
+      const wristWorkspace = {
+        x: handVisionRangeFromMapping(state, "x", HAND_VISION_WRIST_WORKSPACE.x),
+        y: handVisionRangeFromMapping(state, "y", HAND_VISION_WRIST_WORKSPACE.y),
+        z: handVisionRangeFromMapping(state, "z", HAND_VISION_WRIST_WORKSPACE.z),
+      };
+      const wristLeftRight = normalizedClamped(wristX, wristWorkspace.x);
+      const wristHeight = normalizedClamped(wristY, wristWorkspace.y);
+      const wristExtension = normalizedClamped(wristZ, wristWorkspace.z);
+      const neutralLeftRight = normalizedClamped(HAND_VISION_WRIST_NEUTRAL.x, wristWorkspace.x);
+      const neutralHeight = normalizedClamped(HAND_VISION_WRIST_NEUTRAL.y, wristWorkspace.y);
+
+      const baseYaw = splitRemapClamped(
+        wristLeftRight,
+        neutralLeftRight,
+        HAND_VISION_BASE_YAW_LIMIT,
+        0,
+        -HAND_VISION_BASE_YAW_LIMIT
+      );
+      const elbowAngle = armElbowAngleFromExtension(wristExtension);
+      const shoulderPitch = shoulderPitchFromWristHeight(wristHeight, neutralHeight, elbowAngle);
+      const mapped = armForwardKinematics([baseYaw, shoulderPitch, elbowAngle]);
+      return clampTargetPositionToWorkspace(mapped);
     }
 
     function keyboardGripperCommand() {
@@ -1889,8 +2035,9 @@
           leftStickCaption.textContent = jointMode ? "WASD -> J1/J2" : "WASD -> X/Y";
           rightStickCaption.textContent = jointMode ? "Q/E -> J3 | ←/→ -> J4 | ↑/↓ -> 夹爪" : "Q/E -> Z | ←/→ -> J4 | ↑/↓ -> 夹爪";
         } else if (mode === "hand_vision") {
-          leftStickCaption.textContent = "手部识别 -> X/Y";
-          rightStickCaption.textContent = "手部识别 -> Z";
+          const mapMode = selectedHandVisionMappingMode() === "position" ? "VR position" : "VR delta";
+          leftStickCaption.textContent = `${mapMode} -> X/Y`;
+          rightStickCaption.textContent = `${mapMode} -> Z`;
         } else {
           leftStickCaption.textContent = "inactive";
           rightStickCaption.textContent = "inactive";
@@ -1978,6 +2125,13 @@
       if (!handVisionState || !handVisionState.unlocked) {
         updateKeyboardTargetHint();
         return;
+      }
+      if (selectedHandVisionMappingMode() === "position") {
+        const mappedTarget = handVisionMappedTargetPosition(handVisionState);
+        if (mappedTarget) {
+          setPositionTarget(mappedTarget.position, mappedTarget.flag);
+          return;
+        }
       }
       const axis = handVisionArmAxis(handVisionState);
       const mapping = handVisionState.mapping || {};
@@ -2083,6 +2237,13 @@
     const ARM_LINK_5 = 0.268;//0.424;
     const ARM_MIN_ELBOW_ANGLE = Math.PI / 6;
     const ARM_MIN_TARGET_Z = -0.280;
+    const HAND_VISION_WRIST_WORKSPACE = {
+      x: [0.0, 0.4],  // wrist left/right
+      y: [0.9, 1.5],  // wrist height
+      z: [0.0, 0.4],  // wrist forward/back
+    };
+    const HAND_VISION_WRIST_NEUTRAL = { x: 0.2, y: 1.2, z: 0.4 };
+    const HAND_VISION_BASE_YAW_LIMIT = Math.PI / 6;
     const POSITION_STEP = 0.01;
     const HAND_POSITION_STEP = 0.006;
     const GRIPPER_ORDER_INDEX = 10;
@@ -2340,6 +2501,14 @@
         }
         if (mode) selectControlMode(mode);
         handleControlModeChange();
+      });
+    }
+    if (handVisionMappingMode) {
+      handVisionMappingMode.addEventListener("change", () => {
+        if (handVisionState) updateHandVisionUi(handVisionState);
+        updateKeyboardTargetHint();
+        updateInputIndicators();
+        if (selectedControlMode() === "hand_vision" && autoSend) sendFrame();
       });
     }
     featureToggles.querySelectorAll('input[type=checkbox]').forEach(chk => {

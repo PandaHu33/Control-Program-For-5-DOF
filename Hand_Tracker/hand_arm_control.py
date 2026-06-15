@@ -70,6 +70,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 5005,
         "hand": "right",
+        "mapping_mode": "position",
+        "wrist_workspace": {
+            "x_min": 0.0,
+            "x_max": 0.4,
+            "y_min": 0.9,
+            "y_max": 1.5,
+            "z_min": 0.0,
+            "z_max": 0.4,
+        },
         "stale_timeout_sec": 0.6,
         "deadzone_m": 0.015,
         "smoothing_alpha": 0.18,
@@ -523,6 +532,24 @@ class VRWristAxisController:
     def __init__(self, config: Dict[str, Any], settings: ControlSettings):
         self.settings = settings
         self.hand = str(cfg_get(config, ("vr", "hand"), "right")).lower()
+        self.mapping_mode = str(cfg_get(config, ("vr", "mapping_mode"), "position")).lower()
+        if self.mapping_mode not in {"position", "velocity"}:
+            self.mapping_mode = "position"
+        workspace = cfg_get(config, ("vr", "wrist_workspace"), {}) or {}
+        self.wrist_workspace = {
+            "x": {
+                "min": float(workspace.get("x_min", 0.0)),
+                "max": float(workspace.get("x_max", 0.4)),
+            },
+            "y": {
+                "min": float(workspace.get("y_min", 0.9)),
+                "max": float(workspace.get("y_max", 1.5)),
+            },
+            "z": {
+                "min": float(workspace.get("z_min", 0.0)),
+                "max": float(workspace.get("z_max", 0.4)),
+            },
+        }
         self.stale_timeout_sec = float(cfg_get(config, ("vr", "stale_timeout_sec"), 0.6))
         self.deadzone_m = float(cfg_get(config, ("vr", "deadzone_m"), 0.015))
         self.alpha = clamp(float(cfg_get(config, ("vr", "smoothing_alpha"), settings.smoothing_alpha)), 0.0, 1.0)
@@ -590,6 +617,14 @@ class VRWristAxisController:
             self.active = True
         self._zero()
 
+    def mapping_payload(self) -> Dict[str, Any]:
+        return {
+            "position_step_m": float(self.settings.position_step_m),
+            "max_axis": float(self.max_axis),
+            "vr_mapping_default": self.mapping_mode,
+            "vr_wrist_workspace": copy.deepcopy(self.wrist_workspace),
+        }
+
     def snapshot(self, online: bool, pose: Optional[Dict[str, Any]], message: str) -> Dict[str, Any]:
         point = np.asarray(pose["position"], dtype=float) if pose is not None else None
         offset = point - self.anchor if point is not None and self.anchor is not None else np.zeros(3, dtype=float)
@@ -613,7 +648,7 @@ class VRWristAxisController:
             },
             "offset": {"x": float(offset[0]), "y": float(offset[1]), "depth": float(offset[2])},
             "fingers": {},
-            "mapping": {"position_step_m": float(self.settings.position_step_m), "max_axis": float(self.max_axis)},
+            "mapping": self.mapping_payload(),
             "vr": {
                 "hand": self.hand,
                 "seq": int(pose.get("seq", -1)) if pose is not None else -1,

@@ -30,8 +30,8 @@ rtsp_camera:
   enabled: true
   # Leave empty to auto-pick the first DirectShow video device.
   # To list devices manually: ffmpeg -hide_banner -list_devices true -f dshow -i dummy
-  video_device: ""
-  stream_host: "192.168.8.137"
+  video_device: "RGB Camera"
+  stream_host: "192.168.3.10"
   rtsp_port: 8554
   stream_path: "usb_camera"
   video_size: "1280x720"
