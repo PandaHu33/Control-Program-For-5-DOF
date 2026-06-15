@@ -168,9 +168,18 @@ UDP_CLIENTS = set()
 STATUS_CLIENTS = set()
 CLIENT_LOCK = threading.RLock()
 STATE_LOCK = threading.RLock()
+CAMERA_FRAME_LOCK = threading.RLock()
 LOGS = deque(maxlen=300)
 PROCESSES = {}
 LAST_UDP_RESET_LOG = 0.0
+LAST_CAMERA_STATUS_PUSH = 0.0
+MAX_CAMERA_FRAME_BYTES = 2 * 1024 * 1024
+CAMERA_FRAME = {
+    "data": None,
+    "content_type": "image/jpeg",
+    "time": 0.0,
+    "seq": 0,
+}
 
 SYSTEM = {
     "state": "OFFLINE",
@@ -621,6 +630,50 @@ def command_result(ok, message, extra=None):
     return body
 
 
+def store_camera_frame(raw, content_type):
+    global LAST_CAMERA_STATUS_PUSH
+
+    if not raw:
+        return command_result(False, "empty camera frame")
+    if len(raw) > MAX_CAMERA_FRAME_BYTES:
+        return command_result(False, "camera frame is too large")
+
+    now = time.time()
+    safe_content_type = content_type or "image/jpeg"
+    safe_content_type = safe_content_type.split(";", 1)[0].strip().lower() or "image/jpeg"
+
+    with CAMERA_FRAME_LOCK:
+        CAMERA_FRAME["data"] = raw
+        CAMERA_FRAME["content_type"] = safe_content_type
+        CAMERA_FRAME["time"] = now
+        CAMERA_FRAME["seq"] = int(CAMERA_FRAME.get("seq") or 0) + 1
+        seq = CAMERA_FRAME["seq"]
+
+    with STATE_LOCK:
+        mod = SYSTEM["modules"].setdefault("camera", {"status": "OFFLINE", "last_seen": 0, "message": ""})
+        mod["status"] = "ONLINE"
+        mod["last_seen"] = now
+        mod["message"] = "PC browser USB camera frame bridge"
+
+    if now - LAST_CAMERA_STATUS_PUSH > 1.0:
+        LAST_CAMERA_STATUS_PUSH = now
+        push_status()
+
+    return command_result(True, "camera frame accepted", {"seq": seq})
+
+
+def latest_camera_frame():
+    with CAMERA_FRAME_LOCK:
+        data = CAMERA_FRAME.get("data")
+        content_type = CAMERA_FRAME.get("content_type") or "image/jpeg"
+        timestamp = float(CAMERA_FRAME.get("time") or 0.0)
+        seq = int(CAMERA_FRAME.get("seq") or 0)
+
+    if not data:
+        return None, content_type, timestamp, seq
+    return data, content_type, timestamp, seq
+
+
 def do_command(method, path, body=None):
     log_event("ACTION", f"{method} {path}")
     if path == "/api/status":
@@ -817,16 +870,45 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def _send_bytes(self, code, raw, content_type):
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Cache-Control", "no-store, no-cache, max-age=0")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
     def do_OPTIONS(self):
         self._send_json(200, {"ok": True})
 
     def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/api/camera/frame.jpg":
+            frame, content_type, _timestamp, _seq = latest_camera_frame()
+            if frame is None:
+                self._send_json(503, command_result(False, "no camera frame has been received"))
+                return
+            self._send_bytes(200, frame, content_type)
+            return
         if self.path == "/api/status" or self.path.startswith("/api/"):
             self._send_json(200, do_command("GET", self.path))
         else:
             self._send_json(404, command_result(False, f"未知接口: {self.path}"))
 
     def do_POST(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/api/camera/frame":
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                raw = self.rfile.read(length) if length > 0 else b""
+            except Exception as exc:
+                self._send_json(400, command_result(False, f"camera frame read failed: {exc}"))
+                return
+            self._send_json(200, store_camera_frame(raw, self.headers.get("Content-Type", "image/jpeg")))
+            return
         body = None
         try:
             length = int(self.headers.get("Content-Length", "0") or 0)
@@ -1006,7 +1088,7 @@ def udp_broadcast_loop():
 
 
 def heartbeat_loop():
-    heartbeat_modules = {"network", "udp_bridge"}
+    heartbeat_modules = {"network", "udp_bridge", "camera"}
     while True:
         now = time.time()
         changed = False

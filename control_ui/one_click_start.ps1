@@ -17,6 +17,8 @@ $HandTrackerRequirements = Join-Path $HandTrackerDir "requirements.txt"
 $HandTrackerScript = Join-Path $HandTrackerDir "hand_arm_control.py"
 $HandTrackerConfig = Join-Path $HandTrackerDir "hand_control_config.yaml"
 $UiPath = Join-Path $Root "index.html"
+$RtspCameraStartScript = Join-Path $Root "start_rtsp_camera.ps1"
+$RtspCameraStopScript = Join-Path $Root "stop_rtsp_camera.ps1"
 $LogDir = Join-Path $Root "logs"
 $BackendOut = Join-Path $LogDir "bridge_stdout.log"
 $BackendErr = Join-Path $LogDir "bridge_stderr.log"
@@ -30,6 +32,7 @@ $script:StopObserved = $false
 $script:BackendProcess = $null
 $script:HandTrackerProcess = $null
 $script:VrStaticServerProcess = $null
+$script:RtspCameraStarted = $false
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -69,7 +72,7 @@ function Wait-HandTrackerReady($Seconds) {
     $deadline = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $deadline) {
         $status = Get-HandTrackerStatus
-        if ($null -ne $status -and $status.ok -and $status.online) {
+        if ($null -ne $status -and $status.ok) {
             return $true
         }
         Start-Sleep -Milliseconds 500
@@ -166,7 +169,9 @@ function Invoke-Conda($Conda, $Arguments, $TimeoutSec) {
     $errFile = Join-Path $LogDir "conda_${stamp}_stderr.log"
 
     $oldNoPlugins = $env:CONDA_NO_PLUGINS
+    $oldSolver = $env:CONDA_SOLVER
     $env:CONDA_NO_PLUGINS = "true"
+    $env:CONDA_SOLVER = "classic"
     try {
         return Invoke-LoggedProcess $Conda $argString $ProjectRoot $TimeoutSec $outFile $errFile "conda command timed out: $($Arguments -join ' ')"
     } finally {
@@ -174,6 +179,11 @@ function Invoke-Conda($Conda, $Arguments, $TimeoutSec) {
             Remove-Item Env:\CONDA_NO_PLUGINS -ErrorAction SilentlyContinue
         } else {
             $env:CONDA_NO_PLUGINS = $oldNoPlugins
+        }
+        if ($null -eq $oldSolver) {
+            Remove-Item Env:\CONDA_SOLVER -ErrorAction SilentlyContinue
+        } else {
+            $env:CONDA_SOLVER = $oldSolver
         }
     }
 }
@@ -197,13 +207,13 @@ function Install-HandTrackerPythonDeps($PythonExe) {
     }
 }
 
-function Start-HandTrackerChild($FilePath, $ArgumentList, $WorkingDirectory) {
+function Start-HandTrackerChild($FilePath, $ArgumentList, $WorkingDirectory, $OutFile = $HandTrackerOut, $ErrFile = $HandTrackerErr) {
     return Start-Process -FilePath $FilePath `
         -ArgumentList $ArgumentList `
         -WorkingDirectory $WorkingDirectory `
         -WindowStyle Hidden `
-        -RedirectStandardOutput $HandTrackerOut `
-        -RedirectStandardError $HandTrackerErr `
+        -RedirectStandardOutput $OutFile `
+        -RedirectStandardError $ErrFile `
         -PassThru
 }
 
@@ -227,7 +237,7 @@ function Ensure-HandTrackerEnv {
     $envPath = Get-CondaEnvPathFromList $envList.Text $HandTrackerEnvName
     if (-not $envPath) {
         Write-Info "Creating local conda environment for hand recognition..."
-        $created = Invoke-Conda $conda @("create", "-y", "-p", $HandTrackerLocalEnvDir, "python=3.10", "pip") 1800
+        $created = Invoke-Conda $conda @("create", "-y", "--solver", "classic", "-p", $HandTrackerLocalEnvDir, "python=3.10", "pip") 1800
         if (-not $created.Ok) {
             throw "Failed to create hand tracker conda environment: $($created.Text)"
         }
@@ -442,39 +452,54 @@ function Stop-ExistingHandTracker {
 function Start-HandTracker {
     Stop-ExistingHandTracker
 
-    Write-Info "Starting hand-recognition service..."
+    Write-Info "Starting VR wrist coordinate service..."
     Remove-Item -LiteralPath $HandTrackerOut, $HandTrackerErr -Force -ErrorAction SilentlyContinue
 
-    try {
-        $pythonExe = Ensure-HandTrackerEnv
-    } catch {
-        Write-Warn ("Hand-recognition environment is not ready: {0}" -f $_.Exception.Message)
-        Write-Warn "Continuing without hand-recognition mode. Keyboard and gamepad control are still available."
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $python) {
+        Write-Warn "Python was not found. VR wrist coordinate service was not started."
         return $false
     }
-    $script:HandTrackerProcess = Start-HandTrackerChild $pythonExe "-u `"$HandTrackerScript`" --config `"$HandTrackerConfig`" --host 127.0.0.1 --port 8091" $ProjectRoot
+    $script:HandTrackerProcess = Start-HandTrackerChild $python.Source "-u `"$HandTrackerScript`" --config `"$HandTrackerConfig`" --host 0.0.0.0 --port 8091 --input-source vr --vr-host 127.0.0.1 --vr-port 5005" $ProjectRoot
 
     if (-not (Wait-HandTrackerReady 25)) {
-        Write-Warn "Hand-recognition service did not become ready. The H5 page can still use keyboard/gamepad."
+        Write-Warn "VR wrist coordinate service did not become ready. The H5 page can still use keyboard/gamepad."
         $status = Get-HandTrackerStatus
         if ($status -and $status.message) {
-            Write-Warn ("Hand-recognition status: {0}" -f $status.message)
+            Write-Warn ("VR wrist status: {0}" -f $status.message)
         }
         if (Test-Path $HandTrackerOut) {
             Write-Host ""
-            Write-Host "hand tracker stdout log:" -ForegroundColor Yellow
+            Write-Host "VR wrist stdout log:" -ForegroundColor Yellow
             Get-Content -Path $HandTrackerOut
         }
         if (Test-Path $HandTrackerErr) {
             Write-Host ""
-            Write-Host "hand tracker stderr log:" -ForegroundColor Yellow
+            Write-Host "VR wrist stderr log:" -ForegroundColor Yellow
             Get-Content -Path $HandTrackerErr
         }
         return $false
     }
 
-    Write-Ok "Hand-recognition service is ready."
+    Write-Ok "VR wrist coordinate service is ready."
     return $true
+}
+
+function Start-RtspCameraStream {
+    if (-not (Test-Path $RtspCameraStartScript)) {
+        Write-Warn "RTSP camera startup script was not found: $RtspCameraStartScript"
+        return $false
+    }
+
+    Write-Info "Starting RTSP USB camera stream..."
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $RtspCameraStartScript | Out-Host
+    if ($LASTEXITCODE -eq 0) {
+        $script:RtspCameraStarted = $true
+        return $true
+    }
+
+    Write-Warn "RTSP USB camera stream was not started. Unity LibVLC panel will stay offline until MediaMTX/FFmpeg are available."
+    return $false
 }
 
 function Start-Backend {
@@ -548,6 +573,18 @@ function Stop-HandTrackerProcess {
         }
     } catch {
         Write-Warn ("Failed to stop hand-recognition service: {0}" -f $_.Exception.Message)
+    }
+}
+
+function Stop-RtspCameraStream {
+    if (-not $script:RtspCameraStarted -or -not (Test-Path $RtspCameraStopScript)) {
+        return
+    }
+
+    try {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $RtspCameraStopScript | Out-Host
+    } catch {
+        Write-Warn ("Failed to stop RTSP USB camera stream: {0}" -f $_.Exception.Message)
     }
 }
 
@@ -634,7 +671,8 @@ try {
 
     Start-VrWebViewSupport
     Start-Backend
-    $handTrackerReady = Start-HandTracker
+    $wristServiceReady = Start-HandTracker
+    $rtspCameraReady = Start-RtspCameraStream
 
     Write-Info "Opening H5 console page..."
     Start-Process -FilePath $UiPath
@@ -663,10 +701,12 @@ try {
     } else {
         Write-Warn "H5 is open, but arm/hand/glove/UDP telemetry link is not fully online. Check the status above."
     }
-    if (-not $handTrackerReady) {
-        Write-Warn "Hand-recognition mode is unavailable until the local hand tracker service starts."
+    if (-not $wristServiceReady) {
+        Write-Warn "VR wrist coordinate input is unavailable until the local wrist service starts."
     }
-
+    if (-not $rtspCameraReady) {
+        Write-Warn "RTSP USB camera stream is unavailable until FFmpeg and MediaMTX are configured."
+    }
     Wait-SystemStop
 } catch {
     Write-Host ""
@@ -683,6 +723,7 @@ try {
     exit 1
 } finally {
     Stop-SystemIfNeeded
+    Stop-RtspCameraStream
     Stop-HandTrackerProcess
     Stop-BackendProcess
     Stop-VrStaticServerProcess

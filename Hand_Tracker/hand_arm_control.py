@@ -5,6 +5,7 @@ This process does not solve arm IK and does not send arm UDP commands. It only
 recognizes a hand, applies the unlock gesture/deadzone/gain logic, and exposes:
 
 - /stream.mjpg: camera image with MediaPipe hand skeleton and overlay
+- /frame.jpg: latest single JPEG frame for WebViews that do not render MJPEG
 - /events: Server-Sent Events containing xyz incremental input axes
 - /api/status: latest JSON status snapshot
 
@@ -34,7 +35,13 @@ except Exception as exc:
 else:
     _CV2_IMPORT_ERROR = None
 
-import numpy as np
+try:
+    import numpy as np
+except Exception as exc:
+    np = None
+    _NUMPY_IMPORT_ERROR = exc
+else:
+    _NUMPY_IMPORT_ERROR = None
 
 try:
     from tracker import DepthCameraTracker
@@ -693,7 +700,7 @@ def draw_overlay(frame: np.ndarray, status: Dict[str, Any]) -> None:
         y += 28
 
 
-def make_handler(shared: SharedState, event_hz: float, mjpeg_hz: float):
+def make_handler(shared: SharedState, event_hz: float, mjpeg_hz: float, allow_status_frame_fallback: bool = True):
     class HandServiceHandler(BaseHTTPRequestHandler):
         def _cors(self) -> None:
             self.send_header("Access-Control-Allow-Origin", "*")
@@ -710,6 +717,8 @@ def make_handler(shared: SharedState, event_hz: float, mjpeg_hz: float):
                 self.send_json(shared.snapshot())
             elif self.path.startswith("/events"):
                 self.send_events()
+            elif self.path.startswith("/frame.jpg"):
+                self.send_frame_jpeg()
             elif self.path.startswith("/stream.mjpg"):
                 self.send_mjpeg()
             else:
@@ -742,6 +751,26 @@ def make_handler(shared: SharedState, event_hz: float, mjpeg_hz: float):
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     break
                 time.sleep(delay)
+
+        def send_frame_jpeg(self) -> None:
+            jpeg, _ = shared.jpeg_snapshot()
+            if jpeg is None and allow_status_frame_fallback:
+                jpeg = draw_vr_frame(shared.snapshot())
+
+            if not jpeg:
+                self.send_response(503)
+                self._cors()
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                return
+
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Cache-Control", "no-store, no-cache, max-age=0")
+            self.send_header("Content-Length", str(len(jpeg)))
+            self.end_headers()
+            self.wfile.write(jpeg)
 
         def send_mjpeg(self) -> None:
             boundary = b"--frame"
@@ -829,7 +858,7 @@ def capture_loop(config: Dict[str, Any], shared: SharedState, controller: HandAx
 
 
 def draw_vr_frame(status: Dict[str, Any]) -> bytes:
-    if cv2 is None:
+    if cv2 is None or np is None:
         return b""
     frame = np.zeros((360, 640, 3), dtype=np.uint8)
     online = bool(status.get("online"))
@@ -974,7 +1003,7 @@ def main() -> int:
     event_hz = float(cfg_get(config, ("service", "event_hz"), 20.0))
     mjpeg_hz = float(cfg_get(config, ("service", "mjpeg_hz"), 15.0))
 
-    handler = make_handler(shared, event_hz, mjpeg_hz)
+    handler = make_handler(shared, event_hz, mjpeg_hz, allow_status_frame_fallback=(input_source == "vr"))
     server = ThreadingHTTPServer((host, port), handler)
     if input_source == "vr":
         capture_thread = threading.Thread(target=vr_capture_loop, args=(config, shared, settings), daemon=True)

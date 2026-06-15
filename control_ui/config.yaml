@@ -26,6 +26,17 @@ api:
   host: "0.0.0.0"
   port: 8090
 
+rtsp_camera:
+  enabled: true
+  # Leave empty to auto-pick the first DirectShow video device.
+  # To list devices manually: ffmpeg -hide_banner -list_devices true -f dshow -i dummy
+  video_device: ""
+  stream_host: "192.168.8.137"
+  rtsp_port: 8554
+  stream_path: "usb_camera"
+  video_size: "1280x720"
+  framerate: 30
+
 jetson:
   host: "192.168.1.35"
   user: "night"

@@ -32,8 +32,10 @@
     html.vr-webview body {
       width: 1280px;
       min-width: 1280px;
-      min-height: 720px;
-      overflow-x: hidden;
+      height: 1000px;
+      min-height: 1000px;
+      max-height: 1000px;
+      overflow: hidden;
     }
     body {
       margin: 0;
@@ -188,6 +190,9 @@
     #usbCameraFrame {
       max-height: 240px;
       padding-top: 42%;
+    }
+    html.vr-webview #usbCameraCard {
+      display: none;
     }
     .stick-base {
       position: relative;
@@ -878,6 +883,7 @@
     const dpadDown = document.getElementById("dpadDown");
     const dpadLeft = document.getElementById("dpadLeft");
     const dpadRight = document.getElementById("dpadRight");
+    const usbCameraFrame = document.getElementById("usbCameraFrame");
     const usbCameraPreview = document.getElementById("usbCameraPreview");
     const handVisionPreview = document.getElementById("handVisionPreview");
     const usbCameraHint = document.getElementById("usbCameraHint");
@@ -903,7 +909,8 @@
 
     videoUrlInput.value = DEFAULT_VIDEO_URL;
     wsUrlInput.value = DEFAULT_WS_URL;
-    document.body.style.overflow = "auto";
+    const IS_VR_WEBVIEW = document.documentElement.classList.contains("vr-webview");
+    document.body.style.overflow = IS_VR_WEBVIEW ? "hidden" : "auto";
 
     const MODULE_LABELS = {
       backend: "后端",
@@ -923,6 +930,11 @@
     let cameraStream = null;
     let cameraDeviceId = null;
     let cameraFailedDeviceIds = new Set();
+    let usbCameraStreamFallback = null;
+    let usbCameraFrameTimer = null;
+    let cameraFramePublishTimer = null;
+    let cameraFramePublishCanvas = null;
+    let cameraFramePublishBusy = false;
     let handVisionEvents = null;
     let handVisionState = null;
     let handVisionLastSeen = 0;
@@ -1055,7 +1067,72 @@
       }
     }
 
+    window.uemVrScrollBy = function() {
+      return false;
+    };
+
+    function setUsbCameraServerStreamActive(active) {
+      if (!usbCameraFrame || !usbCameraPreview) return false;
+
+      if (!usbCameraStreamFallback) {
+        usbCameraStreamFallback = document.createElement("img");
+        usbCameraStreamFallback.id = "usbCameraStreamFallback";
+        usbCameraStreamFallback.alt = "camera stream";
+        usbCameraStreamFallback.style.display = "none";
+        usbCameraStreamFallback.onerror = () => {
+          if (usbCameraHint) usbCameraHint.textContent = "Camera stream unavailable";
+        };
+        usbCameraStreamFallback.onload = () => {
+          if (usbCameraHint) usbCameraHint.textContent = "Camera stream from hand service";
+        };
+        usbCameraFrame.appendChild(usbCameraStreamFallback);
+      }
+
+      if (active) {
+        if (cameraStream) {
+          cameraStream.getTracks().forEach((track) => track.stop());
+          cameraStream = null;
+          cameraDeviceId = null;
+        }
+
+        usbCameraPreview.srcObject = null;
+        usbCameraPreview.style.display = "none";
+        usbCameraStreamFallback.style.display = "block";
+        const loadFrame = () => {
+          usbCameraStreamFallback.src = `${HAND_SERVICE_BASE}/frame.jpg?ts=${Date.now()}`;
+        };
+        if (!usbCameraFrameTimer) {
+          loadFrame();
+          usbCameraFrameTimer = window.setInterval(loadFrame, 250);
+        }
+        if (usbCameraHint) usbCameraHint.textContent = "Camera stream from hand service";
+        return true;
+      }
+
+      if (usbCameraFrameTimer) {
+        window.clearInterval(usbCameraFrameTimer);
+        usbCameraFrameTimer = null;
+      }
+      usbCameraPreview.style.display = "";
+      usbCameraStreamFallback.style.display = "none";
+      usbCameraStreamFallback.removeAttribute("src");
+      return true;
+    }
+
     async function refreshCameraStatus() {
+      if (IS_VR_WEBVIEW) {
+        setUsbCameraServerStreamActive(false);
+        cameraLocalStatus = { status: "ONLINE", message: "Camera shown through Unity LibVLC RTSP panel" };
+        if (lastStatus) renderSupervisorStatus(lastStatus);
+        return;
+      }
+
+      setUsbCameraServerStreamActive(false);
+      stopUsbCameraPreview();
+      cameraLocalStatus = { status: "ONLINE", message: "USB camera is streamed by FFmpeg + MediaMTX RTSP" };
+      if (lastStatus) renderSupervisorStatus(lastStatus);
+      return;
+
       if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
         cameraLocalStatus = { status: "WARNING", message: "浏览器不支持摄像头检测" };
         stopUsbCameraPreview();
@@ -1063,6 +1140,14 @@
         try {
           const devices = await navigator.mediaDevices.enumerateDevices();
           const cameras = devices.filter((item) => item.kind === "videoinput");
+          if (!cameras.length) {
+            const started = await startUsbCameraPreview(null, cameras);
+            cameraLocalStatus = started
+              ? { status: "ONLINE", message: "Camera preview started" }
+              : { status: "OFFLINE", message: "No camera detected or permission denied" };
+            if (lastStatus) renderSupervisorStatus(lastStatus);
+            return;
+          }
           if (cameras.length) {
             const preferred = selectWristCamera(cameras);
             const labeled = cameras.find((item) => item.label);
@@ -1096,6 +1181,7 @@
     }
 
     function stopUsbCameraPreview() {
+      stopCameraFramePublisher();
       if (cameraStream) {
         cameraStream.getTracks().forEach((track) => track.stop());
       }
@@ -1103,6 +1189,53 @@
       cameraDeviceId = null;
       if (usbCameraPreview) usbCameraPreview.srcObject = null;
       if (usbCameraHint) usbCameraHint.textContent = "未检测到腕部相机";
+    }
+
+    function startCameraFramePublisher() {
+      if (IS_VR_WEBVIEW || !usbCameraPreview || cameraFramePublishTimer) return;
+      cameraFramePublishCanvas = cameraFramePublishCanvas || document.createElement("canvas");
+
+      const publishFrame = () => {
+        if (cameraFramePublishBusy || !cameraStream || !usbCameraPreview.videoWidth || !usbCameraPreview.videoHeight) return;
+
+        const maxWidth = 640;
+        const scale = Math.min(1, maxWidth / usbCameraPreview.videoWidth);
+        const width = Math.max(1, Math.round(usbCameraPreview.videoWidth * scale));
+        const height = Math.max(1, Math.round(usbCameraPreview.videoHeight * scale));
+        cameraFramePublishCanvas.width = width;
+        cameraFramePublishCanvas.height = height;
+
+        const ctx = cameraFramePublishCanvas.getContext("2d", { alpha: false });
+        if (!ctx) return;
+        ctx.drawImage(usbCameraPreview, 0, 0, width, height);
+
+        cameraFramePublishBusy = true;
+        cameraFramePublishCanvas.toBlob((blob) => {
+          if (!blob) {
+            cameraFramePublishBusy = false;
+            return;
+          }
+          fetch(`${API_BASE}/api/camera/frame`, {
+            method: "POST",
+            headers: { "Content-Type": "image/jpeg" },
+            body: blob,
+            cache: "no-store",
+          }).catch(() => {}).finally(() => {
+            cameraFramePublishBusy = false;
+          });
+        }, "image/jpeg", 0.72);
+      };
+
+      publishFrame();
+      cameraFramePublishTimer = window.setInterval(publishFrame, 250);
+    }
+
+    function stopCameraFramePublisher() {
+      if (cameraFramePublishTimer) {
+        window.clearInterval(cameraFramePublishTimer);
+        cameraFramePublishTimer = null;
+      }
+      cameraFramePublishBusy = false;
     }
 
     function cameraCandidateIds(deviceId, cameras) {
@@ -1143,6 +1276,7 @@
           if (cameraDeviceId) cameraFailedDeviceIds.delete(cameraDeviceId);
           usbCameraPreview.srcObject = stream;
           usbCameraPreview.play().catch(() => {});
+          startCameraFramePublisher();
           if (usbCameraHint) usbCameraHint.textContent = "腕部相机预览中";
           return true;
         } catch (err) {
@@ -2020,7 +2154,7 @@
       }
       if (debugView) debugView.style.display = showingDebug ? "block" : "none";
       toggleViewBtn.textContent = showingDebug ? "切换到 Main" : "切换到 Debug";
-      document.body.style.overflow = "auto";
+      document.body.style.overflow = IS_VR_WEBVIEW ? "hidden" : "auto";
     }
 
     toggleViewBtn.addEventListener("click", switchView);
