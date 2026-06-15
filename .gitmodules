@@ -1,0 +1,4 @@
+[submodule "wa100-sdk-publish"]
+	path = wa100-sdk-publish
+	url = git@github.com:PandaHu33/wa100-sdk-publish.git
+	branch = test
