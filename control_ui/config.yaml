@@ -16,6 +16,10 @@ local_checks:
   hand_ready_timeout_sec: 10
   glove_ready_timeout_sec: 15
 
+hand_control:
+  default_mode: "vr"
+  start_glove_by_default: false
+
 websocket:
   host: "0.0.0.0"
   port: 8080

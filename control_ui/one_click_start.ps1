@@ -16,6 +16,7 @@ $HandTrackerLocalEnvDir = Join-Path $HandTrackerDir ".conda\hand-tracker-arm"
 $HandTrackerRequirements = Join-Path $HandTrackerDir "requirements.txt"
 $HandTrackerScript = Join-Path $HandTrackerDir "hand_arm_control.py"
 $HandTrackerConfig = Join-Path $HandTrackerDir "hand_control_config.yaml"
+$UnityHandBridgeScript = Join-Path $HandTrackerDir "unity_hand_udp_bridge.py"
 $UiPath = Join-Path $Root "index.html"
 $RtspCameraStartScript = Join-Path $Root "start_rtsp_camera.ps1"
 $RtspCameraStopScript = Join-Path $Root "stop_rtsp_camera.ps1"
@@ -24,6 +25,8 @@ $BackendOut = Join-Path $LogDir "bridge_stdout.log"
 $BackendErr = Join-Path $LogDir "bridge_stderr.log"
 $HandTrackerOut = Join-Path $LogDir "hand_tracker_stdout.log"
 $HandTrackerErr = Join-Path $LogDir "hand_tracker_stderr.log"
+$UnityHandBridgeOut = Join-Path $LogDir "unity_hand_bridge_stdout.log"
+$UnityHandBridgeErr = Join-Path $LogDir "unity_hand_bridge_stderr.log"
 $VrStaticOut = Join-Path $LogDir "vr_static_http_stdout.log"
 $VrStaticErr = Join-Path $LogDir "vr_static_http_stderr.log"
 $RtspCameraStartOut = Join-Path $LogDir "rtsp_camera_start_stdout.log"
@@ -35,6 +38,7 @@ $script:StartedSystem = $false
 $script:StopObserved = $false
 $script:BackendProcess = $null
 $script:HandTrackerProcess = $null
+$script:UnityHandBridgeProcess = $null
 $script:VrStaticServerProcess = $null
 $script:RtspCameraStarted = $false
 
@@ -237,8 +241,19 @@ function Ensure-HandTrackerEnv {
     }
 
     Write-Info "Checking hand-recognition conda environment '$HandTrackerEnvName'..."
-    $envList = Invoke-Conda $conda @("env", "list") 30
-    $envPath = Get-CondaEnvPathFromList $envList.Text $HandTrackerEnvName
+    $envPath = $null
+    $localPython = Join-Path $HandTrackerLocalEnvDir "python.exe"
+    if (Test-Path $localPython) {
+        $envPath = $HandTrackerLocalEnvDir
+        Write-Info "Using existing local conda environment: $envPath"
+    } else {
+        $envList = Invoke-Conda $conda @("env", "list") 30
+        $envPath = Get-CondaEnvPathFromList $envList.Text $HandTrackerEnvName
+        if (-not $envPath -and $envList.Text -match [regex]::Escape($HandTrackerLocalEnvDir)) {
+            $envPath = $HandTrackerLocalEnvDir
+            Write-Info "Using existing local conda environment listed by path: $envPath"
+        }
+    }
     if (-not $envPath) {
         Write-Info "Creating local conda environment for hand recognition..."
         $created = Invoke-Conda $conda @("create", "-y", "--solver", "classic", "-p", $HandTrackerLocalEnvDir, "python=3.10", "pip") 1800
@@ -336,7 +351,7 @@ function Start-AdbReverseForVr {
     }
 
     Write-Info "Configuring ADB reverse ports for VR WebView on device $deviceId..."
-    foreach ($port in @(8070, 8080, 8090, 8091, 8081, 5005)) {
+    foreach ($port in @(8070, 8080, 8090, 8091, 8081, 5005, 5006)) {
         & $adb -s $deviceId reverse "tcp:$port" "tcp:$port" | Out-Host
         if ($LASTEXITCODE -eq 0) {
             Write-Ok "adb reverse tcp:$port tcp:$port"
@@ -406,9 +421,10 @@ function Start-VrWebViewSupport {
 
 function Open-H5Console {
     Write-Info "Opening H5 console page..."
+    $cacheBustUrl = "{0}?v={1}" -f $UiUrl, ([DateTimeOffset]::Now.ToUnixTimeSeconds())
     try {
-        Start-Process -FilePath $UiUrl
-        Write-Ok "H5 console page requested: $UiUrl"
+        Start-Process -FilePath $cacheBustUrl
+        Write-Ok "H5 console page requested: $cacheBustUrl"
     } catch {
         Write-Warn ("Failed to open H5 URL: {0}" -f $_.Exception.Message)
         Write-Warn "Falling back to local index.html."
@@ -511,6 +527,68 @@ function Start-HandTracker {
     return $true
 }
 
+function Stop-ExistingUnityHandBridge {
+    try {
+        Get-CimInstance Win32_Process -Filter "name = 'python.exe' or name = 'pythonw.exe' or name = 'cmd.exe'" |
+            Where-Object { $_.CommandLine -like "*unity_hand_udp_bridge.py*" } |
+            ForEach-Object {
+                Write-Info ("Stopping old Unity hand bridge pid={0}" -f $_.ProcessId)
+                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+    } catch {}
+
+    try {
+        $ownerPids = Get-NetTCPConnection -LocalPort 5006 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess
+        foreach ($ownerPid in ($ownerPids | Sort-Object -Unique)) {
+            $proc = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
+            if ($proc -and $proc.ProcessName -in @("python", "pythonw", "cmd")) {
+                Write-Info ("Stopping process on Unity hand bridge port pid={0} process={1}" -f $ownerPid, $proc.ProcessName)
+                Stop-Process -Id $ownerPid -Force -ErrorAction SilentlyContinue
+            }
+        }
+    } catch {}
+
+    Start-Sleep -Milliseconds 300
+}
+
+function Start-UnityHandBridge {
+    Stop-ExistingUnityHandBridge
+
+    if (-not (Test-Path $UnityHandBridgeScript)) {
+        Write-Warn "Unity right-hand TCP-to-UDP bridge script was not found: $UnityHandBridgeScript"
+        return $false
+    }
+
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $python) {
+        Write-Warn "Python was not found. Unity right-hand TCP-to-UDP bridge was not started."
+        return $false
+    }
+
+    Remove-Item -LiteralPath $UnityHandBridgeOut, $UnityHandBridgeErr -Force -ErrorAction SilentlyContinue
+    Write-Info "Starting Unity right-hand TCP-to-UDP bridge on tcp:5006 -> udp:25001..."
+    $script:UnityHandBridgeProcess = Start-Process -FilePath $python.Source `
+        -ArgumentList "-u `"$UnityHandBridgeScript`" --tcp-host 127.0.0.1 --tcp-port 5006 --udp-host 127.0.0.1 --udp-port 25001" `
+        -WorkingDirectory $ProjectRoot `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $UnityHandBridgeOut `
+        -RedirectStandardError $UnityHandBridgeErr `
+        -PassThru
+
+    Start-Sleep -Milliseconds 800
+    $started = Get-NetTCPConnection -LocalPort 5006 -State Listen -ErrorAction SilentlyContinue
+    if ($started) {
+        Write-Ok "Unity right-hand bridge is listening on 127.0.0.1:5006."
+        return $true
+    }
+
+    Write-Warn "Unity right-hand bridge did not start. Dexterous-hand VR input will be unavailable."
+    if (Test-Path $UnityHandBridgeErr) {
+        Get-Content -Path $UnityHandBridgeErr | Out-Host
+    }
+    return $false
+}
+
 function Start-RtspCameraStream {
     if (-not (Test-Path $RtspCameraStartScript)) {
         Write-Warn "RTSP camera startup script was not found: $RtspCameraStartScript"
@@ -593,31 +671,30 @@ function Start-Backend {
     Write-Info "Starting local backend bridge..."
     Remove-Item -LiteralPath $BackendOut, $BackendErr -Force -ErrorAction SilentlyContinue
 
-    $bridgeExe = Join-Path $Root "bridge\bridge.exe"
-    if (-not (Test-Path $bridgeExe)) {
-        $bridgeExe = Join-Path $Root "bridge.exe"
-    }
-    if (Test-Path $bridgeExe) {
-        $script:BackendProcess = Start-Process -FilePath $bridgeExe `
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if ($python) {
+        $script:BackendProcess = Start-Process -FilePath $python.Source `
+            -ArgumentList "bridge.py" `
             -WorkingDirectory $Root `
             -WindowStyle Hidden `
             -RedirectStandardOutput $BackendOut `
             -RedirectStandardError $BackendErr `
             -PassThru
     } else {
-        $python = Get-Command python -ErrorAction SilentlyContinue
-        if ($python) {
-            Write-Warn "bridge.exe was not found. Falling back to python bridge.py."
-            $script:BackendProcess = Start-Process -FilePath $python.Source `
-                -ArgumentList "bridge.py" `
-                -WorkingDirectory $Root `
-                -WindowStyle Hidden `
-                -RedirectStandardOutput $BackendOut `
-                -RedirectStandardError $BackendErr `
-                -PassThru
-        } else {
-            throw "bridge.exe and Python were not found."
+        $bridgeExe = Join-Path $Root "bridge\bridge.exe"
+        if (-not (Test-Path $bridgeExe)) {
+            $bridgeExe = Join-Path $Root "bridge.exe"
         }
+        if (-not (Test-Path $bridgeExe)) {
+            throw "Python and bridge.exe were not found."
+        }
+        Write-Warn "Python was not found. Falling back to packaged bridge.exe; latest bridge.py changes may not be included."
+        $script:BackendProcess = Start-Process -FilePath $bridgeExe `
+            -WorkingDirectory $Root `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $BackendOut `
+            -RedirectStandardError $BackendErr `
+            -PassThru
     }
 
     if (-not (Wait-BackendReady 15)) {
@@ -658,6 +735,20 @@ function Stop-HandTrackerProcess {
         }
     } catch {
         Write-Warn ("Failed to stop hand-recognition service: {0}" -f $_.Exception.Message)
+    }
+}
+
+function Stop-UnityHandBridgeProcess {
+    if (-not $script:UnityHandBridgeProcess) {
+        return
+    }
+    try {
+        if (-not $script:UnityHandBridgeProcess.HasExited) {
+            Write-Info ("Stopping Unity right-hand bridge pid={0}" -f $script:UnityHandBridgeProcess.Id)
+            Stop-Process -Id $script:UnityHandBridgeProcess.Id -Force
+        }
+    } catch {
+        Write-Warn ("Failed to stop Unity right-hand bridge: {0}" -f $_.Exception.Message)
     }
 }
 
@@ -758,9 +849,10 @@ try {
     Start-Backend
     Open-H5Console
     $wristServiceReady = Start-HandTracker
+    $unityHandBridgeReady = Start-UnityHandBridge
     $rtspCameraReady = Start-RtspCameraStream
 
-    Write-Info "Starting Jetson nodes and local hand/glove programs through supervisor..."
+    Write-Info "Starting Jetson nodes and local hand programs through supervisor..."
     $startResult = Invoke-Api Post "/api/system/start" 90
     if ($startResult.status -and $startResult.status.state -ne "OFFLINE") {
         $script:StartedSystem = $true
@@ -774,7 +866,6 @@ try {
     $localReady = (
         $modules.arm.status -eq "ONLINE" -and
         $modules.hand.status -eq "ONLINE" -and
-        $modules.glove.status -eq "ONLINE" -and
         $modules.hand_link.status -eq "ONLINE" -and
         $modules.udp_bridge.status -eq "ONLINE"
     )
@@ -782,10 +873,13 @@ try {
     if ($startResult.ok -and $localReady) {
         Write-Ok "System is ready. Use the browser page."
     } else {
-        Write-Warn "H5 is open, but arm/hand/glove/UDP telemetry link is not fully online. Check the status above."
+        Write-Warn "H5 is open, but arm/hand/UDP telemetry link is not fully online. Check the status above."
     }
     if (-not $wristServiceReady) {
         Write-Warn "VR wrist coordinate input is unavailable until the local wrist service starts."
+    }
+    if (-not $unityHandBridgeReady) {
+        Write-Warn "VR right-hand dexterous input is unavailable until the Unity hand bridge starts."
     }
     if (-not $rtspCameraReady) {
         Write-Warn "RTSP USB camera stream is unavailable until FFmpeg and MediaMTX are configured."
@@ -807,6 +901,7 @@ try {
 } finally {
     Stop-SystemIfNeeded
     Stop-RtspCameraStream
+    Stop-UnityHandBridgeProcess
     Stop-HandTrackerProcess
     Stop-BackendProcess
     Stop-VrStaticServerProcess

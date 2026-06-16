@@ -121,6 +121,7 @@ api_cfg = cfg.get("api", {})
 jetson_cfg = cfg.get("jetson", {})
 program_cfg = cfg.get("programs", {})
 local_check_cfg = cfg.get("local_checks", {})
+hand_control_cfg = cfg.get("hand_control", {})
 
 SSH_COMMON_OPTIONS = [
     "-o", "BatchMode=yes",
@@ -154,6 +155,30 @@ HAND_CONTROL_REPEAT_INTERVAL_SEC = max(0.0, float(local_check_cfg.get("hand_cont
 LOOP_FILTER = str(udp_cfg.get("loop_filter", 1)).lower() not in ["0", "false", "no"]
 LOOP_FILTER_WINDOW = float(udp_cfg.get("loop_filter_window", 0.5))
 
+
+def config_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def normalize_hand_mode(mode):
+    value = str(mode or "vr").strip().lower()
+    aliases = {
+        "vr_hand": "vr",
+        "vrhand": "vr",
+        "hand_tracking": "vr",
+        "hand-tracking": "vr",
+    }
+    value = aliases.get(value, value)
+    return value if value in {"vr", "glove", "preset"} else "vr"
+
+
+DEFAULT_HAND_MODE = normalize_hand_mode(hand_control_cfg.get("default_mode", "vr"))
+START_GLOVE_BY_DEFAULT = config_bool(hand_control_cfg.get("start_glove_by_default"), DEFAULT_HAND_MODE == "glove")
+
 udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 if os.name == "nt":
@@ -183,7 +208,7 @@ CAMERA_FRAME = {
 
 SYSTEM = {
     "state": "OFFLINE",
-    "hand_mode": "glove",
+    "hand_mode": DEFAULT_HAND_MODE,
     "modules": {
         "backend": {"status": "ONLINE", "last_seen": time.time(), "message": "后端服务运行中"},
         "jetson": {"status": "OFFLINE", "last_seen": 0, "message": "未检查"},
@@ -217,7 +242,7 @@ def snapshot():
     with STATE_LOCK:
         return {
             "state": SYSTEM["state"],
-            "hand_mode": SYSTEM.get("hand_mode", "glove"),
+            "hand_mode": SYSTEM.get("hand_mode", DEFAULT_HAND_MODE),
             "modules": json.loads(json.dumps(SYSTEM["modules"], ensure_ascii=False)),
             "faults": list(SYSTEM["faults"])[-20:],
             "logs": list(LOGS)[:80],
@@ -274,7 +299,7 @@ def set_module(name, status, message="", fault_code=None):
 
 def set_hand_mode(mode):
     with STATE_LOCK:
-        SYSTEM["hand_mode"] = mode
+        SYSTEM["hand_mode"] = normalize_hand_mode(mode)
     push_status()
 
 
@@ -403,10 +428,23 @@ def is_process_alive(name):
     return proc is not None and proc.poll() is None
 
 
+def is_glove_required(mode=None):
+    return normalize_hand_mode(mode or SYSTEM.get("hand_mode", DEFAULT_HAND_MODE)) == "glove"
+
+
 def refresh_hand_link_status():
     hand_eps = [item for item in udp_endpoints(port=HAND_UDP_LISTEN_PORT) if endpoint_matches_host(item, HAND_UDP_LISTEN_HOST)]
     glove_proc = PROCESSES.get("glove")
     glove_eps = udp_endpoints(pid=glove_proc.pid) if glove_proc and glove_proc.poll() is None else []
+    if not is_glove_required():
+        if hand_eps:
+            set_module("hand_link", "ONLINE", f"VR hand tracking link ready: hand {describe_endpoints(hand_eps)}")
+            return True
+        if is_process_alive("hand"):
+            set_module("hand_link", "WARNING", f"hand process is running, but UDP {HAND_UDP_LISTEN_HOST}:{HAND_UDP_LISTEN_PORT} is not listening")
+            return False
+        set_module("hand_link", "OFFLINE", "VR hand tracking link is offline")
+        return False
     if hand_eps and glove_eps:
         set_module("hand_link", "ONLINE", f"本机 UDP 链路可检查: hand {describe_endpoints(hand_eps)}; glove {describe_endpoints(glove_eps)}")
         return True
@@ -618,7 +656,7 @@ def send_hand_control(mode, positions=None, name=None):
         HAND_CONTROL_REPEAT_INTERVAL_SEC,
     )
     if ok:
-        set_hand_mode("preset" if mode == "preset" else "glove")
+        set_hand_mode(mode)
         refresh_hand_link_status()
     return ok, msg
 
@@ -695,24 +733,35 @@ def do_command(method, path, body=None):
         ok, msg = ping_host(jetson_cfg.get("host"))
         if not ok:
             set_module("jetson", "ERROR", "Jetson ping 不通", "JETSON_UNREACHABLE")
-            set_state("ERROR", msg)
-            return command_result(False, ERROR_HINTS["JETSON_UNREACHABLE"])
-        set_module("jetson", "ONLINE", "Jetson ping 正常")
-        set_module("network", "ONLINE", "网络链路可达")
-        jetson_start_ok, jetson_start_msg = ssh_run("start_script")
-        if not jetson_start_ok:
-            set_module("arm", "ERROR", f"Jetson 节点启动失败: {jetson_start_msg}", "CAN_STOPPED")
-            set_module("udp_bridge", "ERROR", "Jetson 节点启动失败")
-            check_out = jetson_start_msg
+            set_module("network", "ERROR", "Jetson 网络不可达", "JETSON_UNREACHABLE")
+            set_module("arm", "ERROR", "Jetson 离线，跳过远端机械臂节点启动", "JETSON_UNREACHABLE")
+            set_module("udp_bridge", "ERROR", "Jetson 离线，跳过远端 UDP 桥接启动")
+            jetson_start_msg = msg
+            check_out = msg
             arm_ok = False
         else:
-            ok_check, check_out = ssh_run("check_script")
-            arm_ok = parse_arm_status(check_out) if ok_check else False
+            set_module("jetson", "ONLINE", "Jetson ping 正常")
+            set_module("network", "ONLINE", "网络链路可达")
+            jetson_start_ok, jetson_start_msg = ssh_run("start_script")
+            if not jetson_start_ok:
+                set_module("arm", "ERROR", f"Jetson 节点启动失败: {jetson_start_msg}", "CAN_STOPPED")
+                set_module("udp_bridge", "ERROR", "Jetson 节点启动失败")
+                check_out = jetson_start_msg
+                arm_ok = False
+            else:
+                ok_check, check_out = ssh_run("check_script")
+                arm_ok = parse_arm_status(check_out) if ok_check else False
         if LOCAL_PROGRAM_DELAY_SEC > 0:
             log_event("INFO", f"等待 {LOCAL_PROGRAM_DELAY_SEC:g} 秒后启动本地手/手套程序")
             time.sleep(LOCAL_PROGRAM_DELAY_SEC)
+        set_hand_mode(DEFAULT_HAND_MODE)
         hand_ok, _ = start_program("hand", "hand_exe")
-        glove_ok, _ = start_program("glove", "unity_glove")
+        glove_required = START_GLOVE_BY_DEFAULT or is_glove_required(DEFAULT_HAND_MODE)
+        if glove_required:
+            glove_ok, _ = start_program("glove", "unity_glove")
+        else:
+            glove_ok = True
+            set_module("glove", "OFFLINE", "VR hand tracking is default; Unity glove is not auto-started")
         set_module("matlab", "ONLINE", "USB 手柄由显控浏览器读取，主手/Simulink 已移入 Debug")
         ready = arm_ok and hand_ok and glove_ok
         set_state("READY" if ready else "ERROR", "初始化/启动流程完成，部分模块可能失败")
@@ -794,7 +843,14 @@ def do_command(method, path, body=None):
         "/api/demo/semi_auto": ("TASK_RUNNING", "SEMI_AUTO_DEMO"),
         "/api/demo/backup": ("READY", "BACKUP_DEMO"),
     }
+    if path == "/api/hand/mode/vr":
+        set_hand_mode("vr")
+        refresh_hand_link_status()
+        return command_result(True, "Switched to VR hand tracking mode")
     if path == "/api/hand/mode/glove":
+        set_hand_mode("glove")
+        if not is_process_alive("glove"):
+            start_program("glove", "unity_glove")
         ok, msg = send_hand_control("glove")
         return command_result(ok, "已切换到手套操控模式" if ok else msg, {"output": msg})
     if path == "/api/hand/mode/preset":

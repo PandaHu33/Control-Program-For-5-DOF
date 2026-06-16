@@ -3,6 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <script>
     (function() {
       var params = new URLSearchParams(window.location.search);
@@ -470,7 +473,8 @@
           <label><input type="radio" name="keyboardControlMode" value="joint" />关节控制</label>
         </div>
         <div class="keyboard-mode-selector" id="handControlMode" aria-label="hand control mode">
-          <label><input type="radio" name="handControlMode" value="glove" checked />手套操控模式</label>
+          <label><input type="radio" name="handControlMode" value="vr" checked />VR手部追踪</label>
+          <label><input type="radio" name="handControlMode" value="glove" />手套操控模式</label>
           <label><input type="radio" name="handControlMode" value="preset" />预编程位置模式</label>
         </div>
       </div>
@@ -910,7 +914,7 @@
     const featureToggles = document.getElementById("featureToggles");
     const trajectoryGroup = document.getElementById("trajectoryGroup");
     let showingDebug = false;
-    let currentHandMode = "glove";
+    let currentHandMode = "vr";
 
     videoUrlInput.value = DEFAULT_VIDEO_URL;
     wsUrlInput.value = DEFAULT_WS_URL;
@@ -968,7 +972,7 @@
     }
 
     function setHandModeUi(mode, pending=false) {
-      currentHandMode = mode || currentHandMode || "glove";
+      currentHandMode = mode || currentHandMode || "vr";
       if (handControlMode) {
         handControlMode.querySelectorAll('input[name="handControlMode"]').forEach((input) => {
           const active = input.value === currentHandMode;
@@ -1310,6 +1314,7 @@
     }
 
     function handModeForPath(path) {
+      if (/\/api\/hand\/mode\/vr$/.test(path)) return "vr";
       if (/\/api\/hand\/mode\/glove$/.test(path)) return "glove";
       if (/\/api\/hand\/mode\/preset$/.test(path)) return "preset";
       if (/\/api\/hand\/preset\//.test(path) || /\/api\/hand\/position$/.test(path)) return "preset";
@@ -1371,7 +1376,7 @@
 
     if (handControlMode) {
       handControlMode.addEventListener("change", () => {
-        const mode = handControlMode.querySelector('input[name="handControlMode"]:checked')?.value || "glove";
+        const mode = handControlMode.querySelector('input[name="handControlMode"]:checked')?.value || "vr";
         callApi(`POST /api/hand/mode/${mode}`);
       });
     }
