@@ -50,7 +50,7 @@ double joint5_actual_current = 0.0;
 double m1 = 9.6;
 double m2  = 6.4;
 double l1 = 0.424;
-double l2 = 0.268;
+double l2 = 0.424;
 //Matrix3Xd Mn(3,3);
 //Matrix3Xd Cn(3,3);
 //Vector3d Gn;

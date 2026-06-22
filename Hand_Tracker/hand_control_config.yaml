@@ -57,12 +57,12 @@ vr:
   # Right wrist tracking workspace in Unity/VR coordinates.
   # x: left/right, y: height, z: forward/back.
   wrist_workspace:
-    x_min: -0.2
-    x_max: 0.6
-    y_min: 0.9
-    y_max: 1.5
-    z_min: 0.0
-    z_max: 0.4
+    x_min: -0.5
+    x_max: 0.9
+    y_min: 0.8
+    y_max: 1.6
+    z_min: -0.2
+    z_max: 0.6
   stale_timeout_sec: 0.6
   deadzone_m: 0.015
   smoothing_alpha: 0.18

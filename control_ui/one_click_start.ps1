@@ -18,7 +18,7 @@ $HandTrackerScript = Join-Path $HandTrackerDir "hand_arm_control.py"
 $HandTrackerConfig = Join-Path $HandTrackerDir "hand_control_config.yaml"
 $UnityHandBridgeScript = Join-Path $HandTrackerDir "unity_hand_udp_bridge.py"
 $UiPath = Join-Path $Root "index.html"
-$RtspCameraStartScript = Join-Path $Root "start_rtsp_camera.ps1"
+$RtspCameraStartScript = Join-Path $Root "start_dual_rtsp_camera.ps1"
 $RtspCameraStopScript = Join-Path $Root "stop_rtsp_camera.ps1"
 $LogDir = Join-Path $Root "logs"
 $BackendOut = Join-Path $LogDir "bridge_stdout.log"
@@ -595,7 +595,7 @@ function Start-RtspCameraStream {
         return $false
     }
 
-    Write-Info "Starting RTSP USB camera stream..."
+    Write-Info "Starting dual RTSP USB camera stream..."
     Remove-Item -LiteralPath $RtspCameraStartOut, $RtspCameraStartErr -Force -ErrorAction SilentlyContinue
     $powershellExe = Join-Path $PSHOME "powershell.exe"
     if (-not (Test-Path $powershellExe)) {
@@ -605,7 +605,7 @@ function Start-RtspCameraStream {
         }
     }
     if (-not (Test-Path $powershellExe)) {
-        Write-Warn "powershell.exe was not found. RTSP USB camera stream was not started."
+        Write-Warn "powershell.exe was not found. Dual RTSP USB camera stream was not started."
         return $false
     }
     $args = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $RtspCameraStartScript)
@@ -661,7 +661,7 @@ function Start-RtspCameraStream {
     if (-not $proc.HasExited) {
         Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
     }
-    Write-Warn "RTSP USB camera stream was not started. Unity LibVLC panel will stay offline until MediaMTX/FFmpeg are available."
+    Write-Warn "Dual RTSP USB camera stream was not started. Unity LibVLC panel will stay offline until MediaMTX/FFmpeg are available."
     return $false
 }
 
@@ -753,14 +753,14 @@ function Stop-UnityHandBridgeProcess {
 }
 
 function Stop-RtspCameraStream {
-    if (-not $script:RtspCameraStarted -or -not (Test-Path $RtspCameraStopScript)) {
+    if (-not (Test-Path $RtspCameraStopScript)) {
         return
     }
 
     try {
         & powershell -NoProfile -ExecutionPolicy Bypass -File $RtspCameraStopScript | Out-Host
     } catch {
-        Write-Warn ("Failed to stop RTSP USB camera stream: {0}" -f $_.Exception.Message)
+        Write-Warn ("Failed to stop dual RTSP USB camera stream: {0}" -f $_.Exception.Message)
     }
 }
 
@@ -882,7 +882,7 @@ try {
         Write-Warn "VR right-hand dexterous input is unavailable until the Unity hand bridge starts."
     }
     if (-not $rtspCameraReady) {
-        Write-Warn "RTSP USB camera stream is unavailable until FFmpeg and MediaMTX are configured."
+        Write-Warn "Dual RTSP USB camera stream is unavailable until FFmpeg and MediaMTX are configured."
     }
     Wait-SystemStop
 } catch {

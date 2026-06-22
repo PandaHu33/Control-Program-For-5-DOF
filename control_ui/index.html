@@ -797,7 +797,7 @@
           mode: {
             reserved: [255],
             bits: { emergency_stop:7, joint_space:6, elbow_control:5, compliance:4 },
-            selector_low_nibble: { none:0, trajectory_extend:1, trajectory_retract:2, keyboard:3, teleop:7, vision_servo:11, shared_control:15 }
+            selector_low_nibble: { none:0, keyboard:0, teleop:1, vision_servo:2, shared_control:3, trajectory_extend:8, trajectory_retract:9, trajectory_home:10 }
           },
           order: {
             layout: {
@@ -948,6 +948,7 @@
     let handVisionState = null;
     let handVisionLastSeen = 0;
     let handVisionMappingInitialized = false;
+    let armHomeBurstUntilMs = 0;
 
     function renderModuleCards(target, modules, keys, secondary=false) {
       if (!target || !modules) return;
@@ -1526,6 +1527,16 @@
       const selected = handVisionMappingMode?.querySelector('input[name="handVisionMappingMode"]:checked')?.value;
       const mode = normalizeHandVisionMappingMode(selected || handVisionState?.mapping?.vr_mapping_default);
       return handVisionState && handVisionState.source !== "vr" ? "velocity" : mode;
+    }
+
+    function handVisionControlActive() {
+      return !!(handVisionState && handVisionState.unlocked);
+    }
+
+    function selectorValue(name, fallback) {
+      const selectors = FRAME_SCHEMA.semantics?.main?.mode?.selector_low_nibble || {};
+      const value = Number(selectors[name]);
+      return Number.isFinite(value) ? value : fallback;
     }
 
     function syncHandVisionMappingModeFromState(data) {
@@ -2127,7 +2138,7 @@
     function applyHandVisionStep() {
       syncKeyboardModeFeatureBit();
       ensurePositionTargetInitialized();
-      if (!handVisionState || !handVisionState.unlocked) {
+      if (!handVisionControlActive()) {
         updateKeyboardTargetHint();
         return;
       }
@@ -2239,7 +2250,7 @@
     let targetInitialized = false;
     let positionTargetInitialized = false;
     const ARM_LINK_3 = 0.424;
-    const ARM_LINK_5 = 0.268;//0.424;
+    const ARM_LINK_5 = 0.424;
     const ARM_MIN_ELBOW_ANGLE = Math.PI / 6;
     const ARM_MIN_TARGET_Z = -0.280;
     const HAND_VISION_WRIST_WORKSPACE = {
@@ -2354,6 +2365,15 @@
       if (input) input.checked = !!active;
     }
 
+    function setTrajectorySelection(value) {
+      const input = trajectoryGroup?.querySelector(`input[name=trajectory][value="${value}"]`);
+      if (input) input.checked = true;
+    }
+
+    function armHomeCommandActive() {
+      return Date.now() < armHomeBurstUntilMs;
+    }
+
     function holdCurrentArmState() {
       pressed.clear();
       updateKeyUI();
@@ -2382,7 +2402,9 @@
       positionTargetInitialized = true;
       updateKeyboardTargetHint();
       selectControlMode("keyboard");
+      setTrajectorySelection("none");
       setEmergencyStop(false);
+      armHomeBurstUntilMs = Date.now() + 1200;
       sendFrame();
     }
 
@@ -2519,7 +2541,11 @@
     featureToggles.querySelectorAll('input[type=checkbox]').forEach(chk => {
       chk.addEventListener('change', () => { if (autoSend) sendFrame(); });
     });
-    trajectoryGroup.addEventListener("change", () => { if (autoSend) sendFrame(); });
+    trajectoryGroup.addEventListener("change", () => {
+      const trajSel = trajectoryGroup.querySelector('input[name=trajectory]:checked')?.value || 'none';
+      if (trajSel !== "none") selectControlMode("trajectory");
+      if (autoSend) sendFrame();
+    });
     if (keyboardModeGroup) {
       keyboardModeGroup.addEventListener("change", () => {
         syncKeyboardModeFeatureBit();
@@ -2684,8 +2710,30 @@
       // 实时操控：keyboard/gamepad=0, teleop=1, vision_servo=2, shared_control=3（保留4-7）
       // 预定轨迹：extend=8, retract=9（保留10-15）
       const emergencyChecked = !!featureToggles.querySelector('input[data-toggle="emergency_stop"]')?.checked;
-      const modeSel = emergencyChecked ? "keyboard" : selectedControlMode();
-      const trajSel = trajectoryGroup.querySelector('input[name=trajectory]:checked')?.value || 'none';
+      const forcedHome = !emergencyChecked && armHomeCommandActive();
+      let modeSel = emergencyChecked ? "keyboard" : selectedControlMode();
+      let trajSel = trajectoryGroup.querySelector('input[name=trajectory]:checked')?.value || 'none';
+      if (!forcedHome && modeSel === "hand_vision" && !handVisionControlActive()) {
+        updateKeyboardTargetHint();
+        lastPacket.textContent = "Last packet -> paused: VR locked/offline";
+        return;
+      }
+      if (!forcedHome && modeSel === "trajectory" && trajSel === "none") {
+        lastPacket.textContent = "Last packet -> paused: no trajectory selected";
+        return;
+      }
+      if (forcedHome) {
+        modeSel = "trajectory";
+        trajSel = "home";
+        targetAngles[0] = 0;
+        targetAngles[1] = 0;
+        targetAngles[2] = 0;
+        targetAngles[3] = 0;
+        targetInitialized = true;
+        targetPosition = armForwardKinematics(targetAngles);
+        positionTargetInitialized = true;
+        updateKeyboardTargetHint();
+      }
       // 下位 4 bit 选择（无选择时为 0）
       let low4 = 0;
       
@@ -2700,18 +2748,18 @@
       }
 
       if (modeSel === 'trajectory') {
-        if (trajSel === 'none') low4 = 8;
-        else if (trajSel === 'extend') low4 = 9;
-        else if (trajSel === 'retract') low4 = 10;
-        else if (trajSel === 'home') low4 = 11;
+        if (trajSel === 'none') low4 = selectorValue("none", 0);
+        else if (trajSel === 'extend') low4 = selectorValue("trajectory_extend", 8);
+        else if (trajSel === 'retract') low4 = selectorValue("trajectory_retract", 9);
+        else if (trajSel === 'home') low4 = selectorValue("trajectory_home", 10);
         else low4 = 0;
       } else if (modeSel === 'keyboard') {
-        low4 = 0;
+        low4 = selectorValue("keyboard", 0);
         if (!emergencyChecked) applyKeyboardStep();
         else updateKeyboardTargetHint();
       }
       else if (modeSel === 'gamepad') {
-        low4 = 0;
+        low4 = selectorValue("keyboard", 0);
         if (!emergencyChecked) {
           syncKeyboardModeFeatureBit();
           applyGamepadStep();
@@ -2720,7 +2768,7 @@
         }
       }
       else if (modeSel === 'hand_vision') {
-        low4 = 0;
+        low4 = selectorValue("keyboard", 0);
         if (!emergencyChecked) {
           syncHandVisionPositionLock();
           applyHandVisionStep();
@@ -2728,9 +2776,9 @@
           updateKeyboardTargetHint();
         }
       }
-      else if (modeSel === 'teleop') low4 = 1;
-      else if (modeSel === 'vision') low4 = 2;
-      else if (modeSel === 'shared') low4 = 3;
+      else if (modeSel === 'teleop') low4 = selectorValue("teleop", 1);
+      else if (modeSel === 'vision') low4 = selectorValue("vision_servo", 2);
+      else if (modeSel === 'shared') low4 = selectorValue("shared_control", 3);
       // 高位功能开关
       let modeVal = 0;
       featureToggles.querySelectorAll('input[type=checkbox]').forEach(chk => {

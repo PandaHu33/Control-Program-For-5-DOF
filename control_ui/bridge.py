@@ -206,6 +206,15 @@ CAMERA_FRAME = {
     "seq": 0,
 }
 
+H5_FRAME_CRC_OFFSET = 289
+H5_ORDER_COUNT = 16
+H5_NOTE_SIZE = 64
+H5_INVALID_FLOAT = -1.0
+H5_SELECTOR_HOME = 10
+ARM_HOME_REPEAT_COUNT = 8
+ARM_HOME_REPEAT_INTERVAL_SEC = 0.035
+ARM_FRAME_COUNTER = 0
+
 SYSTEM = {
     "state": "OFFLINE",
     "hand_mode": DEFAULT_HAND_MODE,
@@ -597,6 +606,24 @@ def send_udp(host, port, text):
         return False, str(exc)
 
 
+def stop_rtsp_camera_stream():
+    script = BASE_DIR / "stop_rtsp_camera.ps1"
+    if not script.exists():
+        set_module("camera", "OFFLINE", "RTSP stop script was not found")
+        return True, "RTSP stop script was not found"
+
+    powershell = "powershell.exe" if os.name == "nt" else "pwsh"
+    ok, msg = run_cmd(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        timeout=12,
+    )
+    if ok:
+        set_module("camera", "OFFLINE", "RTSP camera stream stopped")
+    else:
+        set_module("camera", "WARNING", f"RTSP camera stop failed: {msg}")
+    return ok, msg
+
+
 def send_udp_repeat(host, port, text, count, interval_sec):
     try:
         sent = 0
@@ -611,6 +638,69 @@ def send_udp_repeat(host, port, text, count, interval_sec):
         return True, f"UDP {host}:{port} <- {text}{repeat_suffix}"
     except Exception as exc:
         return False, str(exc)
+
+
+def fixed_frame_text(value, size):
+    text = str(value or "")
+    data = text.encode("utf-8")[:size]
+    return data.ljust(size, b"\x00")
+
+
+def next_arm_frame_counter():
+    global ARM_FRAME_COUNTER
+    value = ARM_FRAME_COUNTER
+    ARM_FRAME_COUNTER = (ARM_FRAME_COUNTER + 1) & 0xFFFFFFFF
+    return value
+
+
+def pack_h5_arm_command_frame(mode, order=None, note="bridge"):
+    values = list(order or [])
+    if len(values) < H5_ORDER_COUNT:
+        values.extend([0.0] * (H5_ORDER_COUNT - len(values)))
+    values = [float(v) for v in values[:H5_ORDER_COUNT]]
+
+    body = b"".join([
+        struct.pack("<I", next_arm_frame_counter()),
+        struct.pack("<Q", int(time.time() * 1000) & 0xFFFFFFFFFFFFFFFF),
+        struct.pack("<7f", *([H5_INVALID_FLOAT] * 7)),
+        struct.pack("<7f", *([H5_INVALID_FLOAT] * 7)),
+        struct.pack("<7f", *([H5_INVALID_FLOAT] * 7)),
+        struct.pack("<6f", *([H5_INVALID_FLOAT] * 6)),
+        struct.pack("<6f", *([H5_INVALID_FLOAT] * 6)),
+        struct.pack("<B", int(mode) & 0xFF),
+        struct.pack("<16f", *values),
+        b"\xFF" * 16,
+        fixed_frame_text(note, H5_NOTE_SIZE),
+    ])
+    if len(body) != H5_FRAME_CRC_OFFSET:
+        raise ValueError(f"bad H5 frame body length: {len(body)}")
+    crc = binascii.crc32(body) & 0xFFFFFFFF
+    return body + struct.pack("<I", crc)
+
+
+def send_h5_arm_frame(frame, count=1, interval_sec=0.0):
+    try:
+        sent = 0
+        for idx in range(max(1, int(count))):
+            udp.sendto(frame, (UDP_HOST, UDP_SEND_PORT))
+            if LOOP_FILTER:
+                recent_ws_crc.append((binascii.crc32(frame) & 0xFFFFFFFF, time.time(), len(frame)))
+            sent += 1
+            if idx + 1 < count and interval_sec > 0:
+                time.sleep(interval_sec)
+        repeat_suffix = f" x{sent}" if sent > 1 else ""
+        return True, f"H5 UDP {UDP_HOST}:{UDP_SEND_PORT} <- binary frame len={len(frame)}{repeat_suffix}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def send_arm_home_frame():
+    frame = pack_h5_arm_command_frame(
+        H5_SELECTOR_HOME,
+        [0.0] * H5_ORDER_COUNT,
+        "bridge:home",
+    )
+    return send_h5_arm_frame(frame, ARM_HOME_REPEAT_COUNT, ARM_HOME_REPEAT_INTERVAL_SEC)
 
 
 HAND_PRESETS = {
@@ -774,13 +864,14 @@ def do_command(method, path, body=None):
         ssh_run("stop_script")
         send_udp(MATLAB_HOST, MATLAB_PORT, "STOP")
         send_udp(HAND_HOST, HAND_PORT, "STOP")
+        rtsp_ok, rtsp_msg = stop_rtsp_camera_stream()
         stop_program("glove")
         stop_program("hand")
         set_module("arm", "OFFLINE", "系统关闭，节点已停止")
         set_module("udp_bridge", "OFFLINE", "系统关闭，UDP 桥接已停止")
         set_module("matlab", "OFFLINE", "系统关闭，手柄输入停止")
         set_state("OFFLINE", "用户关闭系统")
-        return command_result(True, "已发送系统停止命令")
+        return command_result(True, "已发送系统停止命令", {"rtsp_stop_ok": rtsp_ok, "rtsp_stop_output": rtsp_msg})
     if path == "/api/system/estop":
         arm_ok, arm_msg = send_udp(MATLAB_HOST, MATLAB_PORT, "STOP")
         hand_ok, hand_msg = send_udp(HAND_HOST, HAND_PORT, "STOP")
@@ -795,7 +886,10 @@ def do_command(method, path, body=None):
     if path == "/api/system/reset":
         with STATE_LOCK:
             SYSTEM["faults"].clear()
-        arm_ok, arm_msg = send_udp(MATLAB_HOST, MATLAB_PORT, "HOME")
+        arm_ok, arm_msg = send_arm_home_frame()
+        legacy_arm_ok, legacy_arm_msg = send_udp(MATLAB_HOST, MATLAB_PORT, "HOME")
+        arm_ok = arm_ok or legacy_arm_ok
+        arm_msg = f"{arm_msg}; legacy {legacy_arm_msg}"
         hand_ok, hand_msg = send_hand_control("preset", HAND_PRESETS["reset"], "reset")
         set_state("READY" if arm_ok and hand_ok else "ERROR", "复位：机械臂 0/0/0，灵巧手 2000")
         return command_result(

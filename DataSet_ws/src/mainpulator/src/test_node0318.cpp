@@ -98,7 +98,7 @@ double gamma4 = 500;
 double m1 = 10;
 double m2  = 1.7;
 double l1 = 0.424;
-//double l2 = 0.268;
+//double l2 = 0.424;
 double l2 = 0.325;
 //g根据安装方向修改 橙色底座为-------
 double g = -9.8;

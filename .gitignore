@@ -3,6 +3,10 @@
 
 # Ignore log files
 *.log
+control_ui/logs/
+
+# Local packaged/runtime artifacts
+control_ui/bridge.exe
 
 # Python caches and local conda environments
 __pycache__/

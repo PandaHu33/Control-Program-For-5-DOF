@@ -30,16 +30,26 @@ api:
   host: "0.0.0.0"
   port: 8090
 
-rtsp_camera:
+rtsp_dual_camera:
   enabled: true
-  # Leave empty to auto-pick the first DirectShow video device.
-  # To list devices manually: ffmpeg -hide_banner -list_devices true -f dshow -i dummy
-  video_device: "RGB Camera"
+  capture_backend: "latest_frame"
+  left_video_device: "RGB Camera"
+  left_camera_index: 1
+  left_input_codec: "mjpeg"
+  left_video_pin_name: ""
+  right_video_device: "USB Camera"
+  right_camera_index: 0
+  right_input_codec: "mjpeg"
+  right_video_pin_name: ""
+  input_fourcc: "MJPG"
+  stream_crf: 26
   stream_host: "192.168.3.10"
   rtsp_port: 8554
+  # Reuse the existing path so Unity/LibVLC can keep the same URL.
   stream_path: "usb_camera"
-  video_size: "1280x720"
+  video_size: "640x480"
   framerate: 30
+  layout: "vstack"
 
 jetson:
   host: "192.168.1.35"

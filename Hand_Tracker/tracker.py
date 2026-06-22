@@ -44,6 +44,7 @@ class DepthCameraTracker:
         # 用 CAP_DSHOW 后端直接在构造时传入分辨率和帧率，
         # 避免后续 cap.set() 每次触发驱动重协商（实测每次约 6 秒）
         self.cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         self.cap.set(cv2.CAP_PROP_FPS, 30)
@@ -73,6 +74,8 @@ class DepthCameraTracker:
         actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+        actual_fourcc_raw = int(self.cap.get(cv2.CAP_PROP_FOURCC))
+        actual_fourcc = "".join(chr((actual_fourcc_raw >> (8 * i)) & 0xFF) for i in range(4))
 
         # ── 阶段4：MediaPipe 模型加载 ──────────────────────────────────
         # 放在摄像头就绪之后：模型加载期间摄像头已在后台预热，
@@ -90,7 +93,7 @@ class DepthCameraTracker:
         t_total_ms = (time.perf_counter() - t_total) * 1000
 
         # ── 启动耗时报告 ───────────────────────────────────────────────
-        print(f"[Tracker] 摄像头已就绪：{actual_w}×{actual_h} @ {actual_fps:.0f}fps")
+        print(f"[Tracker] 摄像头已就绪：{actual_w}×{actual_h} @ {actual_fps:.0f}fps fourcc={actual_fourcc}")
         if show_timing:
             print(f"[Tracker] 启动耗时分解:")
             print(f"  1. VideoCapture 打开+属性设置  {t_open:6.0f} ms")

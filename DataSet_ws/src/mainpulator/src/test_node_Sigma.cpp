@@ -53,7 +53,7 @@ double joint5_actual_current = 0.0;
 //double m2  = 6.4;
 //double m2  = 1.5;  //陆上参数
 double l1 = 0.424;
-double l2 = 0.268;
+double l2 = 0.424;
 // 水里的参数
 double m1 = 8;
 double m2  = 0.5;
