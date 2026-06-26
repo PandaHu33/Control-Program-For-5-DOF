@@ -47,7 +47,7 @@ rtsp_dual_camera:
   rtsp_port: 8554
   # Reuse the existing path so Unity/LibVLC can keep the same URL.
   stream_path: "usb_camera"
-  video_size: "640x480"
+  video_size: "640x960"
   framerate: 30
   layout: "vstack"
 

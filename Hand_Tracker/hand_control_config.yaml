@@ -4,9 +4,15 @@ input:
 service:
   host: "0.0.0.0"
   port: 8091
-  event_hz: 20
+  event_hz: 30
   mjpeg_hz: 15
   jpeg_quality: 80
+
+logging:
+  wrist_latency_csv: "logs/wrist_latency.csv"
+
+teleop:
+  phase: "approach"
 
 camera:
   index: "auto"
@@ -53,7 +59,7 @@ vr:
   port: 5005
   hand: "right"
   # Default H5 mapping mode for VR wrist input: position or velocity.
-  mapping_mode: "position"
+  mapping_mode: "velocity"
   # Right wrist tracking workspace in Unity/VR coordinates.
   # x: left/right, y: height, z: forward/back.
   wrist_workspace:
@@ -63,8 +69,9 @@ vr:
     y_max: 1.6
     z_min: -0.2
     z_max: 0.6
-  stale_timeout_sec: 0.6
-  deadzone_m: 0.015
+  stale_timeout_sec: 0.40
+  deadzone_m: 0.020
+  hysteresis_m: 0.005
   smoothing_alpha: 0.18
   max_axis: 0.45
   axis_gain_x: 2.0

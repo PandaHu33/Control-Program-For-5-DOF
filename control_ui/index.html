@@ -682,6 +682,12 @@
             <label><input type="radio" name="controlMode" value="shared" /> 共享控制</label>
             <label><input type="radio" name="controlMode" value="trajectory" /> 预定轨迹</label>
           </div>
+          <div class="radios" id="teleopPhaseGroup" style="margin-top:6px;">
+            <span style="color: var(--muted); font-size: 12px;">阶段</span>
+            <label><input type="radio" name="teleopPhase" value="approach" checked /> 接近</label>
+            <label><input type="radio" name="teleopPhase" value="contact" /> 接触</label>
+            <label><input type="radio" name="teleopPhase" value="transport" /> 搬运</label>
+          </div>
           <div class="radios" id="trajectoryGroup" style="margin-top:6px;">
             <span style="color: var(--muted); font-size: 12px;">轨迹选择</span>
             <label><input type="radio" name="trajectory" value="none" checked /> 无</label>
@@ -850,6 +856,7 @@
       "hand_est_x", "hand_est_y", "hand_est_z",
       "hand_axis_x", "hand_axis_y", "hand_axis_z",
       "hand_gesture", "hand_unlocked",
+      "wrist_frame_id", "wrist_age_sec", "tracking_active", "control_active", "teleop_phase",
       "target_j1_rad", "target_j2_rad", "target_j3_rad", "target_j4_rad",
       "actual_j1_rad", "actual_j2_rad", "actual_j3_rad", "actual_j4_rad", "actual_j5_rad",
       "gripper_cmd", "telemetry_time_ms"
@@ -911,6 +918,7 @@
       document.getElementById("j5"),
     ];
     const controlModeGroup = document.getElementById("controlModeGroup");
+    const teleopPhaseGroup = document.getElementById("teleopPhaseGroup");
     const featureToggles = document.getElementById("featureToggles");
     const trajectoryGroup = document.getElementById("trajectoryGroup");
     let showingDebug = false;
@@ -1476,6 +1484,7 @@
       const actual = armAngles || [];
       const hand = handVisionState?.hand || {};
       const handAxis = handVisionArmAxis(handVisionState);
+      const wrist = handVisionState?.vr || {};
       const gripper = GRIPPER_ORDER_INDEX < orderVec.length ? Number(orderVec[GRIPPER_ORDER_INDEX] || 0) : 0;
       const row = [
         Number(tsMs),
@@ -1488,6 +1497,11 @@
         Number(handAxis.x || 0), Number(handAxis.y || 0), Number(handAxis.z || 0),
         handVisionState?.gesture || "",
         handVisionState?.unlocked ? 1 : 0,
+        Number(wrist.seq ?? -1),
+        wrist.age_sec ?? "",
+        handVisionState?.tracking_active ? 1 : 0,
+        handVisionState?.control_active ? 1 : 0,
+        selectedTeleopPhase(),
         Number(desired[0] || 0), Number(desired[1] || 0), Number(desired[2] || 0), Number(desired[3] || 0),
         Number(actual[0] || 0), Number(actual[1] || 0), Number(actual[2] || 0), Number(actual[3] || 0), Number(actual[4] || 0),
         gripper,
@@ -1513,6 +1527,15 @@
 
     function selectedControlMode() {
       return controlModeGroup?.querySelector("input[name=controlMode]:checked")?.value || "keyboard";
+    }
+
+    function selectedTeleopPhase() {
+      const value = teleopPhaseGroup?.querySelector('input[name="teleopPhase"]:checked')?.value || "approach";
+      return TELEOP_PHASE_LIMITS[value] ? value : "approach";
+    }
+
+    function teleopPhaseSpeedScale() {
+      return TELEOP_PHASE_LIMITS[selectedTeleopPhase()]?.speedScale ?? 1.0;
     }
 
     function selectedInputDeviceMode() {
@@ -2151,7 +2174,8 @@
       }
       const axis = handVisionArmAxis(handVisionState);
       const mapping = handVisionState.mapping || {};
-      const step = clampNumber(Number(mapping.position_step_m) || HAND_POSITION_STEP, 0.001, 0.02);
+      const baseStep = clampNumber(Number(mapping.position_step_m) || HAND_POSITION_STEP, 0.001, 0.02);
+      const step = baseStep * teleopPhaseSpeedScale();
       applyPositionDelta(axis.x * step, axis.y * step, axis.z * step);
     }
 
@@ -2262,6 +2286,11 @@
     const HAND_VISION_BASE_YAW_LIMIT = Math.PI / 6;
     const POSITION_STEP = 0.01;
     const HAND_POSITION_STEP = 0.006;
+    const TELEOP_PHASE_LIMITS = {
+      approach: { speedScale: 1.0 },
+      contact: { speedScale: 0.35 },
+      transport: { speedScale: 0.6 },
+    };
     const GRIPPER_ORDER_INDEX = 10;
     const JOINT_STEP = 0.05;
     const GAMEPAD_DEADZONE = 0.15;
@@ -2515,6 +2544,13 @@
     }
 
     controlModeGroup.addEventListener("change", handleControlModeChange);
+    if (teleopPhaseGroup) {
+      teleopPhaseGroup.addEventListener("change", () => {
+        updateKeyboardTargetHint();
+        updateInputIndicators();
+        if (autoSend) sendFrame();
+      });
+    }
     if (inputDeviceMode) {
       inputDeviceMode.addEventListener("change", () => {
         const mode = selectedInputDeviceMode();

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import csv
 import json
 import math
 import socket
@@ -25,7 +26,7 @@ import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
     import cv2
@@ -66,11 +67,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "input": {
         "source": "vr",
     },
+    "logging": {
+        "wrist_latency_csv": "logs/wrist_latency.csv",
+    },
+    "teleop": {
+        "phase": "approach",
+    },
     "vr": {
         "host": "127.0.0.1",
         "port": 5005,
         "hand": "right",
-        "mapping_mode": "position",
+        "mapping_mode": "velocity",
         "wrist_workspace": {
             "x_min": 0.0,
             "x_max": 0.4,
@@ -79,8 +86,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "z_min": 0.0,
             "z_max": 0.4,
         },
-        "stale_timeout_sec": 0.6,
-        "deadzone_m": 0.015,
+        "stale_timeout_sec": 0.4,
+        "deadzone_m": 0.02,
+        "hysteresis_m": 0.005,
         "smoothing_alpha": 0.18,
         "max_axis": 0.45,
         "axis_gain_x": 2.0,
@@ -170,6 +178,69 @@ def apply_deadzone(value: float, deadzone: float) -> float:
     if abs(value) <= deadzone:
         return 0.0
     return math.copysign(abs(value) - deadzone, value)
+
+
+def apply_deadzone_hysteresis(value: float, deadzone: float, hysteresis: float, active: bool) -> Tuple[float, bool]:
+    margin = max(float(hysteresis), 0.0)
+    enter = max(float(deadzone), 0.0) + margin
+    exit_ = max(float(deadzone) - margin, 0.0)
+    magnitude = abs(value)
+    if active:
+        if magnitude <= exit_:
+            return 0.0, False
+    elif magnitude <= enter:
+        return 0.0, False
+    return math.copysign(max(magnitude - deadzone, 0.0), value), True
+
+
+WRIST_LATENCY_LOG_FIELDS = [
+    "source",
+    "frame_id",
+    "unity_time",
+    "unity_send_time",
+    "python_recv_time",
+    "bridge_send_time",
+    "ros_recv_time",
+    "control_output_time",
+    "robot_feedback_time",
+    "tracking_active",
+    "control_active",
+    "phase",
+    "axis_x",
+    "axis_y",
+    "axis_z",
+    "stale",
+    "dropped",
+    "message",
+]
+
+
+class CsvLatencyLogger:
+    def __init__(self, path_value: Any, fieldnames: List[str]):
+        self.fieldnames = fieldnames
+        self.path = self._resolve_path(path_value)
+        if self.path is not None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _resolve_path(path_value: Any) -> Optional[Path]:
+        if path_value in (None, "", False):
+            return None
+        path = Path(str(path_value))
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parent / path
+        return path
+
+    def write(self, row: Dict[str, Any]) -> None:
+        if self.path is None:
+            return
+        out = {key: row.get(key, "") for key in self.fieldnames}
+        needs_header = not self.path.exists() or self.path.stat().st_size == 0
+        with self.path.open("a", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=self.fieldnames)
+            if needs_header:
+                writer.writeheader()
+            writer.writerow(out)
 
 
 @dataclass
@@ -534,7 +605,8 @@ class VRWristAxisController:
         self.hand = str(cfg_get(config, ("vr", "hand"), "right")).lower()
         self.mapping_mode = str(cfg_get(config, ("vr", "mapping_mode"), "position")).lower()
         if self.mapping_mode not in {"position", "velocity"}:
-            self.mapping_mode = "position"
+            self.mapping_mode = "velocity"
+        self.phase = str(cfg_get(config, ("teleop", "phase"), "approach")).lower()
         workspace = cfg_get(config, ("vr", "wrist_workspace"), {}) or {}
         self.wrist_workspace = {
             "x": {
@@ -552,6 +624,7 @@ class VRWristAxisController:
         }
         self.stale_timeout_sec = float(cfg_get(config, ("vr", "stale_timeout_sec"), 0.6))
         self.deadzone_m = float(cfg_get(config, ("vr", "deadzone_m"), 0.015))
+        self.hysteresis_m = float(cfg_get(config, ("vr", "hysteresis_m"), 0.005))
         self.alpha = clamp(float(cfg_get(config, ("vr", "smoothing_alpha"), settings.smoothing_alpha)), 0.0, 1.0)
         self.max_axis = float(cfg_get(config, ("vr", "max_axis"), settings.max_axis))
         self.gain = np.array([
@@ -569,6 +642,7 @@ class VRWristAxisController:
         self.active = False
         self.axis = np.zeros(3, dtype=float)
         self.raw_axis = np.zeros(3, dtype=float)
+        self.deadzone_active = np.zeros(3, dtype=bool)
 
     def update(self, pose: Optional[Dict[str, Any]], receiver_status: Dict[str, Any]) -> Dict[str, Any]:
         now = time.monotonic()
@@ -589,11 +663,19 @@ class VRWristAxisController:
             return self.snapshot(True, pose, "VR wrist neutral set")
 
         offset = point - self.anchor
-        raw = np.array([
-            self.sign[0] * apply_deadzone(float(offset[1]), self.deadzone_m),
-            self.sign[1] * apply_deadzone(float(offset[0]), self.deadzone_m),
-            self.sign[2] * apply_deadzone(float(offset[2]), self.deadzone_m),
-        ], dtype=float)
+        raw_values = [
+            self.sign[0] * float(offset[1]),
+            self.sign[1] * float(offset[0]),
+            self.sign[2] * float(offset[2]),
+        ]
+        raw = np.zeros(3, dtype=float)
+        for index, value in enumerate(raw_values):
+            raw[index], self.deadzone_active[index] = apply_deadzone_hysteresis(
+                value,
+                self.deadzone_m,
+                self.hysteresis_m,
+                bool(self.deadzone_active[index]),
+            )
         raw = raw * self.gain
         max_axis = max(self.max_axis, 1e-6)
         raw = max_axis * np.tanh(raw / max_axis)
@@ -605,6 +687,7 @@ class VRWristAxisController:
     def _zero(self) -> None:
         self.axis[:] = 0.0
         self.raw_axis[:] = 0.0
+        self.deadzone_active[:] = False
 
     def _stop_control(self) -> None:
         self.active = False
@@ -621,6 +704,8 @@ class VRWristAxisController:
         return {
             "position_step_m": float(self.settings.position_step_m),
             "max_axis": float(self.max_axis),
+            "deadzone_m": float(self.deadzone_m),
+            "hysteresis_m": float(self.hysteresis_m),
             "vr_mapping_default": self.mapping_mode,
             "vr_wrist_workspace": copy.deepcopy(self.wrist_workspace),
         }
@@ -638,6 +723,7 @@ class VRWristAxisController:
             "unlocked": online,
             "control_active": bool(self.active and online),
             "tracking_active": bool(online),
+            "phase": self.phase,
             "message": message,
             "axis": {"x": float(self.axis[0]), "y": float(self.axis[1]), "z": float(self.axis[2])},
             "raw_axis": {"x": float(self.raw_axis[0]), "y": float(self.raw_axis[1]), "z": float(self.raw_axis[2])},
@@ -914,12 +1000,38 @@ def draw_vr_frame(status: Dict[str, Any]) -> bytes:
     return encoded.tobytes() if ok else b""
 
 
+def write_wrist_latency_sample(logger: CsvLatencyLogger, status: Dict[str, Any], pose: Optional[Dict[str, Any]]) -> None:
+    axis = status.get("axis") or {}
+    message = str(status.get("message", ""))
+    logger.write({
+        "source": "pico_wrist",
+        "frame_id": int(pose.get("seq", -1)) if pose is not None else "",
+        "unity_time": float(pose.get("device_time")) if pose is not None else "",
+        "unity_send_time": "",
+        "python_recv_time": float(pose.get("wall_time")) if pose is not None else "",
+        "bridge_send_time": "",
+        "ros_recv_time": "",
+        "control_output_time": float(status.get("time", time.time())),
+        "robot_feedback_time": "",
+        "tracking_active": 1 if status.get("tracking_active") else 0,
+        "control_active": 1 if status.get("control_active") else 0,
+        "phase": status.get("phase", ""),
+        "axis_x": axis.get("x", 0.0),
+        "axis_y": axis.get("y", 0.0),
+        "axis_z": axis.get("z", 0.0),
+        "stale": 1 if "stale" in message.lower() else 0,
+        "dropped": 0,
+        "message": message,
+    })
+
+
 def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: ControlSettings) -> None:
     stopped = shared.stopped
     host = str(cfg_get(config, ("vr", "host"), "127.0.0.1"))
     port = int(cfg_get(config, ("vr", "port"), 5005))
     receiver = VRWristPoseReceiver(host, port, stopped)
     controller = VRWristAxisController(config, settings)
+    latency_logger = CsvLatencyLogger(cfg_get(config, ("logging", "wrist_latency_csv"), ""), WRIST_LATENCY_LOG_FIELDS)
     interval = 1.0 / max(float(cfg_get(config, ("service", "event_hz"), 20.0)), 1.0)
     receiver.start()
     try:
@@ -927,6 +1039,7 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
             pose = receiver.latest(controller.hand)
             status = controller.update(pose, receiver.status())
             shared.update_status(status)
+            write_wrist_latency_sample(latency_logger, status, pose)
             frame = draw_vr_frame(status)
             if frame:
                 shared.update_frame(frame)
@@ -942,6 +1055,7 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
             "unlocked": False,
             "control_active": False,
             "tracking_active": False,
+            "phase": str(cfg_get(config, ("teleop", "phase"), "approach")).lower(),
             "message": str(exc),
             "axis": {"x": 0.0, "y": 0.0, "z": 0.0},
             "raw_axis": {"x": 0.0, "y": 0.0, "z": 0.0},
@@ -1019,6 +1133,7 @@ def main() -> int:
             "unlocked": False,
             "control_active": False,
             "tracking_active": False,
+            "phase": str(cfg_get(config, ("teleop", "phase"), "approach")).lower(),
             "message": "starting VR wrist service",
             "axis": {"x": 0.0, "y": 0.0, "z": 0.0},
             "raw_axis": {"x": 0.0, "y": 0.0, "z": 0.0},
