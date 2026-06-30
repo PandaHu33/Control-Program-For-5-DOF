@@ -8,6 +8,8 @@ recognizes a hand, applies the unlock gesture/deadzone/gain logic, and exposes:
 - /frame.jpg: latest single JPEG frame for WebViews that do not render MJPEG
 - /events: Server-Sent Events containing xyz incremental input axes
 - /api/status: latest JSON status snapshot
+- /controller-delta/events: Server-Sent Events for right-controller xyz deltas
+- /api/controller-delta/status: latest right-controller delta status
 
 The H5 page consumes those axes and routes them through the same position-mode
 IK and UDP frame path already used by keyboard and gamepad control.
@@ -77,6 +79,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 5005,
         "hand": "right",
+        "pose_source": "xr_hand_wrist",
         "mapping_mode": "velocity",
         "wrist_workspace": {
             "x_min": 0.0,
@@ -99,6 +102,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "y_from_vr_x": 1.0,
             "z_from_vr_z": 1.0,
         },
+    },
+    "controller_delta": {
+        "gain_xyz": [0.5, 0.5, 0.5],
+        "stale_timeout_sec": 0.4,
+        "deadman_button_label": "Left X",
     },
     "camera": {
         "index": "auto",
@@ -213,6 +221,9 @@ WRIST_LATENCY_LOG_FIELDS = [
     "dropped",
     "message",
 ]
+
+
+VALID_VR_POSE_SOURCES = {"xr_hand_wrist", "right_controller"}
 
 
 class CsvLatencyLogger:
@@ -461,6 +472,7 @@ class VRWristPoseReceiver:
 
     Expected line format:
       seq,time,hand,tracked,pos_x,pos_y,pos_z,rot_x,rot_y,rot_z,rot_w
+      seq,time,hand,tracked,pos_x,pos_y,pos_z,rot_x,rot_y,rot_z,rot_w,source,deadman
     """
 
     def __init__(self, host: str, port: int, stopped: threading.Event):
@@ -469,6 +481,7 @@ class VRWristPoseReceiver:
         self.stopped = stopped
         self.lock = threading.RLock()
         self.latest_by_hand: Dict[str, Dict[str, Any]] = {}
+        self.latest_by_source_hand: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self.connected = False
         self.last_error = "waiting for Unity wrist TCP connection"
         self._server: Optional[socket.socket] = None
@@ -487,10 +500,14 @@ class VRWristPoseReceiver:
                     pass
         self._thread.join(timeout=1.0)
 
-    def latest(self, hand: str) -> Optional[Dict[str, Any]]:
+    def latest(self, hand: str, source: str = "xr_hand_wrist") -> Optional[Dict[str, Any]]:
         key = str(hand or "right").lower()
+        source_key = normalize_pose_source(source)
         with self.lock:
-            if key in self.latest_by_hand:
+            source_hand_key = (source_key, key)
+            if source_hand_key in self.latest_by_source_hand:
+                return copy.deepcopy(self.latest_by_source_hand[source_hand_key])
+            if source_key == "xr_hand_wrist" and key in self.latest_by_hand:
                 return copy.deepcopy(self.latest_by_hand[key])
             return None
 
@@ -578,31 +595,41 @@ class VRWristPoseReceiver:
             if hand not in {"left", "right"}:
                 return
             tracked = int(float(parts[3])) == 1
-            if not tracked:
-                with self.lock:
-                    self.latest_by_hand.pop(hand, None)
-                    self.last_error = f"{hand} wrist control disabled or not tracked"
-                return
+            source = normalize_pose_source(parts[11] if len(parts) >= 12 else "xr_hand_wrist")
+            deadman_index = 15 if len(parts) >= 16 else 12
+            deadman = bool(int(float(parts[deadman_index]))) if len(parts) > deadman_index else (source == "xr_hand_wrist")
             pose = {
                 "seq": int(float(parts[0])),
                 "device_time": float(parts[1]),
                 "hand": hand,
+                "source": source,
+                "tracked": tracked,
                 "position": np.array([float(parts[4]), float(parts[5]), float(parts[6])], dtype=float),
                 "rotation": np.array([float(parts[7]), float(parts[8]), float(parts[9]), float(parts[10])], dtype=float),
+                "deadman_active": deadman,
                 "received_at": time.monotonic(),
                 "wall_time": time.time(),
             }
         except (TypeError, ValueError):
             return
         with self.lock:
-            self.latest_by_hand[hand] = pose
-            self.last_error = f"receiving {hand} wrist seq={pose['seq']}"
+            self.latest_by_source_hand[(source, hand)] = pose
+            if source == "xr_hand_wrist":
+                self.latest_by_hand[hand] = pose
+            state = "tracked" if tracked else "inactive"
+            self.last_error = f"receiving {source} {hand} seq={pose['seq']} {state}"
+
+
+def normalize_pose_source(source: Any) -> str:
+    value = str(source or "xr_hand_wrist").strip().lower()
+    return value if value in VALID_VR_POSE_SOURCES else "xr_hand_wrist"
 
 
 class VRWristAxisController:
     def __init__(self, config: Dict[str, Any], settings: ControlSettings):
         self.settings = settings
         self.hand = str(cfg_get(config, ("vr", "hand"), "right")).lower()
+        self.pose_source = normalize_pose_source(cfg_get(config, ("vr", "pose_source"), "xr_hand_wrist"))
         self.mapping_mode = str(cfg_get(config, ("vr", "mapping_mode"), "position")).lower()
         if self.mapping_mode not in {"position", "velocity"}:
             self.mapping_mode = "velocity"
@@ -644,23 +671,39 @@ class VRWristAxisController:
         self.raw_axis = np.zeros(3, dtype=float)
         self.deadzone_active = np.zeros(3, dtype=bool)
 
+    def set_pose_source(self, source: str) -> None:
+        next_source = normalize_pose_source(source)
+        if next_source == self.pose_source:
+            return
+        self.pose_source = next_source
+        self._stop_control()
+
     def update(self, pose: Optional[Dict[str, Any]], receiver_status: Dict[str, Any]) -> Dict[str, Any]:
         now = time.monotonic()
         if pose is None:
             self._stop_control()
-            return self.snapshot(False, None, "waiting for VR wrist pose; " + str(receiver_status.get("message", "")))
+            return self.snapshot(False, None, "waiting for VR pose; " + str(receiver_status.get("message", "")))
 
         age = now - float(pose.get("received_at", 0.0))
         if age > self.stale_timeout_sec:
             self._stop_control()
-            return self.snapshot(False, pose, f"VR wrist stale {age:.2f}s")
+            return self.snapshot(False, pose, f"VR pose stale {age:.2f}s")
+
+        tracked = bool(pose.get("tracked", True))
+        deadman = bool(pose.get("deadman_active", self.pose_source == "xr_hand_wrist"))
+        if not tracked:
+            self._stop_control()
+            return self.snapshot(False, pose, f"{self.pose_source} not tracked")
+        if self.pose_source == "right_controller" and not deadman:
+            self._stop_control()
+            return self.snapshot(False, pose, "right controller waiting for left X deadman")
 
         point = np.asarray(pose["position"], dtype=float)
         if not self.active or self.anchor is None:
             self.active = True
             self.anchor = point.copy()
             self._zero()
-            return self.snapshot(True, pose, "VR wrist neutral set")
+            return self.snapshot(True, pose, f"{self.pose_source} neutral set")
 
         offset = point - self.anchor
         raw_values = [
@@ -682,7 +725,7 @@ class VRWristAxisController:
         self.raw_axis = raw
         self.axis = (1.0 - self.alpha) * self.axis + self.alpha * raw
         self.axis[np.abs(self.axis) < 0.01] = 0.0
-        return self.snapshot(True, pose, "VR wrist controlling")
+        return self.snapshot(True, pose, f"{self.pose_source} controlling")
 
     def _zero(self) -> None:
         self.axis[:] = 0.0
@@ -708,21 +751,28 @@ class VRWristAxisController:
             "hysteresis_m": float(self.hysteresis_m),
             "vr_mapping_default": self.mapping_mode,
             "vr_wrist_workspace": copy.deepcopy(self.wrist_workspace),
+            "pose_source": self.pose_source,
         }
 
     def snapshot(self, online: bool, pose: Optional[Dict[str, Any]], message: str) -> Dict[str, Any]:
         point = np.asarray(pose["position"], dtype=float) if pose is not None else None
         offset = point - self.anchor if point is not None and self.anchor is not None else np.zeros(3, dtype=float)
+        source = normalize_pose_source(pose.get("source") if pose is not None else self.pose_source)
+        tracked = bool(pose.get("tracked", False)) if pose is not None else False
+        deadman = bool(pose.get("deadman_active", source == "xr_hand_wrist")) if pose is not None else False
         return {
             "ok": True,
             "online": online,
             "time": time.time(),
             "source": "vr",
-            "gesture": "vr_wrist" if online else "no_vr_wrist",
+            "pose_source": source,
+            "gesture": source if online else f"no_{source}",
             "required_gesture": "none",
             "unlocked": online,
             "control_active": bool(self.active and online),
-            "tracking_active": bool(online),
+            "tracking_active": bool(tracked),
+            "deadman_active": bool(deadman),
+            "controller_tracked": bool(tracked) if source == "right_controller" else False,
             "phase": self.phase,
             "message": message,
             "axis": {"x": float(self.axis[0]), "y": float(self.axis[1]), "z": float(self.axis[2])},
@@ -737,18 +787,158 @@ class VRWristAxisController:
             "mapping": self.mapping_payload(),
             "vr": {
                 "hand": self.hand,
+                "pose_source": source,
                 "seq": int(pose.get("seq", -1)) if pose is not None else -1,
                 "age_sec": float(time.monotonic() - pose["received_at"]) if pose is not None else None,
                 "active": bool(self.active and online),
                 "anchor_set": self.anchor is not None,
+                "deadman_active": bool(deadman),
+                "controller_tracked": bool(tracked) if source == "right_controller" else False,
+            },
+        }
+
+
+class ControllerDeltaAxisController:
+    def __init__(self, config: Dict[str, Any]):
+        self.hand = "right"
+        self.phase = str(cfg_get(config, ("teleop", "phase"), "approach")).lower()
+        self.stale_timeout_sec = float(
+            cfg_get(
+                config,
+                ("controller_delta", "stale_timeout_sec"),
+                cfg_get(config, ("vr", "stale_timeout_sec"), 0.4),
+            )
+        )
+        gain_raw = cfg_get(config, ("controller_delta", "gain_xyz"), [0.5, 0.5, 0.5])
+        if not isinstance(gain_raw, (list, tuple)) or len(gain_raw) < 3:
+            gain_raw = [0.5, 0.5, 0.5]
+        self.gain = np.array([float(gain_raw[0]), float(gain_raw[1]), float(gain_raw[2])], dtype=float)
+        self.deadman_button_label = str(cfg_get(config, ("controller_delta", "deadman_button_label"), "Left X"))
+        self.anchor: Optional[np.ndarray] = None
+        self.active = False
+        self.session_id = 0
+        self.raw_delta = np.zeros(3, dtype=float)
+        self.position_delta = np.zeros(3, dtype=float)
+
+    def update(self, pose: Optional[Dict[str, Any]], receiver_status: Dict[str, Any]) -> Dict[str, Any]:
+        now = time.monotonic()
+        if pose is None:
+            self._stop_control()
+            return self.snapshot(False, None, "waiting for right controller pose; " + str(receiver_status.get("message", "")))
+
+        age = now - float(pose.get("received_at", 0.0))
+        if age > self.stale_timeout_sec:
+            self._stop_control()
+            return self.snapshot(False, pose, f"right controller pose stale {age:.2f}s")
+
+        tracked = bool(pose.get("tracked", False))
+        deadman = bool(pose.get("deadman_active", False))
+        if not tracked:
+            self._stop_control()
+            return self.snapshot(False, pose, "right controller not tracked")
+        if not deadman:
+            self._stop_control()
+            return self.snapshot(True, pose, f"waiting for {self.deadman_button_label} deadman")
+
+        point = np.asarray(pose["position"], dtype=float)
+        if not self.active or self.anchor is None:
+            self.active = True
+            self.anchor = point.copy()
+            self.session_id += 1
+            self._zero()
+            return self.snapshot(True, pose, f"{self.deadman_button_label} anchor set")
+
+        self.raw_delta = point - self.anchor
+        # Raw PICO controller axes observed on device: x=left/right, y=up/down, z=forward/back.
+        # Arm axes: X=forward/back, Y=left/right, Z=up/down.
+        arm_delta = np.array([
+            self.raw_delta[2],
+            self.raw_delta[0],
+            self.raw_delta[1],
+        ], dtype=float)
+        self.position_delta = arm_delta * self.gain
+        return self.snapshot(True, pose, "right controller delta active")
+
+    def _zero(self) -> None:
+        self.raw_delta[:] = 0.0
+        self.position_delta[:] = 0.0
+
+    def _stop_control(self) -> None:
+        self.active = False
+        self.anchor = None
+        self._zero()
+
+    def mapping_payload(self) -> Dict[str, Any]:
+        return {
+            "gain_xyz": [float(self.gain[0]), float(self.gain[1]), float(self.gain[2])],
+            "stale_timeout_sec": float(self.stale_timeout_sec),
+            "deadman_button_label": self.deadman_button_label,
+        }
+
+    def snapshot(self, online: bool, pose: Optional[Dict[str, Any]], message: str) -> Dict[str, Any]:
+        point = np.asarray(pose["position"], dtype=float) if pose is not None else None
+        offset = point - self.anchor if point is not None and self.anchor is not None else np.zeros(3, dtype=float)
+        tracked = bool(pose.get("tracked", False)) if pose is not None else False
+        deadman = bool(pose.get("deadman_active", False)) if pose is not None else False
+        control_active = bool(self.active and online and tracked and deadman)
+        return {
+            "ok": True,
+            "online": bool(online),
+            "time": time.time(),
+            "source": "controller_delta",
+            "pose_source": "right_controller",
+            "gesture": "right_controller",
+            "required_gesture": self.deadman_button_label,
+            "unlocked": control_active,
+            "control_active": control_active,
+            "session_id": int(self.session_id),
+            "tracking_active": bool(tracked),
+            "deadman_active": bool(deadman),
+            "controller_tracked": bool(tracked),
+            "phase": self.phase,
+            "message": message,
+            "position_delta": {
+                "x": float(self.position_delta[0]),
+                "y": float(self.position_delta[1]),
+                "z": float(self.position_delta[2]),
+            },
+            "raw_delta": {
+                "x": float(self.raw_delta[0]),
+                "y": float(self.raw_delta[1]),
+                "z": float(self.raw_delta[2]),
+            },
+            "hand": {
+                "x": float(point[0]) if point is not None else None,
+                "y": float(point[1]) if point is not None else None,
+                "depth": float(point[2]) if point is not None else None,
+            },
+            "offset": {"x": float(offset[0]), "y": float(offset[1]), "depth": float(offset[2])},
+            "mapping": self.mapping_payload(),
+            "vr": {
+                "hand": self.hand,
+                "pose_source": "right_controller",
+                "seq": int(pose.get("seq", -1)) if pose is not None else -1,
+                "age_sec": float(time.monotonic() - pose["received_at"]) if pose is not None else None,
+                "active": control_active,
+                "anchor_set": self.anchor is not None,
+                "session_id": int(self.session_id),
+                "deadman_active": bool(deadman),
+                "controller_tracked": bool(tracked),
             },
         }
 
 
 class SharedState:
-    def __init__(self, initial_status: Dict[str, Any]):
+    def __init__(
+        self,
+        initial_status: Dict[str, Any],
+        pose_source: str = "xr_hand_wrist",
+        initial_controller_delta_status: Optional[Dict[str, Any]] = None,
+    ):
         self.lock = threading.RLock()
         self.status = initial_status
+        self.controller_delta_status = initial_controller_delta_status or {}
+        self.pose_source = normalize_pose_source(pose_source)
         self.frame_jpeg: Optional[bytes] = None
         self.frame_seq = 0
         self.stopped = threading.Event()
@@ -756,6 +946,10 @@ class SharedState:
     def update_status(self, status: Dict[str, Any]) -> None:
         with self.lock:
             self.status = status
+
+    def update_controller_delta_status(self, status: Dict[str, Any]) -> None:
+        with self.lock:
+            self.controller_delta_status = status
 
     def update_frame(self, frame_jpeg: bytes) -> None:
         with self.lock:
@@ -765,6 +959,22 @@ class SharedState:
     def snapshot(self) -> Dict[str, Any]:
         with self.lock:
             return copy.deepcopy(self.status)
+
+    def controller_delta_snapshot(self) -> Dict[str, Any]:
+        with self.lock:
+            return copy.deepcopy(self.controller_delta_status)
+
+    def get_pose_source(self) -> str:
+        with self.lock:
+            return self.pose_source
+
+    def set_pose_source(self, source: str) -> str:
+        normalized = normalize_pose_source(source)
+        with self.lock:
+            self.pose_source = normalized
+            self.status["pose_source"] = normalized
+            self.status.setdefault("mapping", {})["pose_source"] = normalized
+        return normalized
 
     def jpeg_snapshot(self) -> tuple[Optional[bytes], int]:
         with self.lock:
@@ -825,7 +1035,7 @@ def make_handler(shared: SharedState, event_hz: float, mjpeg_hz: float, allow_st
     class HandServiceHandler(BaseHTTPRequestHandler):
         def _cors(self) -> None:
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
         def do_OPTIONS(self) -> None:
@@ -836,8 +1046,12 @@ def make_handler(shared: SharedState, event_hz: float, mjpeg_hz: float, allow_st
         def do_GET(self) -> None:
             if self.path.startswith("/api/status"):
                 self.send_json(shared.snapshot())
+            elif self.path.startswith("/api/controller-delta/status"):
+                self.send_json(shared.controller_delta_snapshot())
             elif self.path.startswith("/events"):
                 self.send_events()
+            elif self.path.startswith("/controller-delta/events"):
+                self.send_events(shared.controller_delta_snapshot)
             elif self.path.startswith("/frame.jpg"):
                 self.send_frame_jpeg()
             elif self.path.startswith("/stream.mjpg"):
@@ -847,16 +1061,39 @@ def make_handler(shared: SharedState, event_hz: float, mjpeg_hz: float, allow_st
                 self._cors()
                 self.end_headers()
 
-        def send_json(self, body: Dict[str, Any]) -> None:
+        def do_POST(self) -> None:
+            if not self.path.startswith("/api/pose-source"):
+                self.send_response(404)
+                self._cors()
+                self.end_headers()
+                return
+
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            raw = self.rfile.read(length) if length > 0 else b"{}"
+            try:
+                body = json.loads(raw.decode("utf-8")) if raw.strip() else {}
+            except json.JSONDecodeError as exc:
+                self.send_json({"ok": False, "message": f"JSON parse failed: {exc}"}, code=400)
+                return
+
+            source = str(body.get("source", "")).strip().lower()
+            if source not in VALID_VR_POSE_SOURCES:
+                self.send_json({"ok": False, "message": f"unsupported pose source: {source}"}, code=400)
+                return
+
+            selected = shared.set_pose_source(source)
+            self.send_json({"ok": True, "pose_source": selected})
+
+        def send_json(self, body: Dict[str, Any], code: int = 200) -> None:
             raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
-            self.send_response(200)
+            self.send_response(code)
             self._cors()
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
 
-        def send_events(self) -> None:
+        def send_events(self, snapshot_getter=None) -> None:
             self.send_response(200)
             self._cors()
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -864,8 +1101,9 @@ def make_handler(shared: SharedState, event_hz: float, mjpeg_hz: float, allow_st
             self.send_header("Connection", "keep-alive")
             self.end_headers()
             delay = 1.0 / max(event_hz, 1.0)
+            getter = snapshot_getter or shared.snapshot
             while not shared.stopped.is_set():
-                payload = json.dumps(shared.snapshot(), ensure_ascii=False)
+                payload = json.dumps(getter(), ensure_ascii=False)
                 try:
                     self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                     self.wfile.flush()
@@ -986,11 +1224,14 @@ def draw_vr_frame(status: Dict[str, Any]) -> bytes:
     color = (0, 220, 0) if online else (0, 180, 255)
     axis = status.get("axis", {})
     hand = status.get("hand", {})
+    source = status.get("pose_source", "xr_hand_wrist")
+    deadman = "ON" if status.get("deadman_active") else "OFF"
     lines = [
-        "VR Wrist Input",
+        f"VR Pose Input: {source}",
         f"State: {'ONLINE' if online else 'WAITING'} | {status.get('message', '')}",
         f"Axis XYZ: {axis.get('x', 0):+.3f}, {axis.get('y', 0):+.3f}, {axis.get('z', 0):+.3f}",
         f"Wrist x/y/z: {hand.get('x') or 0:.3f}, {hand.get('y') or 0:.3f}, {hand.get('depth') or 0:.3f}",
+        f"Deadman: {deadman}",
     ]
     y = 48
     for line in lines:
@@ -1004,7 +1245,7 @@ def write_wrist_latency_sample(logger: CsvLatencyLogger, status: Dict[str, Any],
     axis = status.get("axis") or {}
     message = str(status.get("message", ""))
     logger.write({
-        "source": "pico_wrist",
+        "source": status.get("pose_source", pose.get("source", "pico_wrist") if pose is not None else "pico_wrist"),
         "frame_id": int(pose.get("seq", -1)) if pose is not None else "",
         "unity_time": float(pose.get("device_time")) if pose is not None else "",
         "unity_send_time": "",
@@ -1031,14 +1272,19 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
     port = int(cfg_get(config, ("vr", "port"), 5005))
     receiver = VRWristPoseReceiver(host, port, stopped)
     controller = VRWristAxisController(config, settings)
+    controller_delta = ControllerDeltaAxisController(config)
     latency_logger = CsvLatencyLogger(cfg_get(config, ("logging", "wrist_latency_csv"), ""), WRIST_LATENCY_LOG_FIELDS)
     interval = 1.0 / max(float(cfg_get(config, ("service", "event_hz"), 20.0)), 1.0)
     receiver.start()
     try:
         while not stopped.is_set():
-            pose = receiver.latest(controller.hand)
+            controller.set_pose_source(shared.get_pose_source())
+            pose = receiver.latest(controller.hand, controller.pose_source)
             status = controller.update(pose, receiver.status())
+            controller_pose = receiver.latest(controller_delta.hand, "right_controller")
+            controller_delta_status = controller_delta.update(controller_pose, receiver.status())
             shared.update_status(status)
+            shared.update_controller_delta_status(controller_delta_status)
             write_wrist_latency_sample(latency_logger, status, pose)
             frame = draw_vr_frame(status)
             if frame:
@@ -1050,11 +1296,15 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
             "online": False,
             "time": time.time(),
             "source": "vr",
+            "pose_source": controller.pose_source,
             "gesture": "error",
             "required_gesture": "none",
             "unlocked": False,
             "control_active": False,
+            "session_id": 0,
             "tracking_active": False,
+            "deadman_active": False,
+            "controller_tracked": False,
             "phase": str(cfg_get(config, ("teleop", "phase"), "approach")).lower(),
             "message": str(exc),
             "axis": {"x": 0.0, "y": 0.0, "z": 0.0},
@@ -1062,8 +1312,30 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
             "hand": {"x": None, "y": None, "depth": None},
             "offset": {"x": 0.0, "y": 0.0, "depth": 0.0},
             "fingers": {},
-            "mapping": {"position_step_m": settings.position_step_m, "max_axis": settings.max_axis},
-            "vr": {"hand": str(cfg_get(config, ("vr", "hand"), "right")).lower(), "seq": -1, "age_sec": None, "active": False, "anchor_set": False},
+            "mapping": {"position_step_m": settings.position_step_m, "max_axis": settings.max_axis, "pose_source": controller.pose_source},
+            "vr": {"hand": str(cfg_get(config, ("vr", "hand"), "right")).lower(), "pose_source": controller.pose_source, "seq": -1, "age_sec": None, "active": False, "anchor_set": False, "deadman_active": False, "controller_tracked": False},
+        })
+        shared.update_controller_delta_status({
+            "ok": False,
+            "online": False,
+            "time": time.time(),
+            "source": "controller_delta",
+            "pose_source": "right_controller",
+            "gesture": "error",
+            "required_gesture": "Left X",
+            "unlocked": False,
+            "control_active": False,
+            "tracking_active": False,
+            "deadman_active": False,
+            "controller_tracked": False,
+            "phase": str(cfg_get(config, ("teleop", "phase"), "approach")).lower(),
+            "message": str(exc),
+            "position_delta": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "raw_delta": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "hand": {"x": None, "y": None, "depth": None},
+            "offset": {"x": 0.0, "y": 0.0, "depth": 0.0},
+            "mapping": controller_delta.mapping_payload(),
+            "vr": {"hand": "right", "pose_source": "right_controller", "seq": -1, "age_sec": None, "active": False, "anchor_set": False, "session_id": 0, "deadman_active": False, "controller_tracked": False},
         })
         print(f"[VRWrist] fatal: {exc}")
         while not stopped.is_set():
@@ -1122,17 +1394,26 @@ def main() -> int:
     controller = HandAxisController(settings)
 
     input_source = str(cfg_get(config, ("input", "source"), "vr")).lower()
+    initial_controller_delta_status = ControllerDeltaAxisController(config).snapshot(
+        False,
+        None,
+        "starting controller delta service" if input_source == "vr" else "controller delta requires vr input source",
+    )
     if input_source == "vr":
+        pose_source = normalize_pose_source(cfg_get(config, ("vr", "pose_source"), "xr_hand_wrist"))
         initial_status = {
             "ok": True,
             "online": False,
             "time": time.time(),
             "source": "vr",
+            "pose_source": pose_source,
             "gesture": "starting",
             "required_gesture": "none",
             "unlocked": False,
             "control_active": False,
             "tracking_active": False,
+            "deadman_active": False,
+            "controller_tracked": False,
             "phase": str(cfg_get(config, ("teleop", "phase"), "approach")).lower(),
             "message": "starting VR wrist service",
             "axis": {"x": 0.0, "y": 0.0, "z": 0.0},
@@ -1140,13 +1421,17 @@ def main() -> int:
             "hand": {"x": None, "y": None, "depth": None},
             "offset": {"x": 0.0, "y": 0.0, "depth": 0.0},
             "fingers": {},
-            "mapping": {"position_step_m": settings.position_step_m, "max_axis": settings.max_axis},
-            "vr": {"hand": str(cfg_get(config, ("vr", "hand"), "right")).lower(), "seq": -1, "age_sec": None, "active": False, "anchor_set": False},
+            "mapping": {"position_step_m": settings.position_step_m, "max_axis": settings.max_axis, "pose_source": pose_source},
+            "vr": {"hand": str(cfg_get(config, ("vr", "hand"), "right")).lower(), "pose_source": pose_source, "seq": -1, "age_sec": None, "active": False, "anchor_set": False, "deadman_active": False, "controller_tracked": False},
         }
     else:
         initial_status = controller.snapshot("starting", {}, None, "starting hand vision service")
         initial_status["online"] = False
-    shared = SharedState(initial_status)
+    shared = SharedState(
+        initial_status,
+        pose_source=initial_status.get("pose_source", "xr_hand_wrist"),
+        initial_controller_delta_status=initial_controller_delta_status,
+    )
 
     host = str(cfg_get(config, ("service", "host"), "127.0.0.1"))
     port = int(cfg_get(config, ("service", "port"), 8091))

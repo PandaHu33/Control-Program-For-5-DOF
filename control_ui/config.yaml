@@ -17,8 +17,8 @@ local_checks:
   glove_ready_timeout_sec: 15
 
 hand_control:
-  default_mode: "vr"
-  start_glove_by_default: false
+  default_mode: "glove"
+  start_glove_by_default: true
 
 websocket:
   host: "0.0.0.0"

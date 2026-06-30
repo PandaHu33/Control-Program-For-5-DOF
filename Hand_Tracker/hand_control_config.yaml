@@ -58,6 +58,7 @@ vr:
   host: "127.0.0.1"
   port: 5005
   hand: "right"
+  pose_source: "xr_hand_wrist"
   # Default H5 mapping mode for VR wrist input: position or velocity.
   mapping_mode: "velocity"
   # Right wrist tracking workspace in Unity/VR coordinates.
@@ -84,3 +85,8 @@ vr:
     y_from_vr_x: 1
     # Service axis.z maps to arm X in the H5 UI. Use VR Z for forward/back.
     z_from_vr_z: 1
+
+controller_delta:
+  gain_xyz: [0.5, 0.5, 0.5]
+  stale_timeout_sec: 0.40
+  deadman_button_label: "Left X"

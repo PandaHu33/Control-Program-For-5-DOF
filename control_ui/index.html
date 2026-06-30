@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -466,15 +466,16 @@
         <div class="keyboard-mode-selector" id="inputDeviceMode" aria-label="input device mode">
           <label><input type="radio" name="inputDeviceMode" value="keyboard" />键盘</label>
           <label><input type="radio" name="inputDeviceMode" value="gamepad" />手柄</label>
-          <label><input type="radio" name="inputDeviceMode" value="hand_vision" checked />VR</label>
+          <label><input type="radio" name="inputDeviceMode" value="controller_delta" checked />VR手柄</label>
+          <label><input type="radio" name="inputDeviceMode" value="hand_vision" />VR手部识别</label>
         </div>
         <div class="keyboard-mode-selector" id="keyboardControlMode" aria-label="keyboard control mode">
           <label><input type="radio" name="keyboardControlMode" value="position" checked />位置控制</label>
           <label><input type="radio" name="keyboardControlMode" value="joint" />关节控制</label>
         </div>
         <div class="keyboard-mode-selector" id="handControlMode" aria-label="hand control mode">
-          <label><input type="radio" name="handControlMode" value="vr" checked />VR手部追踪</label>
-          <label><input type="radio" name="handControlMode" value="glove" />手套操控模式</label>
+          <label><input type="radio" name="handControlMode" value="vr" />VR手部追踪</label>
+          <label><input type="radio" name="handControlMode" value="glove" checked />手套操控模式</label>
           <label><input type="radio" name="handControlMode" value="preset" />预编程位置模式</label>
         </div>
       </div>
@@ -522,6 +523,7 @@
           </div>
         </div>
         <div class="hand-vision-telemetry">
+          <p class="status-line" id="vrInputSourceLabel">Controller Delta</p>
           <div class="keyboard-mode-selector" id="handVisionMappingMode" aria-label="VR wrist mapping mode">
             <label><input type="radio" name="handVisionMappingMode" value="position" checked />Position</label>
             <label><input type="radio" name="handVisionMappingMode" value="velocity" />Delta</label>
@@ -531,6 +533,7 @@
             <div>Y 左右<strong id="handAxisY">0.000</strong></div>
             <div>Z 上下<strong id="handAxisZ">0.000</strong></div>
             <div>夹爪<strong id="handGripperCommand">0</strong></div>
+            <div>Deadman<strong id="poseDeadman">OFF</strong></div>
           </div>
           <p class="status-line" id="handVisionHint">VR wrist service disconnected</p>
         </div>
@@ -676,7 +679,8 @@
           <div class="radios" id="controlModeGroup">
             <label><input type="radio" name="controlMode" value="keyboard" /> 键盘操作</label>
             <label><input type="radio" name="controlMode" value="gamepad" /> USB 手柄操作</label>
-            <label><input type="radio" name="controlMode" value="hand_vision" checked /> VR</label>
+            <label><input type="radio" name="controlMode" value="controller_delta" checked /> 手套+右手柄</label>
+            <label><input type="radio" name="controlMode" value="hand_vision" /> VR</label>
             <label><input type="radio" name="controlMode" value="teleop" /> 主手遥操(Debug)</label>
             <label><input type="radio" name="controlMode" value="vision" /> 视觉伺服</label>
             <label><input type="radio" name="controlMode" value="shared" /> 共享控制</label>
@@ -855,7 +859,9 @@
       "target_x_m", "target_y_m", "target_z_m",
       "hand_est_x", "hand_est_y", "hand_est_z",
       "hand_axis_x", "hand_axis_y", "hand_axis_z",
+      "controller_delta_x_m", "controller_delta_y_m", "controller_delta_z_m",
       "hand_gesture", "hand_unlocked",
+      "pose_source", "deadman_active",
       "wrist_frame_id", "wrist_age_sec", "tracking_active", "control_active", "teleop_phase",
       "target_j1_rad", "target_j2_rad", "target_j3_rad", "target_j4_rad",
       "actual_j1_rad", "actual_j2_rad", "actual_j3_rad", "actual_j4_rad", "actual_j5_rad",
@@ -903,11 +909,13 @@
     const handVisionPreview = document.getElementById("handVisionPreview");
     const usbCameraHint = document.getElementById("usbCameraHint");
     const handVisionHint = document.getElementById("handVisionHint");
+    const vrInputSourceLabel = document.getElementById("vrInputSourceLabel");
     const handVisionMappingMode = document.getElementById("handVisionMappingMode");
     const handAxisXEl = document.getElementById("handAxisX");
     const handAxisYEl = document.getElementById("handAxisY");
     const handAxisZEl = document.getElementById("handAxisZ");
     const handGripperCommandEl = document.getElementById("handGripperCommand");
+    const poseDeadmanEl = document.getElementById("poseDeadman");
 
     const armStatusHint = document.getElementById("armStatusHint");
     const jointSpans = [
@@ -922,7 +930,7 @@
     const featureToggles = document.getElementById("featureToggles");
     const trajectoryGroup = document.getElementById("trajectoryGroup");
     let showingDebug = false;
-    let currentHandMode = "vr";
+    let currentHandMode = "glove";
 
     videoUrlInput.value = DEFAULT_VIDEO_URL;
     wsUrlInput.value = DEFAULT_WS_URL;
@@ -955,6 +963,11 @@
     let handVisionEvents = null;
     let handVisionState = null;
     let handVisionLastSeen = 0;
+    let controllerDeltaEvents = null;
+    let controllerDeltaState = null;
+    let controllerDeltaLastSeen = 0;
+    let controllerDeltaLastDelta = null;
+    let controllerDeltaLastSessionId = null;
     let handVisionMappingInitialized = false;
     let armHomeBurstUntilMs = 0;
 
@@ -1028,11 +1041,17 @@
       }
     }
 
+    function normalizePoseSource(source) {
+      return source === "right_controller" ? "right_controller" : "xr_hand_wrist";
+    }
+
     function updateHandVisionUi(data) {
       if (!data) return;
       handVisionState = data;
       handVisionLastSeen = Date.now();
       syncHandVisionMappingModeFromState(data);
+      syncVrInputPanelForMode();
+      if (selectedControlMode() !== "hand_vision") return;
       const axis = handVisionArmAxis(data);
       const mappedTarget = selectedHandVisionMappingMode() === "position" ? handVisionMappedTargetPosition(data) : null;
       const readout = mappedTarget
@@ -1042,13 +1061,66 @@
       if (handAxisYEl) handAxisYEl.textContent = readout.y.toFixed(3);
       if (handAxisZEl) handAxisZEl.textContent = readout.z.toFixed(3);
       if (handGripperCommandEl) handGripperCommandEl.textContent = String(handVisionGripperCommandForState(data));
+      if (poseDeadmanEl) poseDeadmanEl.textContent = data.deadman_active ? "ON" : "OFF";
       if (handVisionHint) {
         const state = data.unlocked ? "已解锁 / unlocked" : "已锁定 / locked";
         const hand = data.hand || {};
         const handDetected = hand.x !== null && hand.x !== undefined;
-        handVisionHint.textContent = `手部识别状态: ${state} | 姿势 ${data.gesture || "-"} | 检测到手: ${handDetected ? "是" : "否"} | ${data.message || ""}`;
+        const source = normalizePoseSource(data.pose_source);
+        handVisionHint.textContent = `Hand Vision (${source}): ${state} | pose ${data.gesture || "-"} | detected: ${handDetected ? "yes" : "no"} | ${data.message || ""}`;
         handVisionHint.classList.toggle("warning", !data.ok);
       }
+    }
+
+    function controllerDeltaPositionDelta(state) {
+      const delta = state?.position_delta || {};
+      return {
+        x: Number(delta.x) || 0,
+        y: Number(delta.y) || 0,
+        z: Number(delta.z) || 0,
+      };
+    }
+
+    function controllerDeltaControlActive() {
+      return !!(controllerDeltaState && controllerDeltaState.control_active);
+    }
+
+    function controllerDeltaUiActive() {
+      return selectedControlMode() === "controller_delta" || selectedInputDeviceMode() === "controller_delta";
+    }
+
+    function resetControllerDeltaLastDelta() {
+      controllerDeltaLastDelta = null;
+      controllerDeltaLastSessionId = null;
+    }
+
+    function renderControllerDeltaReadout(data) {
+      const delta = controllerDeltaPositionDelta(data);
+      if (handAxisXEl) handAxisXEl.textContent = delta.x.toFixed(3);
+      if (handAxisYEl) handAxisYEl.textContent = delta.y.toFixed(3);
+      if (handAxisZEl) handAxisZEl.textContent = delta.z.toFixed(3);
+      if (handGripperCommandEl) handGripperCommandEl.textContent = "0";
+      if (poseDeadmanEl) poseDeadmanEl.textContent = data?.deadman_active ? "ON" : "OFF";
+      if (handVisionHint) {
+        const tracked = data?.controller_tracked || data?.tracking_active;
+        const active = data?.control_active ? "active" : "inactive";
+        handVisionHint.textContent = `Right Controller Delta: ${active} | tracked: ${tracked ? "yes" : "no"} | X deadman: ${data?.deadman_active ? "ON" : "OFF"} | ${data?.message || ""}`;
+        handVisionHint.classList.toggle("warning", !data?.ok || !tracked);
+      }
+    }
+
+    function syncVrInputPanelForMode() {
+      const controllerMode = controllerDeltaUiActive();
+      if (vrInputSourceLabel) vrInputSourceLabel.textContent = controllerMode ? "Controller Delta" : "Hand Vision / Wrist";
+      if (handVisionMappingMode) handVisionMappingMode.style.display = controllerMode ? "none" : "";
+      if (controllerMode && controllerDeltaState) renderControllerDeltaReadout(controllerDeltaState);
+    }
+
+    function updateControllerDeltaUi(data) {
+      if (!data) return;
+      controllerDeltaState = data;
+      controllerDeltaLastSeen = Date.now();
+      syncVrInputPanelForMode();
     }
 
     async function refreshHandVisionStatus() {
@@ -1088,6 +1160,45 @@
         };
       } catch (err) {
         appendConsoleLog("WARNING", "无法连接手部识别服务", err.message);
+      }
+    }
+
+    async function refreshControllerDeltaStatus() {
+      try {
+        const res = await fetch(`${HAND_SERVICE_BASE}/api/controller-delta/status`, { cache: "no-store" });
+        const data = await res.json();
+        updateControllerDeltaUi(data);
+      } catch (err) {
+        syncVrInputPanelForMode();
+        if (controllerDeltaUiActive() && handVisionHint) {
+          handVisionHint.textContent = "右手柄增量服务未连接";
+          handVisionHint.classList.add("warning");
+        }
+      }
+    }
+
+    function connectControllerDeltaEvents() {
+      if (controllerDeltaEvents) return;
+      try {
+        controllerDeltaEvents = new EventSource(`${HAND_SERVICE_BASE}/controller-delta/events`);
+        controllerDeltaEvents.onmessage = (event) => {
+          try {
+            updateControllerDeltaUi(JSON.parse(event.data));
+          } catch (err) {
+            appendConsoleLog("WARNING", "右手柄增量数据解析失败", err.message);
+          }
+        };
+        controllerDeltaEvents.onerror = () => {
+          if (Date.now() - controllerDeltaLastSeen > 2000) {
+            controllerDeltaState = null;
+            if (controllerDeltaUiActive() && handVisionHint) {
+              handVisionHint.textContent = "右手柄增量服务未连接";
+              handVisionHint.classList.add("warning");
+            }
+          }
+        };
+      } catch (err) {
+        appendConsoleLog("WARNING", "无法连接右手柄增量服务", err.message);
       }
     }
 
@@ -1414,13 +1525,16 @@
     connectStatusWs();
     callApi("GET /api/status");
     connectHandVisionEvents();
+    connectControllerDeltaEvents();
     refreshHandVisionStatus();
+    refreshControllerDeltaStatus();
     refreshCameraStatus();
     if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
       navigator.mediaDevices.addEventListener("devicechange", refreshCameraStatus);
     }
     setInterval(refreshCameraStatus, 8000);
     setInterval(refreshHandVisionStatus, 8000);
+    setInterval(refreshControllerDeltaStatus, 8000);
 
     function logDebug(msg) {
       if (!debugLog) return;
@@ -1482,9 +1596,12 @@
       const target = targetPosition || [];
       const desired = targetAngles || [];
       const actual = armAngles || [];
-      const hand = handVisionState?.hand || {};
-      const handAxis = handVisionArmAxis(handVisionState);
-      const wrist = handVisionState?.vr || {};
+      const controllerMode = modeSel === "controller_delta";
+      const sourceState = controllerMode ? controllerDeltaState : handVisionState;
+      const hand = sourceState?.hand || {};
+      const handAxis = controllerMode ? { x: 0, y: 0, z: 0 } : handVisionArmAxis(handVisionState);
+      const controllerDelta = controllerMode ? controllerDeltaPositionDelta(controllerDeltaState) : { x: 0, y: 0, z: 0 };
+      const wrist = sourceState?.vr || {};
       const gripper = GRIPPER_ORDER_INDEX < orderVec.length ? Number(orderVec[GRIPPER_ORDER_INDEX] || 0) : 0;
       const row = [
         Number(tsMs),
@@ -1495,12 +1612,15 @@
         Number(target[0] || 0), Number(target[1] || 0), Number(target[2] || 0),
         Number(hand.x ?? 0), Number(hand.y ?? 0), Number(hand.depth ?? 0),
         Number(handAxis.x || 0), Number(handAxis.y || 0), Number(handAxis.z || 0),
-        handVisionState?.gesture || "",
-        handVisionState?.unlocked ? 1 : 0,
+        Number(controllerDelta.x || 0), Number(controllerDelta.y || 0), Number(controllerDelta.z || 0),
+        sourceState?.gesture || "",
+        sourceState?.unlocked ? 1 : 0,
+        controllerMode ? "right_controller" : normalizePoseSource(handVisionState?.pose_source),
+        sourceState?.deadman_active ? 1 : 0,
         Number(wrist.seq ?? -1),
         wrist.age_sec ?? "",
-        handVisionState?.tracking_active ? 1 : 0,
-        handVisionState?.control_active ? 1 : 0,
+        sourceState?.tracking_active ? 1 : 0,
+        sourceState?.control_active ? 1 : 0,
         selectedTeleopPhase(),
         Number(desired[0] || 0), Number(desired[1] || 0), Number(desired[2] || 0), Number(desired[3] || 0),
         Number(actual[0] || 0), Number(actual[1] || 0), Number(actual[2] || 0), Number(actual[3] || 0), Number(actual[4] || 0),
@@ -1617,7 +1737,7 @@
           updateKeyUI();
           selectControlMode("keyboard");
           appendConsoleLog("WARNING", reason);
-        } else if (selectedControlMode() !== "hand_vision") {
+        } else if (!["hand_vision", "controller_delta"].includes(selectedControlMode())) {
           syncInputDeviceMode("keyboard");
         }
       }
@@ -1627,6 +1747,7 @@
     function motionSourceLabel() {
       const mode = selectedControlMode();
       if (mode === "gamepad") return "手柄";
+      if (mode === "controller_delta") return "右手柄";
       if (mode === "hand_vision") return "VR";
       return "键盘";
     }
@@ -1722,7 +1843,7 @@
     }
 
     function getKeyboardControlMode() {
-      if (selectedControlMode() === "hand_vision") return "position";
+      if (["hand_vision", "controller_delta"].includes(selectedControlMode())) return "position";
       return keyboardModeGroup?.querySelector('input[name="keyboardControlMode"]:checked')?.value || "position";
     }
 
@@ -1734,13 +1855,13 @@
 
     function syncHandVisionPositionLock() {
       if (!keyboardModeGroup) return;
-      const locked = selectedControlMode() === "hand_vision";
+      const locked = ["hand_vision", "controller_delta"].includes(selectedControlMode());
       const positionInput = keyboardModeGroup.querySelector('input[name="keyboardControlMode"][value="position"]');
       const jointInput = keyboardModeGroup.querySelector('input[name="keyboardControlMode"][value="joint"]');
       if (locked && positionInput) positionInput.checked = true;
       if (jointInput) {
         jointInput.disabled = locked;
-        jointInput.closest("label")?.setAttribute("title", locked ? "手部识别固定使用位置控制" : "");
+        jointInput.closest("label")?.setAttribute("title", locked ? "VR/右手柄固定使用位置控制" : "");
       }
     }
 
@@ -2055,6 +2176,13 @@
         z = axis.z;
         downVal = z < -0.05 ? Math.abs(z) : 0;
         upVal = z > 0.05 ? z : 0;
+      } else if (mode === "controller_delta") {
+        const delta = controllerDeltaPositionDelta(controllerDeltaState);
+        x = clampNumber(delta.y / POSITION_STEP, -1, 1);
+        y = clampNumber(delta.x / POSITION_STEP, -1, 1);
+        z = clampNumber(delta.z / POSITION_STEP, -1, 1);
+        downVal = z < -0.05 ? Math.abs(z) : 0;
+        upVal = z > 0.05 ? z : 0;
       }
       setStickDot(leftStickDot, x, y);
       setStickDot(rightStickDot, 0, -z);
@@ -2077,6 +2205,9 @@
           const mapMode = selectedHandVisionMappingMode() === "position" ? "VR position" : "VR delta";
           leftStickCaption.textContent = `${mapMode} -> X/Y`;
           rightStickCaption.textContent = `${mapMode} -> Z`;
+        } else if (mode === "controller_delta") {
+          leftStickCaption.textContent = "Right Controller Delta -> X/Y";
+          rightStickCaption.textContent = "Right Controller Delta -> Z";
         } else {
           leftStickCaption.textContent = "inactive";
           rightStickCaption.textContent = "inactive";
@@ -2179,6 +2310,33 @@
       applyPositionDelta(axis.x * step, axis.y * step, axis.z * step);
     }
 
+    function applyControllerDeltaStep() {
+      syncKeyboardModeFeatureBit();
+      if (!controllerDeltaControlActive()) {
+        resetControllerDeltaLastDelta();
+        updateKeyboardTargetHint();
+        return;
+      }
+      if (!targetInitialized) ensureTargetInitialized();
+      else ensurePositionTargetInitialized();
+      const delta = controllerDeltaPositionDelta(controllerDeltaState);
+      const sessionId = Number(controllerDeltaState?.session_id ?? controllerDeltaState?.vr?.session_id ?? 0);
+      if (!controllerDeltaLastDelta || controllerDeltaLastSessionId !== sessionId) {
+        controllerDeltaLastDelta = delta;
+        controllerDeltaLastSessionId = sessionId;
+        updateKeyboardTargetHint();
+        return;
+      }
+      const step = {
+        x: delta.x - controllerDeltaLastDelta.x,
+        y: delta.y - controllerDeltaLastDelta.y,
+        z: delta.z - controllerDeltaLastDelta.z,
+      };
+      controllerDeltaLastDelta = delta;
+      controllerDeltaLastSessionId = sessionId;
+      applyPositionDelta(step.x, step.y, step.z);
+    }
+
     function handVisionGripperCommandForState(state) {
       if (!state || !state.unlocked) return 0;
       const gesture = String(state.gesture || "");
@@ -2270,11 +2428,11 @@
     let armAngles = [0, 0, 0, 0, 0];
     let lastTelemetryTimeMs = null;
     let targetAngles = [0, 0, 0, 0]; // [J1, J2, J3, J4]
-    let targetPosition = [0.6, 0, 0];
-    let targetInitialized = false;
-    let positionTargetInitialized = false;
     const ARM_LINK_3 = 0.424;
     const ARM_LINK_5 = 0.424;
+    let targetPosition = [ARM_LINK_3 + ARM_LINK_5, 0, 0];
+    let targetInitialized = false;
+    let positionTargetInitialized = false;
     const ARM_MIN_ELBOW_ANGLE = Math.PI / 6;
     const ARM_MIN_TARGET_Z = -0.280;
     const HAND_VISION_WRIST_WORKSPACE = {
@@ -2385,7 +2543,8 @@
     function selectControlMode(mode) {
       const input = controlModeGroup.querySelector(`input[name=controlMode][value="${mode}"]`);
       if (input) input.checked = true;
-      if (mode === "keyboard" || mode === "gamepad" || mode === "hand_vision") syncInputDeviceMode(mode);
+      if (mode !== "controller_delta") resetControllerDeltaLastDelta();
+      if (mode === "keyboard" || mode === "gamepad" || mode === "hand_vision" || mode === "controller_delta") syncInputDeviceMode(mode);
       syncHandVisionPositionLock();
     }
 
@@ -2404,6 +2563,7 @@
     }
 
     function holdCurrentArmState() {
+      resetControllerDeltaLastDelta();
       pressed.clear();
       updateKeyUI();
       targetAngles[0] = armAngles[0];
@@ -2420,6 +2580,7 @@
     }
 
     function resetArmTarget() {
+      resetControllerDeltaLastDelta();
       pressed.clear();
       updateKeyUI();
       targetAngles[0] = 0;
@@ -2438,6 +2599,7 @@
     }
 
     function sendArmPresetDegrees(degrees, name) {
+      resetControllerDeltaLastDelta();
       pressed.clear();
       updateKeyUI();
       selectControlMode("keyboard");
@@ -2517,8 +2679,10 @@
         selectControlMode("keyboard");
         updateGamepadStatus();
       }
+      if (selectedControlMode() !== "controller_delta") resetControllerDeltaLastDelta();
       syncHandVisionPositionLock();
       syncKeyboardModeFeatureBit();
+      syncVrInputPanelForMode();
       if (selectedControlMode() === "gamepad") {
         pressed.clear();
         updateKeyUI();
@@ -2531,6 +2695,12 @@
         ensurePositionTargetInitialized();
         connectHandVisionEvents();
         refreshHandVisionStatus();
+      } else if (selectedControlMode() === "controller_delta") {
+        pressed.clear();
+        updateKeyUI();
+        ensurePositionTargetInitialized();
+        connectControllerDeltaEvents();
+        refreshControllerDeltaStatus();
       } else if (selectedControlMode() === "keyboard") {
         if (getKeyboardControlMode() === "position") ensurePositionTargetInitialized();
         else ensureTargetInitialized();
@@ -2538,7 +2708,7 @@
       updateKeyboardTargetHint();
       updateInputIndicators();
       const mode = selectedControlMode();
-      if (mode === "keyboard" || mode === "gamepad" || mode === "hand_vision") syncInputDeviceMode(mode);
+      if (mode === "keyboard" || mode === "gamepad" || mode === "hand_vision" || mode === "controller_delta") syncInputDeviceMode(mode);
       refreshCameraStatus();
       if (autoSend) sendFrame();
     }
@@ -2595,6 +2765,7 @@
     updateGamepadAvailability();
     syncHandVisionPositionLock();
     syncKeyboardModeFeatureBit();
+    syncVrInputPanelForMode();
     syncInputDeviceMode(selectedControlMode());
     updateGamepadStatus();
     updateInputIndicators();
@@ -2749,6 +2920,7 @@
       const forcedHome = !emergencyChecked && armHomeCommandActive();
       let modeSel = emergencyChecked ? "keyboard" : selectedControlMode();
       let trajSel = trajectoryGroup.querySelector('input[name=trajectory]:checked')?.value || 'none';
+      if (emergencyChecked || modeSel !== "controller_delta") resetControllerDeltaLastDelta();
       if (!forcedHome && modeSel === "hand_vision" && !handVisionControlActive()) {
         updateKeyboardTargetHint();
         lastPacket.textContent = "Last packet -> paused: VR locked/offline";
@@ -2812,6 +2984,15 @@
           updateKeyboardTargetHint();
         }
       }
+      else if (modeSel === 'controller_delta') {
+        low4 = selectorValue("keyboard", 0);
+        if (!emergencyChecked) {
+          syncHandVisionPositionLock();
+          applyControllerDeltaStep();
+        } else {
+          updateKeyboardTargetHint();
+        }
+      }
       else if (modeSel === 'teleop') low4 = selectorValue("teleop", 1);
       else if (modeSel === 'vision') low4 = selectorValue("vision_servo", 2);
       else if (modeSel === 'shared') low4 = selectorValue("shared_control", 3);
@@ -2839,7 +3020,7 @@
         orderVec[idx] = val;
       };
 
-      if (modeSel === 'keyboard' || modeSel === 'gamepad' || modeSel === 'hand_vision') {
+      if (modeSel === 'keyboard' || modeSel === 'gamepad' || modeSel === 'hand_vision' || modeSel === 'controller_delta') {
         orderVec[0] = targetAngles[0]; // J1 Target Angle
         orderVec[1] = targetAngles[1]; // J2 Target Angle
         orderVec[2] = targetAngles[2]; // J3 Target Angle
@@ -2866,7 +3047,7 @@
         mode: modeVal,
         order: orderVec,
         reserved: new Uint8Array(getSize("reserved",16)).fill(FRAME_SCHEMA.invalid_fill?.bytes ?? 255),
-        note: modeSel === "gamepad" ? "ui:gamepad" : (modeSel === "hand_vision" ? "ui:hand_vision" : "ui"),
+        note: modeSel === "gamepad" ? "ui:gamepad" : (modeSel === "controller_delta" ? "ui:controller_delta" : (modeSel === "hand_vision" ? "ui:hand_vision" : "ui")),
       };
       const frame = packFrame(obj);
       lastPacket.textContent = `Last packet → mode:${modeVal} nibble:${(modeVal&0x0F)} ts:${tsMs}`;
