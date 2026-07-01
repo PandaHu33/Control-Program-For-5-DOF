@@ -1,9 +1,9 @@
 # Hand Tracker Arm Control
 
 This folder provides the local hand-recognition service used by the H5 control
-UI. The service only outputs normalized XYZ incremental input axes and a
-skeleton camera stream. Arm IK is still handled by the same UI position-control
-path used by keyboard and gamepad.
+UI. Camera-hand input retains its gesture/axis behavior. Unity XR wrist input
+uses an H5-side left-fist deadman and emits anchored XYZ and wrist-roll deltas.
+Arm IK and the final J4 target remain in the H5 UI.
 
 ## Environment
 
@@ -63,3 +63,19 @@ The mapping coefficients are intentionally small at first. Adjust them in
 
 If an axis moves opposite to expectation, flip the corresponding value under
 `axis_sign`.
+
+For Unity XR wrist Delta mode, pressing deadman captures the current wrist as
+the session anchor. Wrist displacement uses the same `controller_delta.gain_xyz`
+mapping as the right VR controller; releasing deadman, losing tracking, or a
+stale packet clears the anchor. The default gain is `[0.5, 0.5, 0.5]`.
+
+The arm deadman is re-evaluated on the PC from the left-hand joints received on
+TCP 5006: a left fist is `1`, while an open, untracked, or stale left hand is
+`0`. The local bridge publishes this state on UDP 25002, so the Unity deadman
+bit on the wrist-pose stream is not trusted for XR hand control.
+
+For both XR wrist tracking and the right VR controller, relative twist around
+the Unity local Z/forward axis maps to J4. The session anchor makes the mapping
+angle-to-angle without a jump, and `joint4_gain: 0.5` makes 90 degrees of wrist
+rotation command 45 degrees of J4 rotation. `joint4_sign: -1.0` flips the
+physical left/right wrist direction. Releasing deadman resets the anchor.

@@ -2,6 +2,7 @@ import base64
 import binascii
 import hashlib
 import json
+import math
 import os
 import shlex
 import socket
@@ -13,6 +14,21 @@ import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+try:
+    from control_arbitration import (
+        SELECTABLE_MODES,
+        arbitrate_ws_frame,
+        normalize_arm_mode,
+        normalize_client_id,
+    )
+except ImportError:
+    from control_ui.control_arbitration import (
+        SELECTABLE_MODES,
+        arbitrate_ws_frame,
+        normalize_arm_mode,
+        normalize_client_id,
+    )
 
 
 def unique_paths(paths):
@@ -213,11 +229,27 @@ H5_INVALID_FLOAT = -1.0
 H5_SELECTOR_HOME = 10
 ARM_HOME_REPEAT_COUNT = 8
 ARM_HOME_REPEAT_INTERVAL_SEC = 0.035
+ARM_SOURCE_REPEAT_COUNT = 3
+ARM_SOURCE_REPEAT_INTERVAL_SEC = 0.02
+ARM_PRESET_REPEAT_COUNT = 8
+ARM_PRESET_REPEAT_INTERVAL_SEC = 0.035
+ARM_TELEMETRY_TIMEOUT_SEC = 1.0
 ARM_FRAME_COUNTER = 0
 
 SYSTEM = {
     "state": "OFFLINE",
     "hand_mode": DEFAULT_HAND_MODE,
+    "arm_control": {
+        "mode": "idle",
+        "owner_id": None,
+        "owner_since": 0.0,
+        "last_telemetry_time": 0.0,
+        "last_angles": None,
+        "last_command_source": None,
+        "accepted_frames": 0,
+        "rejected_frames": 0,
+        "last_reject_reason": "",
+    },
     "modules": {
         "backend": {"status": "ONLINE", "last_seen": time.time(), "message": "后端服务运行中"},
         "jetson": {"status": "OFFLINE", "last_seen": 0, "message": "未检查"},
@@ -249,9 +281,16 @@ def now_ts():
 
 def snapshot():
     with STATE_LOCK:
+        now = time.time()
+        arm_control = dict(SYSTEM.get("arm_control", {}))
+        last_telemetry_time = float(arm_control.get("last_telemetry_time") or 0.0)
+        telemetry_age = now - last_telemetry_time if last_telemetry_time else None
+        arm_control["telemetry_age_sec"] = telemetry_age
+        arm_control["telemetry_fresh"] = telemetry_age is not None and telemetry_age <= ARM_TELEMETRY_TIMEOUT_SEC
         return {
             "state": SYSTEM["state"],
             "hand_mode": SYSTEM.get("hand_mode", DEFAULT_HAND_MODE),
+            "arm_control": arm_control,
             "modules": json.loads(json.dumps(SYSTEM["modules"], ensure_ascii=False)),
             "faults": list(SYSTEM["faults"])[-20:],
             "logs": list(LOGS)[:80],
@@ -310,6 +349,77 @@ def set_hand_mode(mode):
     with STATE_LOCK:
         SYSTEM["hand_mode"] = normalize_hand_mode(mode)
     push_status()
+
+
+def arm_telemetry_fresh(now=None):
+    now = time.time() if now is None else float(now)
+    with STATE_LOCK:
+        last_seen = float(SYSTEM["arm_control"].get("last_telemetry_time") or 0.0)
+    return bool(last_seen and now - last_seen <= ARM_TELEMETRY_TIMEOUT_SEC)
+
+
+def current_arm_authority():
+    with STATE_LOCK:
+        control = SYSTEM["arm_control"]
+        return control.get("mode", "idle"), control.get("owner_id")
+
+
+def update_arm_authority_state(mode, owner_id=None):
+    normalized = normalize_arm_mode(mode, allow_system=True)
+    if normalized is None:
+        raise ValueError(f"unsupported arm control mode: {mode}")
+    with STATE_LOCK:
+        control = SYSTEM["arm_control"]
+        old_mode = control.get("mode", "idle")
+        old_owner = control.get("owner_id")
+        control["mode"] = normalized
+        control["owner_id"] = owner_id
+        control["owner_since"] = time.time()
+        control["last_reject_reason"] = ""
+    if old_mode != normalized or old_owner != owner_id:
+        log_event("CONTROL", f"arm authority {old_mode} -> {normalized}", owner_id or "system")
+    else:
+        push_status()
+
+
+def record_arm_frame_decision(decision):
+    should_push = False
+    with STATE_LOCK:
+        control = SYSTEM["arm_control"]
+        if decision.accepted:
+            control["accepted_frames"] = int(control.get("accepted_frames") or 0) + 1
+            if decision.frame is not None:
+                control["last_command_source"] = decision.frame.source or decision.reason
+        else:
+            control["rejected_frames"] = int(control.get("rejected_frames") or 0) + 1
+            previous = control.get("last_reject_reason") or ""
+            control["last_reject_reason"] = decision.reason
+            should_push = previous != decision.reason or control["rejected_frames"] % 50 == 0
+    if should_push:
+        push_status()
+
+
+def update_arm_telemetry(data):
+    if len(data) != 293:
+        return False
+    expected_crc = struct.unpack_from("<I", data, H5_FRAME_CRC_OFFSET)[0]
+    actual_crc = binascii.crc32(data[:H5_FRAME_CRC_OFFSET]) & 0xFFFFFFFF
+    if expected_crc != actual_crc:
+        return False
+    try:
+        angles = list(struct.unpack_from("<7f", data, 12))
+    except struct.error:
+        return False
+    note = data[225:289].split(b"\x00", 1)[0].decode("utf-8", "ignore")
+    if note == "ready" and all(abs(float(value) + 1.0) < 1e-6 for value in angles[:3]):
+        return False
+    if not all(math.isfinite(float(value)) for value in angles[:4]):
+        return False
+    with STATE_LOCK:
+        control = SYSTEM["arm_control"]
+        control["last_telemetry_time"] = time.time()
+        control["last_angles"] = angles[:4]
+    return True
 
 
 def run_cmd(args, timeout=12):
@@ -703,6 +813,53 @@ def send_arm_home_frame():
     return send_h5_arm_frame(frame, ARM_HOME_REPEAT_COUNT, ARM_HOME_REPEAT_INTERVAL_SEC)
 
 
+def send_arm_source_frame(mode):
+    normalized = normalize_arm_mode(mode, allow_system=True)
+    if normalized is None:
+        return False, f"unsupported arm control mode: {mode}"
+    selector = H5_SELECTOR_HOME if normalized == "home" else 0
+    frame = pack_h5_arm_command_frame(
+        selector,
+        [0.0] * H5_ORDER_COUNT,
+        f"bridge:source:{normalized}",
+    )
+    return send_h5_arm_frame(frame, ARM_SOURCE_REPEAT_COUNT, ARM_SOURCE_REPEAT_INTERVAL_SEC)
+
+
+def acquire_arm_authority(mode, owner_id=None, require_telemetry=False):
+    normalized = normalize_arm_mode(mode, allow_system=True)
+    if normalized is None:
+        return False, f"unsupported arm control mode: {mode}"
+    if normalized in SELECTABLE_MODES:
+        owner_id = normalize_client_id(owner_id)
+        if owner_id is None:
+            return False, "client_id must be a non-zero 16-byte hexadecimal identifier"
+    else:
+        owner_id = None
+    if require_telemetry and not arm_telemetry_fresh():
+        return False, "arm telemetry is stale; control remains idle"
+
+    ok, msg = send_arm_source_frame(normalized)
+    if not ok:
+        return False, msg
+    update_arm_authority_state(normalized, owner_id)
+    return True, msg
+
+
+def send_arm_preset_frame(degrees, name="preset"):
+    if not isinstance(degrees, list) or len(degrees) != 4:
+        return False, "degrees must contain exactly four joint angles"
+    try:
+        radians = [math.radians(float(value)) for value in degrees]
+    except (TypeError, ValueError):
+        return False, "degrees must contain finite numbers"
+    if not all(math.isfinite(value) for value in radians):
+        return False, "degrees must contain finite numbers"
+    order = radians + [0.0] * (H5_ORDER_COUNT - len(radians))
+    frame = pack_h5_arm_command_frame(0x40, order, f"bridge:preset:{str(name or 'preset')[:40]}")
+    return send_h5_arm_frame(frame, ARM_PRESET_REPEAT_COUNT, ARM_PRESET_REPEAT_INTERVAL_SEC)
+
+
 HAND_PRESETS = {
     "reset": [2000, 2000, 2000, 2000, 2000, 2000],
     "open": [2000, 2000, 2000, 2000, 2000, 2000],
@@ -806,6 +963,34 @@ def do_command(method, path, body=None):
     log_event("ACTION", f"{method} {path}")
     if path == "/api/status":
         return command_result(True, "状态已返回")
+    if path == "/api/arm/control" and method == "POST":
+        requested_mode = str((body or {}).get("mode") or "").strip().lower()
+        requested_owner = normalize_client_id((body or {}).get("client_id"))
+        if requested_mode == "idle":
+            _current_mode, current_owner = current_arm_authority()
+            if current_owner and requested_owner != current_owner:
+                return command_result(False, "only the active owner may release arm control")
+            ok, msg = acquire_arm_authority("idle")
+            return command_result(ok, "arm control released" if ok else msg, {"output": msg})
+        mode = normalize_arm_mode(requested_mode)
+        if mode is None:
+            return command_result(False, f"unsupported arm control mode: {requested_mode}")
+        if requested_owner is None:
+            return command_result(False, "invalid client_id")
+        ok, msg = acquire_arm_authority(mode, requested_owner, require_telemetry=True)
+        return command_result(ok, f"arm control switched to {mode}" if ok else msg, {"output": msg})
+    if path == "/api/arm/preset" and method == "POST":
+        owner = normalize_client_id((body or {}).get("client_id"))
+        if owner is None:
+            return command_result(False, "invalid client_id")
+        if not arm_telemetry_fresh():
+            return command_result(False, "arm telemetry is stale; preset was not sent")
+        degrees = (body or {}).get("degrees")
+        name = str((body or {}).get("name") or "preset")
+        ok, msg = acquire_arm_authority("preset")
+        if ok:
+            ok, msg = send_arm_preset_frame(degrees, name)
+        return command_result(ok, f"arm preset sent: {name}" if ok else msg, {"output": msg, "degrees": degrees})
     if path == "/api/system/reboot_board":
         ok, msg = ssh_run_command("sudo -n reboot", timeout=10)
         disconnected_for_reboot = "closed by remote host" in (msg or "").lower() or (
@@ -853,6 +1038,9 @@ def do_command(method, path, body=None):
             glove_ok = True
             set_module("glove", "OFFLINE", "VR hand tracking is default; Unity glove is not auto-started")
         set_module("matlab", "ONLINE", "USB 手柄由显控浏览器读取，主手/Simulink 已移入 Debug")
+        mode_ok, mode_msg = send_hand_control(DEFAULT_HAND_MODE)
+        hand_ok = hand_ok and mode_ok
+        acquire_arm_authority("idle")
         ready = arm_ok and hand_ok and glove_ok
         set_state("READY" if ready else "ERROR", "初始化/启动流程完成，部分模块可能失败")
         return command_result(
@@ -861,6 +1049,7 @@ def do_command(method, path, body=None):
             {"jetson_start": jetson_start_msg, "jetson_check": check_out},
         )
     if path == "/api/system/stop":
+        acquire_arm_authority("idle")
         ssh_run("stop_script")
         send_udp(MATLAB_HOST, MATLAB_PORT, "STOP")
         send_udp(HAND_HOST, HAND_PORT, "STOP")
@@ -873,6 +1062,7 @@ def do_command(method, path, body=None):
         set_state("OFFLINE", "用户关闭系统")
         return command_result(True, "已发送系统停止命令", {"rtsp_stop_ok": rtsp_ok, "rtsp_stop_output": rtsp_msg})
     if path == "/api/system/estop":
+        acquire_arm_authority("estop")
         arm_ok, arm_msg = send_udp(MATLAB_HOST, MATLAB_PORT, "STOP")
         hand_ok, hand_msg = send_udp(HAND_HOST, HAND_PORT, "STOP")
         set_module("arm", "WARNING" if arm_ok else "ERROR", "急停保持当前机械臂状态" if arm_ok else arm_msg)
@@ -886,10 +1076,11 @@ def do_command(method, path, body=None):
     if path == "/api/system/reset":
         with STATE_LOCK:
             SYSTEM["faults"].clear()
+        authority_ok, authority_msg = acquire_arm_authority("home")
         arm_ok, arm_msg = send_arm_home_frame()
         legacy_arm_ok, legacy_arm_msg = send_udp(MATLAB_HOST, MATLAB_PORT, "HOME")
-        arm_ok = arm_ok or legacy_arm_ok
-        arm_msg = f"{arm_msg}; legacy {legacy_arm_msg}"
+        arm_ok = authority_ok and (arm_ok or legacy_arm_ok)
+        arm_msg = f"authority {authority_msg}; {arm_msg}; legacy {legacy_arm_msg}"
         hand_ok, hand_msg = send_hand_control("preset", HAND_PRESETS["reset"], "reset")
         set_state("READY" if arm_ok and hand_ok else "ERROR", "复位：机械臂 0/0/0，灵巧手 2000")
         return command_result(
@@ -938,9 +1129,8 @@ def do_command(method, path, body=None):
         "/api/demo/backup": ("READY", "BACKUP_DEMO"),
     }
     if path == "/api/hand/mode/vr":
-        set_hand_mode("vr")
-        refresh_hand_link_status()
-        return command_result(True, "Switched to VR hand tracking mode")
+        ok, msg = send_hand_control("vr")
+        return command_result(ok, "Switched to VR hand tracking mode" if ok else msg, {"output": msg})
     if path == "/api/hand/mode/glove":
         set_hand_mode("glove")
         if not is_process_alive("glove"):
@@ -1152,6 +1342,18 @@ def websocket_client_loop(client):
             if opcode == 0x8:
                 break
             if client.path == UDP_PATH and opcode == 0x2:
+                active_mode, active_owner = current_arm_authority()
+                decision = arbitrate_ws_frame(
+                    payload,
+                    active_mode,
+                    active_owner,
+                    arm_telemetry_fresh(),
+                )
+                record_arm_frame_decision(decision)
+                if not decision.accepted:
+                    continue
+                if decision.frame is not None and decision.frame.emergency_stop:
+                    acquire_arm_authority("estop")
                 if LOOP_FILTER:
                     recent_ws_crc.append((binascii.crc32(payload) & 0xFFFFFFFF, time.time(), len(payload)))
                 udp.sendto(payload, (UDP_HOST, UDP_SEND_PORT))
@@ -1226,6 +1428,7 @@ def udp_broadcast_loop():
                 recent_ws_crc.popleft()
             if any((crc == c and len(data) == ln) for c, _t, ln in recent_ws_crc):
                 continue
+        update_arm_telemetry(data)
         set_module("network", "ONLINE", "收到 Jetson UDP 数据")
         set_module("udp_bridge", "ONLINE", "收到 H5 UDP 桥接心跳/遥测")
         with CLIENT_LOCK:
@@ -1242,6 +1445,7 @@ def heartbeat_loop():
     while True:
         now = time.time()
         changed = False
+        expired_authority = None
         with STATE_LOCK:
             for name, mod in SYSTEM["modules"].items():
                 if name not in heartbeat_modules or mod.get("status") in ["ERROR", "OFFLINE"]:
@@ -1255,6 +1459,22 @@ def heartbeat_loop():
                     mod["status"] = "WARNING"
                     mod["message"] = "超过 1 秒未收到心跳或状态刷新"
                     changed = True
+        with STATE_LOCK:
+            control = SYSTEM["arm_control"]
+            control_mode = control.get("mode", "idle")
+            last_telemetry = float(control.get("last_telemetry_time") or 0.0)
+            if control_mode in SELECTABLE_MODES and (
+                not last_telemetry or now - last_telemetry > ARM_TELEMETRY_TIMEOUT_SEC
+            ):
+                expired_authority = (control_mode, control.get("owner_id"))
+                control["mode"] = "idle"
+                control["owner_id"] = None
+                control["owner_since"] = now
+                control["last_reject_reason"] = "stale_telemetry"
+                changed = True
+        if expired_authority:
+            send_arm_source_frame("idle")
+            log_event("CONTROL", f"arm authority {expired_authority[0]} -> idle", "stale telemetry")
         if changed:
             push_status()
         time.sleep(1)
@@ -1283,6 +1503,7 @@ def main():
     threading.Thread(target=udp_broadcast_loop, daemon=True).start()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
     threading.Thread(target=local_program_monitor_loop, daemon=True).start()
+    acquire_arm_authority("idle")
     log_event("INFO", "Demo Console backend started")
     while True:
         time.sleep(3600)

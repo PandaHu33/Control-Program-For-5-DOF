@@ -15,7 +15,7 @@
   },
   "semantics": {
     "main": {
-      "valid_fields": ["ind","time","mode","order","note","crc"],
+      "valid_fields": ["ind","time","mode","order","reserved","note","crc"],
       "mode": {
         "reserved": [255],
         "bits": {
@@ -58,6 +58,13 @@
           },
           "comment": "主端 order 定义：1-7 为关节控制按键成对的 ±1；11-16 为 xyzrpy；其余填 0.0"
         }
+      },
+      "authority": {
+        "field": "reserved",
+        "offset": 0,
+        "size": 16,
+        "encoding": "raw_client_id",
+        "comment": "UI command frames carry the current browser's 16-byte owner id. Backend/system frames use 0xFF."
       }
     },
     "sub": {

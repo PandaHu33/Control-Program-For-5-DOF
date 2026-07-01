@@ -4,6 +4,10 @@
 # Ignore log files
 *.log
 control_ui/logs/
+Hand_Tracker/logs/
+
+# Editor-local settings
+.vscode/
 
 # Local packaged/runtime artifacts
 control_ui/bridge.exe
@@ -60,3 +64,4 @@ control_ui/tools/ffmpeg/presets/libvpx-720p.ffpreset
 control_ui/tools/ffmpeg/presets/libvpx-720p50_60.ffpreset
 control_ui/tools/ffmpeg/presets/libvpx-1080p.ffpreset
 control_ui/tools/ffmpeg/presets/libvpx-1080p50_60.ffpreset
+2026-06-26_cross_device_test_result.md

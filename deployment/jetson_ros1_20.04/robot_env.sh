@@ -14,6 +14,9 @@ export ROBOT_WS_SETUP="${ROBOT_WS}/devel/setup.bash"
 # Runtime files.
 export ROBOT_RUNTIME_DIR="${ROBOT_RUNTIME_DIR:-/home/night/robot/runtime}"
 export ROBOT_LOG_DIR="${ROBOT_LOG_DIR:-/home/night/robot/logs}"
+# Field default: do not create persistent stdout/stderr log files on Jetson.
+# Set ROBOT_LOG_ENABLE=1 only when you intentionally need bringup logs.
+export ROBOT_LOG_ENABLE="${ROBOT_LOG_ENABLE:-0}"
 
 # Replace these commands with your actual ROS package/node or roslaunch commands.
 export CAN_CMD="${CAN_CMD:-roslaunch mainpulator socketcan.launch}"

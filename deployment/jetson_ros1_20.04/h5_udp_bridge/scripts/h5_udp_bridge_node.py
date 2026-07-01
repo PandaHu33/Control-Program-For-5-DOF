@@ -32,6 +32,9 @@ STATUS_FAILED = 9
 STATUS_CANNOT_EXECUTE = 10
 STATUS_EMERGENCY = 15
 
+ARM_SOURCES = set(["idle", "keyboard", "gamepad", "controller_delta", "hand_vision", "teleop", "imitation", "home", "preset", "estop"])
+LOCAL_H5_SOURCES = set(["keyboard", "gamepad", "controller_delta", "hand_vision", "home", "preset"])
+
 
 try:
     text_type = unicode
@@ -95,6 +98,28 @@ def stamp_ms(msg):
     except Exception:
         pass
     return int(time.time() * 1000)
+
+
+def normalize_arm_source(value):
+    source = to_text(value).strip().lower()
+    return source if source in ARM_SOURCES else None
+
+
+def source_from_note(note):
+    note = to_text(note).strip().lower()
+    if note.startswith("ui:"):
+        return normalize_arm_source(note[3:])
+    if note.startswith("bridge:home"):
+        return "home"
+    if note.startswith("bridge:preset"):
+        return "preset"
+    return None
+
+
+def source_switch_from_note(note):
+    prefix = "bridge:source:"
+    note = to_text(note).strip().lower()
+    return normalize_arm_source(note[len(prefix):]) if note.startswith(prefix) else None
 
 
 def parse_command_frame(data, source):
@@ -164,6 +189,8 @@ class H5UdpBridge(object):
 
         command_topic = rospy.get_param("~command_topic", "/h5/arm_command")
         status_topic = rospy.get_param("~status_topic", "/h5/udp_status")
+        active_source_topic = rospy.get_param("~active_source_topic", "/arm/active_control_source")
+        teleop_topic = rospy.get_param("~teleop_topic", "/h5/pub_joint_state")
         telemetry_topic = rospy.get_param("~telemetry_topic", "/arm/h5_telemetry")
         matlab_dataplot_topic = rospy.get_param("~matlab_dataplot_topic", "/Matlab/dataplot")
         imitation_state_topic = rospy.get_param("~imitation_state_topic", "/robot/imitation_state")
@@ -171,7 +198,8 @@ class H5UdpBridge(object):
 
         self.command_pub = rospy.Publisher(command_topic, String, queue_size=20)
         self.status_pub = rospy.Publisher(status_topic, String, queue_size=20)
-        self.teleop_pub = rospy.Publisher("/pub_joint_state", Imu, queue_size=20)
+        self.active_source_pub = rospy.Publisher(active_source_topic, String, queue_size=5, latch=True)
+        self.teleop_pub = rospy.Publisher(teleop_topic, Imu, queue_size=20)
         self.telemetry_sub = rospy.Subscriber(telemetry_topic, String, self.on_telemetry, queue_size=20)
         self.matlab_dataplot_sub = rospy.Subscriber(
             matlab_dataplot_topic, JointState, self.on_matlab_dataplot, queue_size=20
@@ -195,6 +223,23 @@ class H5UdpBridge(object):
         self.last_selector = 0
         self.telemetry_ind = 0
         self.last_imitation_state_time = 0.0
+        self.active_source = "idle"
+        self.active_source_pub.publish(String(data=self.active_source))
+
+    def set_active_source(self, source, event="SOURCE_SWITCH"):
+        source = normalize_arm_source(source)
+        if source is None:
+            return False
+        previous = self.active_source
+        self.active_source = source
+        self.active_source_pub.publish(String(data=source))
+        self.publish_status(
+            "INFO",
+            event,
+            "active arm source %s -> %s" % (previous, source),
+            {"active_source": source},
+        )
+        return True
 
     def next_telemetry_ind(self):
         value = self.telemetry_ind
@@ -302,6 +347,8 @@ class H5UdpBridge(object):
             actual_dq = [at(velocity, 0, 0.0), at(velocity, 1, 0.0), at(velocity, 2, 0.0)]
             joint4_dq = at(velocity, 3, 0.0)
 
+        actual_q[0] = -actual_q[0]
+        actual_dq[0] = -actual_dq[0]
         payload = {
             "ind": self.next_telemetry_ind(),
             "time": stamp_ms(msg),
@@ -347,9 +394,28 @@ class H5UdpBridge(object):
             )
         self.publish_json(self.command_pub, command)
 
+        requested_source = source_switch_from_note(command["note"])
+        if requested_source is not None:
+            self.set_active_source(requested_source)
+            return
+
+        command_source = source_from_note(command["note"])
+        if command["emergency_stop"]:
+            self.set_active_source("estop", "ESTOP_SOURCE")
+            command_source = "estop"
+        elif command_source not in LOCAL_H5_SOURCES or command_source != self.active_source:
+            self.publish_status(
+                "WARNING",
+                "COMMAND_REJECTED",
+                "rejected command from inactive H5 source",
+                {"command_source": command_source or "unknown", "active_source": self.active_source},
+            )
+            return
+
         # 转发为期望关节角到 /pub_joint_state
         imu_msg = Imu()
         imu_msg.header.stamp = rospy.Time.now()
+        imu_msg.header.frame_id = "h5:%s" % command_source
         # 将UDP传来的 order 数据映射为期望关节角
         imu_msg.orientation.x = command["order"][0]  # expect_q1
         imu_msg.orientation.y = command["order"][1]  # expect_q2

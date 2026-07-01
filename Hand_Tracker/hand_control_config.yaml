@@ -71,22 +71,22 @@ vr:
     z_min: -0.2
     z_max: 0.6
   stale_timeout_sec: 0.40
-  deadzone_m: 0.020
-  hysteresis_m: 0.005
-  smoothing_alpha: 0.18
-  max_axis: 0.45
-  axis_gain_x: 2.0
-  axis_gain_y: 2.0
-  axis_gain_z: 2.0
-  axis_sign:
-    # Service axis.x maps to arm Z in the H5 UI. Use VR Y for up/down.
-    x_from_vr_y: 1
-    # Service axis.y maps to arm Y in the H5 UI. Use VR X for left/right.
-    y_from_vr_x: 1
-    # Service axis.z maps to arm X in the H5 UI. Use VR Z for forward/back.
-    z_from_vr_z: 1
+  # PC/H5 support service re-evaluates the left-hand fist from the XR joint stream.
+  # Fist=1, open/not tracked/stale=0; the deadman bit from port 5005 is ignored.
+  deadman_label: "Left fist (H5)"
+  # Relative twist around the Unity pose forward axis drives J4.
+  joint4_axis: "z"
+  joint4_gain: 0.5
+  joint4_sign: -1.0
+
+xr_gesture_state:
+  # Local left-fist state published by unity_hand_udp_bridge.py.
+  host: "127.0.0.1"
+  port: 25002
+  stale_timeout_sec: 0.40
 
 controller_delta:
+  # Shared by VR hand tracking Delta mode and right-controller Delta mode.
   gain_xyz: [0.5, 0.5, 0.5]
   stale_timeout_sec: 0.40
   deadman_button_label: "Left X"

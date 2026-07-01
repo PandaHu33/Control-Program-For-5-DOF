@@ -11,6 +11,8 @@
     <param name="telemetry_target_port" value="$(arg telemetry_target_port)" />
     <param name="command_topic" value="/h5/arm_command" />
     <param name="status_topic" value="/h5/udp_status" />
+    <param name="active_source_topic" value="/arm/active_control_source" />
+    <param name="teleop_topic" value="/h5/pub_joint_state" />
     <param name="telemetry_topic" value="/arm/h5_telemetry" />
     <param name="matlab_dataplot_topic" value="/Matlab/dataplot" />
     <param name="imitation_state_topic" value="/robot/imitation_state" />

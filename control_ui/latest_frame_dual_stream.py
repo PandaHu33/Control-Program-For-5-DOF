@@ -29,6 +29,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--right-index", type=int, required=True)
     parser.add_argument("--left-name", default="left")
     parser.add_argument("--right-name", default="right")
+    parser.add_argument("--left-mirror", action="store_true")
+    parser.add_argument("--right-mirror", action="store_true")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=float, default=30.0)
@@ -140,6 +142,11 @@ def resize_frame(frame: np.ndarray, width: int, height: int) -> np.ndarray:
     if frame.shape[1] == width and frame.shape[0] == height:
         return frame
     return cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+
+
+def prepare_frame(frame: np.ndarray, width: int, height: int, mirror: bool) -> np.ndarray:
+    prepared = resize_frame(frame, width, height)
+    return cv2.flip(prepared, 1) if mirror else prepared
 
 
 def build_ffmpeg_command(args: argparse.Namespace, out_w: int, out_h: int) -> list[str]:
@@ -259,6 +266,8 @@ def main() -> int:
             "ffmpegPid": proc.pid,
             "output": args.output,
             "layout": args.layout,
+            "leftMirror": bool(args.left_mirror),
+            "rightMirror": bool(args.right_mirror),
             "size": f"{out_w}x{out_h}",
             "fps": args.fps,
             "startedAt": time.time(),
@@ -289,8 +298,8 @@ def main() -> int:
                 time.sleep(0.005)
                 continue
 
-            left_frame = resize_frame(left_frame, args.width, args.height)
-            right_frame = resize_frame(right_frame, args.width, args.height)
+            left_frame = prepare_frame(left_frame, args.width, args.height, args.left_mirror)
+            right_frame = prepare_frame(right_frame, args.width, args.height, args.right_mirror)
             if args.layout == "vstack":
                 combined = np.vstack((left_frame, right_frame))
             else:
@@ -325,6 +334,8 @@ def main() -> int:
                         "ffmpegPid": proc.pid,
                         "output": args.output,
                         "layout": args.layout,
+                        "leftMirror": bool(args.left_mirror),
+                        "rightMirror": bool(args.right_mirror),
                         "size": f"{out_w}x{out_h}",
                         "fps": args.fps,
                         "writtenFrames": written,

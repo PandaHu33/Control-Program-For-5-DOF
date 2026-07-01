@@ -16,10 +16,13 @@
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
 #include <Eigen/Eigenvalues>
+#include <algorithm>
+#include <vector>
 //用到传9消息,需要一个合适的消息类型
 #include <sensor_msgs/Imu.h>
 #include <std_msgs/Float32.h>
 #include <std_msgs/Int8MultiArray.h>
+#include <std_msgs/String.h>
 #include <sensor_msgs/JointState.h>
 #include <std_msgs/Float64MultiArray.h>
 
@@ -28,6 +31,7 @@
 using namespace std;
 using namespace Eigen;
 string control_type;
+string active_control_source = "idle";
 control::mainpulator joint1(1, 262144); //pi   //12509
 control::mainpulator joint2(2, 262144); //pi
 control::mainpulator joint3(3, 236009); //196608//0.75pi   //236009//367081//新机械臂327680向下，65536向上
@@ -126,6 +130,9 @@ void MainpulatorCallback(const can_msgs::Frame &receive_message);
  */
 
 void TeleOperationCallback(const  sensor_msgs::Imu& msg);
+void H5TeleOperationCallback(const sensor_msgs::Imu& msg);
+void ActiveControlSourceCallback(const std_msgs::String& msg);
+void ApplyLogicalArmCommand(const sensor_msgs::Imu& msg);
 
 void CarPosition_Callback(const  std_msgs::Float64MultiArray& msg);
 
@@ -166,6 +173,8 @@ int main(int argc, char *argv[])
     // 订阅器TeleOperation_receive_sub订阅遥操作期望信息，话题为"/pub_joint_state"，回调函数为TeleOperationCallback
     ros::NodeHandle TeleOperation;
     ros::Subscriber TeleOperation_receive_sub = TeleOperation.subscribe("/pub_joint_state",10, TeleOperationCallback);  
+    ros::Subscriber H5_TeleOperation_receive_sub = TeleOperation.subscribe("/h5/pub_joint_state", 10, H5TeleOperationCallback);
+    ros::Subscriber active_control_source_sub = TeleOperation.subscribe("/arm/active_control_source", 10, ActiveControlSourceCallback);
     // 发布信息给Matlab
     ros::Publisher TeleOperation_pub = TeleOperation.advertise<sensor_msgs::JointState>("/Matlab/dataplot",10);
 
@@ -259,13 +268,13 @@ int main(int argc, char *argv[])
         current_imitation_state.position.resize(5);
         current_imitation_state.velocity.resize(5);
         
-        current_imitation_state.position[0] = q(0,0);
+        current_imitation_state.position[0] = -q(0,0); // logical J1 = -physical J1
         current_imitation_state.position[1] = q(1,0);
         current_imitation_state.position[2] = q(2,0);
         current_imitation_state.position[3] = joint4_actual_angle;
         current_imitation_state.position[4] = joint5_actual_angle;
 
-        current_imitation_state.velocity[0] = dq(0,0);
+        current_imitation_state.velocity[0] = -dq(0,0);
         current_imitation_state.velocity[1] = dq(1,0);
         current_imitation_state.velocity[2] = dq(2,0);
         current_imitation_state.velocity[3] = joint4_actual_velocity;
@@ -290,6 +299,8 @@ int main(int argc, char *argv[])
         joint_state.position[6] = q(0,0);  //机械臂实际关节角度
         joint_state.position[7] = q(1,0);
         joint_state.position[8] = q(2,0);
+        joint_state.position[3] = -joint_state.position[3];
+        joint_state.position[6] = -joint_state.position[6];
 
         joint_state.velocity[0] = expect_dq(0,0); // 轨迹规划后的期望关节角速度
         joint_state.velocity[1] = expect_dq(1,0);
@@ -300,6 +311,9 @@ int main(int argc, char *argv[])
         joint_state.velocity[6] = expect_ddq(0,0);// 轨迹规划后的期望关节角加速度
         joint_state.velocity[7] = expect_ddq(1,0);  
         joint_state.velocity[8] = expect_ddq(2,0);
+        joint_state.velocity[0] = -joint_state.velocity[0];
+        joint_state.velocity[3] = -joint_state.velocity[3];
+        joint_state.velocity[6] = -joint_state.velocity[6];
 
         ForceFeedback = VirtualForceGeneration(q, car_position);
         joint_state.effort[0] = ForceFeedback(0,0); // 虚拟力反馈
@@ -313,13 +327,14 @@ int main(int argc, char *argv[])
         joint_state.effort[6] = expect_q(0,0)-q(0,0);
         joint_state.effort[7] = expect_q(1,0)-q(1,0);
         joint_state.effort[8] = expect_q(2,0)-q(2,0);        
+        joint_state.effort[6] = -joint_state.effort[6];
 
 
         TeleOperation_pub.publish(joint_state);
 
         /// 发送给zwt的Unity头盔机械臂的三个关节角度和双目相机识别的小车位置
         std_msgs::Float64MultiArray array_msg1;
-        array_msg1.data.push_back(q(0,0));
+        array_msg1.data.push_back(-q(0,0)); // logical J1
         array_msg1.data.push_back(q(1,0));
         array_msg1.data.push_back(q(2,0));
         array_msg1.data.push_back(gripper_flag);  //抓手标志位
@@ -490,8 +505,43 @@ Vector3d VirtualForceGeneration(Vector3d& q, Vector3d& car_position)
 
 }
 // 遥操作回调函数
-void TeleOperationCallback(const  sensor_msgs::Imu& msg){
-    expect_q(0,0) = msg.orientation.x;
+void ActiveControlSourceCallback(const std_msgs::String& msg)
+{
+    static const std::vector<std::string> allowed = {
+        "idle", "keyboard", "gamepad", "controller_delta", "hand_vision",
+        "teleop", "imitation", "home", "preset", "estop"
+    };
+    if (std::find(allowed.begin(), allowed.end(), msg.data) == allowed.end())
+    {
+        ROS_WARN("Rejected unknown arm control source: %s", msg.data.c_str());
+        return;
+    }
+    if (active_control_source != msg.data)
+    {
+        ROS_INFO("Arm control source: %s -> %s", active_control_source.c_str(), msg.data.c_str());
+        active_control_source = msg.data;
+    }
+}
+
+void TeleOperationCallback(const sensor_msgs::Imu& msg)
+{
+    if (active_control_source != "teleop") return;
+    ApplyLogicalArmCommand(msg);
+}
+
+void H5TeleOperationCallback(const sensor_msgs::Imu& msg)
+{
+    const std::string prefix = "h5:";
+    const std::string frame_id = msg.header.frame_id;
+    if (frame_id.compare(0, prefix.size(), prefix) != 0) return;
+    const std::string command_source = frame_id.substr(prefix.size());
+    if (command_source != active_control_source) return;
+    ApplyLogicalArmCommand(msg);
+}
+
+void ApplyLogicalArmCommand(const sensor_msgs::Imu& msg)
+{
+    expect_q(0,0) = -msg.orientation.x;
     expect_q(1,0) = msg.orientation.y;
     expect_q(2,0) = msg.orientation.z;
     joint4angle = msg.orientation.w;
@@ -501,11 +551,11 @@ void TeleOperationCallback(const  sensor_msgs::Imu& msg){
     ROS_INFO("expect_q3=%lf",expect_q(2,0));
     ROS_INFO("joint4angle=%lf",joint4angle);
 
-    expect_dq(0,0) = msg.angular_velocity.x;
+    expect_dq(0,0) = -msg.angular_velocity.x;
     expect_dq(1,0) = msg.angular_velocity.y;
     expect_dq(2,0) = msg.angular_velocity.z;
 
-    expect_ddq(0,0) = msg.linear_acceleration.x;
+    expect_ddq(0,0) = -msg.linear_acceleration.x;
     expect_ddq(1,0) = msg.linear_acceleration.y;
     expect_ddq(2,0) = msg.linear_acceleration.z;
 
@@ -528,6 +578,7 @@ void TeleOperationCallback(const  sensor_msgs::Imu& msg){
 // 【修改代码】接收模仿学习节点下发的期望轨迹的回调函数（已集成抓手信号）
 void ImitationCallback(const sensor_msgs::JointState::ConstPtr& msg)
 {
+    if (active_control_source != "imitation") return;
     // 【修改】检查接收到的数据维度是否正确，position现在需要4个元素
     if (msg->position.size() < 4 || msg->velocity.size() < 3 || msg->effort.size() < 3)
     {
@@ -536,7 +587,7 @@ void ImitationCallback(const sensor_msgs::JointState::ConstPtr& msg)
     }
 
     // 解析消息，更新期望轨迹
-    expect_q(0,0) = msg->position[0];
+    expect_q(0,0) = -msg->position[0];
     expect_q(1,0) = msg->position[1];
     expect_q(2,0) = msg->position[2];
 
@@ -544,13 +595,14 @@ void ImitationCallback(const sensor_msgs::JointState::ConstPtr& msg)
     joint4angle = msg->position[3];
 
     // 解析期望角速度和角加速度（这部分不变）
-    expect_dq(0,0) = msg->velocity[0];
+    expect_dq(0,0) = -msg->velocity[0];
     expect_dq(1,0) = msg->velocity[1];
     expect_dq(2,0) = msg->velocity[2];
 
     expect_ddq(0,0) = msg->effort[0]; // 复用 effort 字段
     expect_ddq(1,0) = msg->effort[1];
     expect_ddq(2,0) = msg->effort[2];
+    expect_ddq(0,0) = -expect_ddq(0,0);
 
     // 取消下面这行代码的注释以进行调试
     // ROS_INFO("Received new trajectory: q=[%f,%f,%f], q4=%f", expect_q(0,0), expect_q(1,0), expect_q(2,0), joint4angle);

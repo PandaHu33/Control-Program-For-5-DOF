@@ -3,7 +3,11 @@ rtsp: true
 rtspAddress: :8554
 rtspTransports: [tcp]
 rtmp: false
-hls: false
+hls: true
+hlsAddress: :8081
+hlsAllowOrigins: ['*']
+hlsAlwaysRemux: true
+hlsVariant: lowLatency
 webrtc: false
 srt: false
 moq: false

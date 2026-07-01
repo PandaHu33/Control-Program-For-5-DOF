@@ -4,7 +4,10 @@ set -euo pipefail
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${BASE_DIR}/robot_env.sh"
 
-mkdir -p "${ROBOT_RUNTIME_DIR}" "${ROBOT_LOG_DIR}"
+mkdir -p "${ROBOT_RUNTIME_DIR}"
+if [[ "${ROBOT_LOG_ENABLE:-0}" == "1" ]]; then
+  mkdir -p "${ROBOT_LOG_DIR}"
+fi
 
 stop_named_process() {
   local name="$1"

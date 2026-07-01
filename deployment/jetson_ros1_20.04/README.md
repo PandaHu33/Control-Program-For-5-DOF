@@ -73,6 +73,17 @@ UDP_BRIDGE_CMD="roslaunch h5_udp_bridge h5_udp_bridge.launch"
 
 with your real package, launch file, and workspace.
 
+Persistent Jetson stdout/stderr logs are disabled by default. The start script
+redirects launched process output to `/dev/null`, so it will not fill
+`/home/night/robot/logs` or a copied `tobot` folder during normal operation.
+When file logs are disabled, ROS internal launch logs are redirected to
+`/tmp/robot_ros_logs` instead of the working folder.
+When debugging on site, temporarily enable files with:
+
+```bash
+ROBOT_LOG_ENABLE=1 /home/night/robot/start_arm.sh
+```
+
 For the template bridge package, keep:
 
 ```bash
@@ -156,7 +167,19 @@ UDP `14551`, verifies CRC32, and publishes parsed commands as JSON:
 ```text
 /h5/arm_command  std_msgs/String
 /h5/udp_status   std_msgs/String
+/arm/active_control_source  std_msgs/String (latched)
+/h5/pub_joint_state  sensor_msgs/Imu
 ```
+
+`bridge:source:<mode>` frames update `/arm/active_control_source` without
+publishing a motion command. The arm controller must keep H5 commands,
+external `/pub_joint_state` teleoperation, and
+`/imitation/desired_trajectory` as separate inputs and accept only the source
+named by `/arm/active_control_source`. Unknown or inactive sources fail closed.
+
+The deployed `mainpulator/src/test_node.cpp` must match the repository version.
+It treats ROS command angles as logical coordinates and applies the configured
+J1 direction (`logical J1 = -physical J1`) only at the hardware boundary.
 
 The real arm control node should subscribe to `/h5/arm_command`, validate the
 mode/order fields again, and then convert them into its own topic/service/action

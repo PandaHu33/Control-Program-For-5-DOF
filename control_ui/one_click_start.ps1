@@ -566,9 +566,9 @@ function Start-UnityHandBridge {
     }
 
     Remove-Item -LiteralPath $UnityHandBridgeOut, $UnityHandBridgeErr -Force -ErrorAction SilentlyContinue
-    Write-Info "Starting Unity right-hand TCP-to-UDP bridge on tcp:5006 -> udp:25001..."
+    Write-Info "Starting Unity XR Hands bridge on tcp:5006 -> hand udp:25001 + H5 gesture udp:25002..."
     $script:UnityHandBridgeProcess = Start-Process -FilePath $python.Source `
-        -ArgumentList "-u `"$UnityHandBridgeScript`" --tcp-host 127.0.0.1 --tcp-port 5006 --udp-host 127.0.0.1 --udp-port 25001" `
+        -ArgumentList "-u `"$UnityHandBridgeScript`" --tcp-host 127.0.0.1 --tcp-port 5006 --udp-host 127.0.0.1 --udp-port 25001 --state-udp-host 127.0.0.1 --state-udp-port 25002" `
         -WorkingDirectory $ProjectRoot `
         -WindowStyle Hidden `
         -RedirectStandardOutput $UnityHandBridgeOut `
@@ -681,14 +681,14 @@ function Start-Backend {
             -RedirectStandardError $BackendErr `
             -PassThru
     } else {
-        $bridgeExe = Join-Path $Root "bridge\bridge.exe"
+        $bridgeExe = Join-Path $Root "bridge.exe"
         if (-not (Test-Path $bridgeExe)) {
-            $bridgeExe = Join-Path $Root "bridge.exe"
+            $bridgeExe = Join-Path $Root "bridge\bridge.exe"
         }
         if (-not (Test-Path $bridgeExe)) {
             throw "Python and bridge.exe were not found."
         }
-        Write-Warn "Python was not found. Falling back to packaged bridge.exe; latest bridge.py changes may not be included."
+        Write-Warn "Python was not found. Falling back to packaged bridge.exe."
         $script:BackendProcess = Start-Process -FilePath $bridgeExe `
             -WorkingDirectory $Root `
             -WindowStyle Hidden `
@@ -847,10 +847,10 @@ try {
 
     Start-VrWebViewSupport
     Start-Backend
+    $rtspCameraReady = Start-RtspCameraStream
     Open-H5Console
     $wristServiceReady = Start-HandTracker
     $unityHandBridgeReady = Start-UnityHandBridge
-    $rtspCameraReady = Start-RtspCameraStream
 
     Write-Info "Starting Jetson nodes and local hand programs through supervisor..."
     $startResult = Invoke-Api Post "/api/system/start" 90

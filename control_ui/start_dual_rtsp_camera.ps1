@@ -1,8 +1,11 @@
 param(
     [string]$LeftCameraName = "",
     [string]$RightCameraName = "",
+    [string]$LeftMirror = "",
+    [string]$RightMirror = "",
     [string]$StreamHost = "",
     [int]$RtspPort = 0,
+    [int]$HlsPort = 0,
     [string]$StreamPath = "",
     [string]$VideoSize = "",
     [int]$Framerate = 0,
@@ -76,6 +79,14 @@ function Get-ConfigValueAllowEmpty($Section, $Name, $Fallback) {
         return $Section[$Name]
     }
     return $Fallback
+}
+
+function ConvertTo-ConfigBool($Value, $Fallback = $false) {
+    if ($null -eq $Value -or "$Value" -eq "") { return [bool]$Fallback }
+    $normalized = "$Value".Trim().ToLowerInvariant()
+    if ($normalized -in @("1", "true", "yes", "on")) { return $true }
+    if ($normalized -in @("0", "false", "no", "off")) { return $false }
+    return [bool]$Fallback
 }
 
 function Find-Executable($Name, [string[]]$ExtraCandidates) {
@@ -223,8 +234,13 @@ if ($enabled -in @("0", "false", "no", "off")) {
 
 if (-not $LeftCameraName) { $LeftCameraName = Get-ConfigValue $dualCfg "left_video_device" "RGB Camera" }
 if (-not $RightCameraName) { $RightCameraName = Get-ConfigValue $dualCfg "right_video_device" "USB Camera" }
+if (-not $LeftMirror) { $LeftMirror = Get-ConfigValue $dualCfg "left_mirror" "true" }
+if (-not $RightMirror) { $RightMirror = Get-ConfigValue $dualCfg "right_mirror" "true" }
+$leftMirrorEnabled = ConvertTo-ConfigBool $LeftMirror $true
+$rightMirrorEnabled = ConvertTo-ConfigBool $RightMirror $true
 if (-not $StreamHost) { $StreamHost = Get-ConfigValue $dualCfg "stream_host" "127.0.0.1" }
 if (-not $RtspPort) { $RtspPort = [int](Get-ConfigValue $dualCfg "rtsp_port" "8554") }
+if (-not $HlsPort) { $HlsPort = [int](Get-ConfigValue $dualCfg "hls_port" "8081") }
 if (-not $StreamPath) { $StreamPath = Get-ConfigValue $dualCfg "stream_path" "usb_camera" }
 if (-not $VideoSize) { $VideoSize = Get-ConfigValue $dualCfg "video_size" "640x960" }
 if (-not $Framerate) { $Framerate = [int](Get-ConfigValue $dualCfg "framerate" "15") }
@@ -242,8 +258,10 @@ if (-not $PythonExe) { $PythonExe = Get-ConfigValue $dualCfg "python_exe" "" }
 
 $size = Split-VideoSize $VideoSize
 $filterFps = [Math]::Max($Framerate, 1)
-$leftChain = "[0:v]fps=fps=$filterFps,scale=$($size.Width):$($size.Height),setsar=1,setpts=N/($filterFps*TB)[left]"
-$rightChain = "[1:v]fps=fps=$filterFps,scale=$($size.Width):$($size.Height),setsar=1,setpts=N/($filterFps*TB)[right]"
+$leftFlipFilter = if ($leftMirrorEnabled) { ",hflip" } else { "" }
+$rightFlipFilter = if ($rightMirrorEnabled) { ",hflip" } else { "" }
+$leftChain = "[0:v]fps=fps=$filterFps,scale=$($size.Width):$($size.Height)$leftFlipFilter,setsar=1,setpts=N/($filterFps*TB)[left]"
+$rightChain = "[1:v]fps=fps=$filterFps,scale=$($size.Width):$($size.Height)$rightFlipFilter,setsar=1,setpts=N/($filterFps*TB)[right]"
 if ($Layout -eq "vstack") {
     $stackChain = "[left][right]vstack=inputs=2,format=yuv420p[out]"
 } else {
@@ -276,6 +294,7 @@ Stop-OldRtspProcesses
 
 $rtspPublishUrl = "rtsp://127.0.0.1:$RtspPort/$StreamPath"
 $rtspViewUrl = "rtsp://$StreamHost`:$RtspPort/$StreamPath"
+$hlsViewUrl = "http://127.0.0.1:$HlsPort/$StreamPath/index.m3u8"
 
 Remove-Item -LiteralPath $MediaMtxOut, $MediaMtxErr, $FfmpegOut, $FfmpegErr, $LatestFrameOut, $LatestFrameErr, $LatestFrameStatus, $LatestFrameFfmpegLog -Force -ErrorAction SilentlyContinue
 $mediaMtxConfigText = @"
@@ -284,7 +303,11 @@ rtsp: true
 rtspAddress: :$RtspPort
 rtspTransports: [tcp]
 rtmp: false
-hls: false
+hls: true
+hlsAddress: :$HlsPort
+hlsAllowOrigins: ['*']
+hlsAlwaysRemux: true
+hlsVariant: lowLatency
 webrtc: false
 srt: false
 moq: false
@@ -312,6 +335,12 @@ $mediaMtxProc = Start-Process -FilePath $mediaMtx `
 
 if (-not (Wait-TcpPort "127.0.0.1" $RtspPort 8)) {
     Write-Warn "MediaMTX did not begin listening on port $RtspPort."
+    if (Test-Path $MediaMtxErr) { Get-Content -Path $MediaMtxErr }
+    Stop-Process -Id $mediaMtxProc.Id -Force -ErrorAction SilentlyContinue
+    exit 2
+}
+if (-not (Wait-TcpPort "127.0.0.1" $HlsPort 8)) {
+    Write-Warn "MediaMTX did not begin listening on HLS port $HlsPort."
     if (Test-Path $MediaMtxErr) { Get-Content -Path $MediaMtxErr }
     Stop-Process -Id $mediaMtxProc.Id -Force -ErrorAction SilentlyContinue
     exit 2
@@ -346,6 +375,8 @@ if ($backend -in @("latest_frame", "latest", "opencv")) {
     $captureArgs.Add($LeftCameraName)
     $captureArgs.Add("--right-name")
     $captureArgs.Add($RightCameraName)
+    if ($leftMirrorEnabled) { $captureArgs.Add("--left-mirror") }
+    if ($rightMirrorEnabled) { $captureArgs.Add("--right-mirror") }
     $captureArgs.Add("--width")
     $captureArgs.Add("$($size.Width)")
     $captureArgs.Add("--height")
@@ -416,10 +447,13 @@ if ($backend -in @("latest_frame", "latest", "opencv")) {
         capturePid = $captureProc.Id
         encoderPid = $status.ffmpegPid
         rtspUrl = $rtspViewUrl
+        hlsUrl = $hlsViewUrl
         leftCameraName = $LeftCameraName
         rightCameraName = $RightCameraName
         leftCameraIndex = $LeftCameraIndex
         rightCameraIndex = $RightCameraIndex
+        leftMirror = $leftMirrorEnabled
+        rightMirror = $rightMirrorEnabled
         videoSize = $VideoSize
         outputSize = $status.size
         framerate = $Framerate
@@ -429,6 +463,7 @@ if ($backend -in @("latest_frame", "latest", "opencv")) {
     } | ConvertTo-Json | Set-Content -Path $PidFile -Encoding UTF8
 
     Write-Ok "Latest-frame dual RTSP camera stream is ready: $rtspViewUrl"
+    Write-Ok "Browser/VR HLS camera stream is ready: $hlsViewUrl"
     Write-Ok ("Output size: {0}, capture fps: {1}, frame age: {2:N0}/{3:N0} ms" -f $status.size, $status.writeFps, $status.leftAgeMs, $status.rightAgeMs)
     exit 0
 }
@@ -495,8 +530,11 @@ if ($ffmpegProc.HasExited) {
     mediaMtxPid = $mediaMtxProc.Id
     ffmpegPid = $ffmpegProc.Id
     rtspUrl = $rtspViewUrl
+    hlsUrl = $hlsViewUrl
     leftCameraName = $LeftCameraName
     rightCameraName = $RightCameraName
+    leftMirror = $leftMirrorEnabled
+    rightMirror = $rightMirrorEnabled
     videoSize = $VideoSize
     framerate = $Framerate
     layout = $Layout
@@ -504,4 +542,5 @@ if ($ffmpegProc.HasExited) {
 } | ConvertTo-Json | Set-Content -Path $PidFile -Encoding UTF8
 
 Write-Ok "Dual RTSP camera stream is ready: $rtspViewUrl"
+Write-Ok "Browser/VR HLS camera stream is ready: $hlsViewUrl"
 exit 0
