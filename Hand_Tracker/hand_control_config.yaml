@@ -71,9 +71,9 @@ vr:
     z_min: -0.2
     z_max: 0.6
   stale_timeout_sec: 0.40
-  # PC/H5 support service re-evaluates the left-hand fist from the XR joint stream.
-  # Fist=1, open/not tracked/stale=0; the deadman bit from port 5005 is ignored.
-  deadman_label: "Left fist (H5)"
+  # Unity evaluates the left-hand fist and sends it as the port 5005 deadman bit.
+  # Fist=1, open/not tracked/stale=0.
+  deadman_label: "Unity left fist"
   # Relative twist around the Unity pose forward axis drives J4.
   joint4_axis: "z"
   joint4_gain: 0.5

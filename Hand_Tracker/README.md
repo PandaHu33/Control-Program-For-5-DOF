@@ -2,7 +2,7 @@
 
 This folder provides the local hand-recognition service used by the H5 control
 UI. Camera-hand input retains its gesture/axis behavior. Unity XR wrist input
-uses an H5-side left-fist deadman and emits anchored XYZ and wrist-roll deltas.
+uses a Unity-side left-fist deadman and emits anchored XYZ and wrist-roll deltas.
 Arm IK and the final J4 target remain in the H5 UI.
 
 ## Environment
@@ -69,10 +69,10 @@ the session anchor. Wrist displacement uses the same `controller_delta.gain_xyz`
 mapping as the right VR controller; releasing deadman, losing tracking, or a
 stale packet clears the anchor. The default gain is `[0.5, 0.5, 0.5]`.
 
-The arm deadman is re-evaluated on the PC from the left-hand joints received on
-TCP 5006: a left fist is `1`, while an open, untracked, or stale left hand is
-`0`. The local bridge publishes this state on UDP 25002, so the Unity deadman
-bit on the wrist-pose stream is not trusted for XR hand control.
+The arm deadman is evaluated in Unity and sent on the TCP 5005 wrist-pose
+stream: a left fist is `1`, while an open, untracked, or stale left hand is
+`0`. The older UDP 25002 gesture-state path remains available for diagnostics
+and compatibility, but XR wrist control now trusts the 5005 deadman bit.
 
 For both XR wrist tracking and the right VR controller, relative twist around
 the Unity local Z/forward axis maps to J4. The session anchor makes the mapping

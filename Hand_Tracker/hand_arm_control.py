@@ -90,7 +90,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "z_max": 0.4,
         },
         "stale_timeout_sec": 0.4,
-        "deadman_label": "Left fist (H5)",
+        "deadman_label": "Unity left fist",
         "joint4_gain": 0.5,
         "joint4_axis": "z",
         "joint4_sign": -1.0,
@@ -764,7 +764,7 @@ class VRWristAxisController:
         if not isinstance(gain_raw, (list, tuple)) or len(gain_raw) < 3:
             gain_raw = [0.5, 0.5, 0.5]
         self.gain = np.array([float(gain_raw[0]), float(gain_raw[1]), float(gain_raw[2])], dtype=float)
-        self.deadman_label = str(cfg_get(config, ("vr", "deadman_label"), "Left fist (H5)"))
+        self.deadman_label = str(cfg_get(config, ("vr", "deadman_label"), "Unity left fist"))
         self.joint4_gain = float(cfg_get(config, ("vr", "joint4_gain"), 0.5))
         self.joint4_axis = str(cfg_get(config, ("vr", "joint4_axis"), "z")).lower()
         self.joint4_sign = float(cfg_get(config, ("vr", "joint4_sign"), -1.0))
@@ -893,7 +893,7 @@ class VRWristAxisController:
             "session_id": int(self.session_id),
             "tracking_active": bool(tracked),
             "deadman_active": bool(deadman),
-            "deadman_source": str(pose.get("deadman_source", "h5:left_fist")) if pose is not None else "h5:left_fist",
+            "deadman_source": str(pose.get("deadman_source", "unity:left_fist")) if pose is not None else "unity:left_fist",
             "left_fist": left_fist,
             "left_fist_score": float(pose.get("left_fist_score", 0.0)) if pose is not None else 0.0,
             "gesture_state_age_sec": pose.get("gesture_state_age_sec") if pose is not None else None,
@@ -1452,12 +1452,10 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
             controller.set_pose_source(shared.get_pose_source())
             pose = receiver.latest(controller.hand, controller.pose_source)
             if pose is not None and controller.pose_source == "xr_hand_wrist":
-                gesture_state = gesture_receiver.snapshot()
-                pose["deadman_active"] = bool(gesture_state["deadman_active"])
-                pose["deadman_source"] = "h5:left_fist"
-                pose["left_fist"] = bool(gesture_state["left_fist"])
-                pose["left_fist_score"] = float(gesture_state["left_fist_score"])
-                pose["gesture_state_age_sec"] = gesture_state["age_sec"]
+                pose["deadman_source"] = "unity:left_fist"
+                pose["left_fist"] = bool(pose.get("deadman_active", False))
+                pose["left_fist_score"] = 1.0 if pose.get("deadman_active", False) else 0.0
+                pose["gesture_state_age_sec"] = None
             status = controller.update(pose, receiver.status())
             controller_pose = receiver.latest(controller_delta.hand, "right_controller")
             controller_delta_status = controller_delta.update(controller_pose, receiver.status())
