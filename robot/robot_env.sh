@@ -17,11 +17,15 @@ export ROBOT_LOG_DIR="${ROBOT_LOG_DIR:-/home/night/robot/logs}"
 
 # Replace these commands with your actual ROS package/node or roslaunch commands.
 export CAN_CMD="${CAN_CMD:-roslaunch mainpulator socketcan.launch}"
-export ARM_CMD="${ARM_CMD:-roslaunch mainpulator mainpulatorlaunch.launch}"
+export ARM_CONTROL_TYPE="${ARM_CONTROL_TYPE:-torque}"
+export ARM_HOME_TIMEOUT="${ARM_HOME_TIMEOUT:-12}"
+export ARM_RUNTIME_MOTION_DURATION="${ARM_RUNTIME_MOTION_DURATION:-5.0}"
+export ARM_LATENCY_TRACE_ENABLE="${ARM_LATENCY_TRACE_ENABLE:-0}"
+export ARM_CMD="${ARM_CMD:-roslaunch mainpulator mainpulatorlaunch.launch control_type:=${ARM_CONTROL_TYPE} runtime_motion_duration:=${ARM_RUNTIME_MOTION_DURATION} latency_trace_enabled:=${ARM_LATENCY_TRACE_ENABLE}}"
 
 # Optional: only enable if your arm control node does not directly receive H5 UDP frames.
 export UDP_BRIDGE_ENABLE="${UDP_BRIDGE_ENABLE:-1}"
-export UDP_BRIDGE_CMD="${UDP_BRIDGE_CMD:-roslaunch h5_udp_bridge h5_udp_bridge.launch}"
+export UDP_BRIDGE_CMD="${UDP_BRIDGE_CMD:-roslaunch h5_udp_bridge h5_udp_bridge.launch latency_trace_enabled:=${ARM_LATENCY_TRACE_ENABLE}}"
 
 # Match these with control_ui/config.yaml.
 export H5_UDP_LISTEN_PORT="${H5_UDP_LISTEN_PORT:-14551}"

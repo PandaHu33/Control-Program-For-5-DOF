@@ -3,6 +3,10 @@ set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${BASE_DIR}/robot_env.sh"
+source "${ROS_SETUP}"
+if [[ -f "${ROBOT_WS_SETUP}" ]]; then
+  source "${ROBOT_WS_SETUP}"
+fi
 
 is_running() {
   local name="$1"
@@ -24,8 +28,17 @@ fi
 
 if is_running "arm_control"; then
   echo "ARM_CONTROL:RUNNING"
+  home_state="$(rosparam get /test_node/startup_homing_complete 2>/dev/null || true)"
+  if [[ "${home_state}" == "true" ]]; then
+    echo "ARM_HOME:COMPLETE"
+  elif [[ "${home_state}" == "false" ]]; then
+    echo "ARM_HOME:IN_PROGRESS"
+  else
+    echo "ARM_HOME:UNKNOWN"
+  fi
 else
   echo "ARM_CONTROL:STOPPED"
+  echo "ARM_HOME:UNKNOWN"
 fi
 
 if [[ "${UDP_BRIDGE_ENABLE}" == "1" ]]; then

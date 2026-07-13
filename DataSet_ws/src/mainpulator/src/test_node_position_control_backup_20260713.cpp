@@ -1,3 +1,5 @@
+// Position-control backup of test_node.cpp before torque/position merge.
+// Date: 2026-07-13; original SHA-256: fb9b2d35173a8036e50bfc9951659fb11ec5f4c194a2926149ef5c094e74f8c5
 // ReadMe:
 //此程序可以实现接收Matlab/Simulink发送的机械臂期望角速度、角速度和角加速度，进行自适应控制，
 //并发送给Matlab/Simulink实际角度信息
@@ -17,11 +19,6 @@
 #include <Eigen/Geometry>
 #include <Eigen/Eigenvalues>
 #include <algorithm>
-#include <cctype>
-#include <cmath>
-#include <fstream>
-#include <iomanip>
-#include <sstream>
 #include <vector>
 //用到传9消息,需要一个合适的消息类型
 #include <sensor_msgs/Imu.h>
@@ -35,49 +32,8 @@
 #define PI acos(-1)
 using namespace std;
 using namespace Eigen;
-
-enum class ControlMode
-{
-    Torque,
-    Position
-};
-
 string control_type;
-ControlMode control_mode = ControlMode::Torque;
 string active_control_source = "idle";
-double torque_home_duration = 5.0;
-double runtime_motion_duration = 5.0;
-bool latency_trace_enabled = false;
-std::string latency_trace_path = "/tmp/test_node_latency_trace.csv";
-std::ofstream latency_trace_file;
-bool startup_homing_active = false;
-bool joint_position_received[3] = {false, false, false};
-bool joint_velocity_received[3] = {false, false, false};
-Vector3d torque_home_start_q;
-
-struct RuntimeMotionState
-{
-    bool active = false;
-    uint32_t ind = 0;
-    std::string source;
-    ros::WallTime start_time;
-    Vector3d coefficient[6];
-    double last_status_progress = -1.0;
-};
-
-RuntimeMotionState runtime_motion;
-bool runtime_motion_id_valid = false;
-uint32_t last_runtime_motion_ind = 0;
-std::string last_runtime_motion_source;
-ros::Time last_runtime_motion_stamp;
-ros::Publisher motion_status_pub;
-ros::Publisher control_trace_pub;
-ros::NodeHandle* private_node_handle = NULL;
-bool pending_control_trace = false;
-uint32_t pending_trace_ind = 0;
-std::string pending_trace_source;
-ros::Time pending_trace_source_stamp;
-ros::WallTime pending_trace_callback_time;
 control::mainpulator joint1(1, 262144); //pi   //12509
 control::mainpulator joint2(2, 262144); //pi
 control::mainpulator joint3(3, 236009); //196608//0.75pi   //236009//367081//新机械臂327680向下，65536向上
@@ -98,8 +54,8 @@ double joint5_actual_current = 0.0;
 
 
 //电动机械臂自身参数和变量
-double m1 = 9.6;
-double m2  = 6.4;
+double m1 = 4.8;
+double m2  = 3.2;
 double l1 = 0.424;
 double l2 = 0.424;
 //Matrix3Xd Mn(3,3);
@@ -179,12 +135,6 @@ void TeleOperationCallback(const  sensor_msgs::Imu& msg);
 void H5TeleOperationCallback(const sensor_msgs::Imu& msg);
 void ActiveControlSourceCallback(const std_msgs::String& msg);
 void ApplyLogicalArmCommand(const sensor_msgs::Imu& msg);
-void StartRuntimeMotion(const sensor_msgs::Imu& msg, const std::string& source);
-void CancelRuntimeMotion(const std::string& state);
-void UpdateRuntimeMotion();
-void PublishMotionStatus(const std::string& state, double progress, uint32_t ind, const std::string& source);
-void RecordPendingControlTrace(const sensor_msgs::Imu& msg, const std::string& source);
-void PublishPendingControlTrace();
 
 void CarPosition_Callback(const  std_msgs::Float64MultiArray& msg);
 
@@ -193,24 +143,13 @@ void ImitationCallback(const sensor_msgs::JointState::ConstPtr& msg);
 
 Vector3d VirtualForceGeneration(Vector3d& q, Vector3d& car_position);
 
-bool TorqueFeedbackReady()
-{
-    for (int i = 0; i < 3; ++i)
-    {
-        if (!joint_position_received[i] || !joint_velocity_received[i])
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
 int main(int argc, char *argv[])
 {
     // demoKinematics();
     //实际角度初始化
-    q.setZero();
-    dq.setZero();
+    q(0, 0) = 0.00001;
+    q(1, 0) = 0.00001;
+    q(2, 0) = 0.00001;
     //执行 ros 节点初始化
     ros::init(argc, argv, "mainpulator_param_node");
     //创建 ros 节点句柄(非必须)
@@ -224,59 +163,9 @@ int main(int argc, char *argv[])
 
     stop_flag.data = false;
     //机械臂控制方式 位置控制 力矩控制
-    nh.param<std::string>("control_type", control_type, "torque");
-    std::transform(control_type.begin(), control_type.end(), control_type.begin(),
-                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-    if (control_type == "pid")
-    {
-        ROS_WARN("control_type=PID is deprecated; using position mode");
-        control_type = "position";
-    }
-    if (control_type == "torque")
-    {
-        control_mode = ControlMode::Torque;
-    }
-    else if (control_type == "position")
-    {
-        control_mode = ControlMode::Position;
-    }
-    else
-    {
-        ROS_FATAL("Invalid control_type '%s'; expected torque or position", control_type.c_str());
-        return 2;
-    }
-    nh.param("torque_home_duration", torque_home_duration, 5.0);
-    nh.param("runtime_motion_duration", runtime_motion_duration, 5.0);
-    nh.param("latency_trace_enabled", latency_trace_enabled, false);
-    nh.param<std::string>("latency_trace_path", latency_trace_path, "/tmp/test_node_latency_trace.csv");
-    if (control_mode == ControlMode::Torque && torque_home_duration <= 0.0)
-    {
-        ROS_FATAL("torque_home_duration must be greater than zero");
-        return 2;
-    }
-    if (runtime_motion_duration <= 0.0)
-    {
-        ROS_FATAL("runtime_motion_duration must be greater than zero");
-        return 2;
-    }
-    private_node_handle = &nh;
-    if (latency_trace_enabled)
-    {
-        std::ifstream existing_trace(latency_trace_path.c_str());
-        const bool trace_is_empty = !existing_trace.good() || existing_trace.peek() == std::ifstream::traits_type::eof();
-        existing_trace.close();
-        latency_trace_file.open(latency_trace_path.c_str(), std::ios::out | std::ios::app);
-        if (trace_is_empty && latency_trace_file.good())
-        {
-            latency_trace_file << "ind,source,source_stamp,callback_stamp,control_apply_stamp\n";
-            latency_trace_file.flush();
-        }
-    }
-    startup_homing_active = (control_mode == ControlMode::Torque);
-    nh.setParam("startup_homing_complete", false);
-    nh.setParam("runtime_motion_complete", true);
+    nh.getParam("control_type", control_type);
     //控制器发布数据至机械臂
-    // ROS_INFO("control_type = %s", control_type.c_str());
+    ROS_INFO("control_type = %s", control_type.c_str());
     ros::Publisher socketcan_send_pub = socketcan_send.advertise<can_msgs::Frame>("sent_messages", 10);
 
     //控制接收机械臂数据
@@ -302,108 +191,53 @@ int main(int argc, char *argv[])
     // 【新增代码】为模仿学习创建发布器和订阅器
     // 1. 发布机械臂当前状态给 AI PC
     ros::Publisher imitation_state_pub = nh.advertise<sensor_msgs::JointState>("/robot/imitation_state", 10);
-    motion_status_pub = nh.advertise<std_msgs::String>("/arm/motion_status", 10, true);
-    control_trace_pub = nh.advertise<std_msgs::String>("/arm/control_trace", 50);
     // 2. 订阅来自 AI PC 的期望轨迹
     ros::Subscriber imitation_trajectory_sub = nh.subscribe<sensor_msgs::JointState>("/imitation/desired_trajectory", 10, ImitationCallback);
 
 
-    expect_q.setZero();
-    expect_dq.setZero();
-    expect_ddq.setZero();
-    zerovector.setZero();
+    expect_q(0,0) = 0.00001;
+    expect_q(1,0) = 0.00001;
+    expect_q(2,0) = 0.00001;
 
-    const bool torque_control = (control_mode == ControlMode::Torque);
-    ros::Rate loop_rate(torque_control ? 100.0 : 20.0);
+    expect_dq(0,0) = 0.00001;
+    expect_dq(1,0) = 0.00001;
+    expect_dq(2,0) = 0.00001;
+
+    expect_ddq(0,0) = 0.00001;
+    expect_ddq(1,0) = 0.00001;
+    expect_ddq(2,0) = 0.00001;
+
+    zerovector(0,0)=0.00001;
+    zerovector(1,0)=0.00001;
+    zerovector(2,0)=0.00001;
+
+
+    ros::Rate loop_rate(20);
     int socket_can = param::SocketCANInit();
-    // ROS_INFO("socket_can = %d", socket_can);
-    // ROS_INFO("control_type  =  %s", control_type.c_str());
+    ROS_INFO("socket_can = %d", socket_can);
+    ROS_INFO("control_type  =  %s", control_type.c_str());
 
     can_msgs::Frame send_message;
 
     //机械臂输出化配置
-    // ROS_INFO("init");
-    if (torque_control)
-    {
-        // Strictly preserve the original 1228 torque-loop initialization order.
-        param::MomentInit(joint5, socket_can);
-        param::MomentInit(joint1, socket_can);
-        param::MomentInit(joint2, socket_can);
-        param::MomentInit(joint3, socket_can);
-        param::PositionInit(joint4, socket_can);
-    }
-    else
-    {
-        param::PositionInit(joint1, socket_can);
-        param::PositionInit(joint2, socket_can);
-        param::PositionInit(joint3, socket_can);
-        param::PositionInit(joint4, socket_can);
-        param::MomentInit(joint5, socket_can);
-    }
+    ROS_INFO("init");
+    param::PositionInit(joint1, socket_can);
+    param::PositionInit(joint2, socket_can);
+    param::PositionInit(joint3, socket_can);
+    //param::MomentInit(joint5, socket_can);
+    //param::MomentInit(joint1, socket_can);
+    //param::MomentInit(joint2, socket_can);
+    //param::MomentInit(joint3, socket_can);
+    param::PositionInit(joint4, socket_can);
     usleep(500000);
-
-    if (torque_control)
-    {
-        // Strictly preserve the original 1228 torque-loop enable order.
-        param::Enable(socket_can, 6, joint1);
-        param::Enable(socket_can, 6, joint2);
-        param::Enable(socket_can, 6, joint3);
-        param::Enable(socket_can, 6, joint5);
-
-        // J4 is the merged position-loop extension and stays after the legacy
-        // J1-J3/J5 torque-loop sequence.
-        param::Enable(socket_can, 6, joint4);
-        usleep(500000);
-
-        // Feedback capture and homing planning are layered after the complete
-        // legacy initialization/enable sequence.
-        const ros::WallTime feedback_deadline = ros::WallTime::now() + ros::WallDuration(3.0);
-        while (ros::ok() && !TorqueFeedbackReady() && ros::WallTime::now() < feedback_deadline)
-        {
-            can_msgs::Frame sync_frame;
-            sync_frame.id = 0x80;
-            sync_frame.dlc = 0;
-            socketcan_send_pub.publish(sync_frame);
-            ros::spinOnce();
-            ros::WallDuration(0.01).sleep();
-        }
-        if (!TorqueFeedbackReady())
-        {
-            ROS_FATAL("Torque startup feedback timeout after legacy enable sequence: position=[%d,%d,%d] velocity=[%d,%d,%d]",
-                      joint_position_received[0], joint_position_received[1], joint_position_received[2],
-                      joint_velocity_received[0], joint_velocity_received[1], joint_velocity_received[2]);
-            return 3;
-        }
-        torque_home_start_q = q;
-        expect_q = torque_home_start_q;
-        expect_dq.setZero();
-        expect_ddq.setZero();
-        // ROS_INFO("Torque startup position captured: [%f, %f, %f]",
-        //          torque_home_start_q(0,0), torque_home_start_q(1,0), torque_home_start_q(2,0));
-    }
-
-    if (!torque_control)
-    {
-        param::Enable(socket_can, 6, joint1);
-        param::Enable(socket_can, 6, joint2);
-        param::Enable(socket_can, 6, joint3);
-        param::Enable(socket_can, 6, joint4);
-        param::Enable(socket_can, 6, joint5);
-        usleep(500000);
-    }
-    // ROS_INFO("init end");
-
-    ros::WallTime torque_home_start_time;
-    if (torque_control)
-    {
-        torque_home_start_time = ros::WallTime::now();
-        // ROS_INFO("Starting %.3f second quintic torque-mode homing trajectory", torque_home_duration);
-    }
-    else
-    {
-        nh.setParam("startup_homing_complete", true);
-        // ROS_INFO("Position mode initialization complete");
-    }
+    //机械臂使能
+    param::Enable(socket_can, 6, joint1);
+    param::Enable(socket_can, 6, joint2);
+    param::Enable(socket_can, 6, joint3);
+    param::Enable(socket_can, 6, joint4);
+    //param::Enable(socket_can, 6, joint5);
+    usleep(500000);
+    ROS_INFO("init end");
 
     AdaptiveBACKSTEPPINGparam_init();
 
@@ -415,7 +249,7 @@ int main(int argc, char *argv[])
     fv(1,0)  = 13.758;
     fv(2,0) = 12.865; 
 
-    while (ros::ok())
+    while (ros::ok)
     {
         static long run_times = 0;
         if (run_times++ % 100 == 0)
@@ -429,39 +263,6 @@ int main(int argc, char *argv[])
         //ROS_INFO("Joint2_Angle = %lf", q(1,0));
         //处理排队的回调函数
         ros::spinOnce();
-
-        if (torque_control && startup_homing_active)
-        {
-            const double elapsed = (ros::WallTime::now() - torque_home_start_time).toSec();
-            const double tau = std::max(0.0, std::min(1.0, elapsed / torque_home_duration));
-            const double tau2 = tau * tau;
-            const double tau3 = tau2 * tau;
-            const double tau4 = tau3 * tau;
-            const double tau5 = tau4 * tau;
-            const double scale = 10.0 * tau3 - 15.0 * tau4 + 6.0 * tau5;
-            const double scale_dot = (30.0 * tau2 - 60.0 * tau3 + 30.0 * tau4) / torque_home_duration;
-            const double scale_ddot = (60.0 * tau - 180.0 * tau2 + 120.0 * tau3) /
-                                      (torque_home_duration * torque_home_duration);
-
-            expect_q = torque_home_start_q * (1.0 - scale);
-            expect_dq = torque_home_start_q * (-scale_dot);
-            expect_ddq = torque_home_start_q * (-scale_ddot);
-
-            if (elapsed >= torque_home_duration)
-            {
-                expect_q.setZero();
-                expect_dq.setZero();
-                expect_ddq.setZero();
-                startup_homing_active = false;
-                nh.setParam("startup_homing_complete", true);
-                // ROS_INFO("Torque-mode startup homing trajectory complete");
-            }
-        }
-
-        if (!startup_homing_active)
-        {
-            UpdateRuntimeMotion();
-        }
         
         // 【新增代码】发布机械臂的当前关节状态给模仿学习节点
         sensor_msgs::JointState current_imitation_state;
@@ -548,18 +349,16 @@ int main(int argc, char *argv[])
 
     
 
-        // 根据启动参数选择 J1-J3 力矩环或位置环。
-        // ROS_INFO("q_e=[%f,%f,%f,%f]", expect_q(0,0), expect_q(1,0), expect_q(2,0), KB_D);
+        // 自适应反步控制（已注释，改为位置环控制）
+        // tol=AdaptiveBackstepping(expect_q,expect_dq,expect_ddq,q,dq,zerovector,0.01);
+        ROS_INFO("q_e=[%f,%f,%f,%f]", expect_q(0,0), expect_q(1,0), expect_q(2,0), KB_D);
         //ROS_INFO("dq_e=[%f,%f,%f]", expect_dq(0,0), expect_dq(1,0), expect_dq(2,0));
         //ROS_INFO("car_position = %lf, %lf, %lf", car_position(0,0), car_position(1,0), car_position(2,0));
-        // ROS_INFO("q = %lf, %lf, %lf", q(0,0), q(1,0), q(2,0));
-        can_msgs::Frame frames;
-        PublishPendingControlTrace();
-        if (torque_control)
-        {
-            tol = AdaptiveBackstepping(expect_q, expect_dq, expect_ddq, q, dq, zerovector, 0.002);
-
-            if(tol(0,0)>30)
+        ROS_INFO("q = %lf, %lf, %lf", q(0,0), q(1,0), q(2,0));
+       
+       
+/*
+        if(tol(0,0)>30)
             {
                 tol(0,0)=30;
             }
@@ -584,30 +383,37 @@ int main(int argc, char *argv[])
             {
                 tol(2,0)=-35;
             }
-            send_message = joint1.MomentOutput(tol(0,0));
-            socketcan_send_pub.publish(send_message);
-            send_message = joint2.MomentOutput(tol(1,0));
-            socketcan_send_pub.publish(send_message);
-            send_message = joint3.MomentOutput80(tol(2,0));
-            socketcan_send_pub.publish(send_message);
-        }
-        else
-        {
-            send_message = joint1.set_angle_for_new_joint(expect_q(0,0));
-            socketcan_send_pub.publish(send_message);
-            send_message = joint1.set_angle(expect_q(0,0));
-            socketcan_send_pub.publish(send_message);
+        //ROS_INFO("tol1 =%lf tol2 = %lf tol3=%lf ",tol(0,0),tol(1,0),tol(2,0));
 
-            send_message = joint2.set_angle_for_new_joint(expect_q(1,0));
-            socketcan_send_pub.publish(send_message);
-            send_message = joint2.set_angle(expect_q(1,0));
-            socketcan_send_pub.publish(send_message);
 
-            send_message = joint3.set_angle_for_new_joint(expect_q(2,0));
-            socketcan_send_pub.publish(send_message);
-            send_message = joint3.set_angle(expect_q(2,0));
-            socketcan_send_pub.publish(send_message);
-        }
+        can_msgs::Frame frames;
+        send_message = joint1.MomentOutput(tol(0,0));
+        socketcan_send_pub.publish(send_message);
+
+        send_message = joint2.MomentOutput(tol(1,0));
+        socketcan_send_pub.publish(send_message);
+
+        send_message = joint3.MomentOutput80(tol(2,0));
+        socketcan_send_pub.publish(send_message);
+*/
+
+        // --- 改为纯位置环接收遥操作信息发指令 ---
+        can_msgs::Frame frames;
+        send_message = joint1.set_angle_for_new_joint(expect_q(0,0));
+        socketcan_send_pub.publish(send_message);
+        send_message =joint1.set_angle(expect_q(0,0));
+        socketcan_send_pub.publish(send_message);
+
+        send_message = joint2.set_angle_for_new_joint(expect_q(1,0));
+        socketcan_send_pub.publish(send_message);
+        send_message =joint2.set_angle(expect_q(1,0));
+        socketcan_send_pub.publish(send_message);
+
+        send_message = joint3.set_angle_for_new_joint(expect_q(2,0));
+        socketcan_send_pub.publish(send_message);
+        send_message =joint3.set_angle(expect_q(2,0));
+        socketcan_send_pub.publish(send_message);
+        // ----------------------------------------
 
         // 关节 4位置控制 joint4angle其实是期望角度
         if(joint4angle<-M_PI)
@@ -653,7 +459,7 @@ int main(int argc, char *argv[])
         {
             tol5 = 0;
         }
-        // ROS_INFO("joint5_actual_angle=%lf",joint5_actual_angle);
+        ROS_INFO("joint5_actual_angle=%lf",joint5_actual_angle);
         //ROS_INFO("gripper_flag=%lf",gripper_flag);
         send_message = joint5.MomentOutput(tol5);
         socketcan_send_pub.publish(send_message);
@@ -674,7 +480,7 @@ void CarPosition_Callback(const  std_msgs::Float64MultiArray& msg)
     car_position(0,0)=msg.data[0]/1000;  
     car_position(1,0)=msg.data[1]/1000;
     car_position(2,0)=msg.data[2]/1000;
-    // ROS_INFO("car_position = %lf, %lf, %lf", car_position(0,0), car_position(1,0), car_position(2,0));
+    ROS_INFO("car_position = %lf, %lf, %lf", car_position(0,0), car_position(1,0), car_position(2,0));
 }
 
 // 虚拟力反馈生成
@@ -701,162 +507,6 @@ Vector3d VirtualForceGeneration(Vector3d& q, Vector3d& car_position)
 
 }
 // 遥操作回调函数
-void PublishMotionStatus(const std::string& state, double progress, uint32_t ind, const std::string& source)
-{
-    if (!motion_status_pub) return;
-    std_msgs::String message;
-    std::ostringstream stream;
-    stream << std::fixed << std::setprecision(6)
-           << "{\"ind\":" << ind
-           << ",\"source\":\"" << source
-           << "\",\"state\":\"" << state
-           << "\",\"progress\":" << std::max(0.0, std::min(1.0, progress))
-           << ",\"duration_sec\":" << runtime_motion_duration
-           << ",\"stamp\":" << ros::Time::now().toSec() << "}";
-    message.data = stream.str();
-    motion_status_pub.publish(message);
-}
-
-void RecordPendingControlTrace(const sensor_msgs::Imu& msg, const std::string& source)
-{
-    if (!latency_trace_enabled) return;
-    pending_control_trace = true;
-    pending_trace_ind = msg.header.seq;
-    pending_trace_source = source;
-    pending_trace_source_stamp = msg.header.stamp;
-    pending_trace_callback_time = ros::WallTime::now();
-}
-
-void PublishPendingControlTrace()
-{
-    if (!latency_trace_enabled || !pending_control_trace || !control_trace_pub) return;
-    const ros::WallTime apply_time = ros::WallTime::now();
-    std_msgs::String message;
-    std::ostringstream stream;
-    stream << std::fixed << std::setprecision(9)
-           << "{\"ind\":" << pending_trace_ind
-           << ",\"source\":\"" << pending_trace_source
-           << "\",\"source_stamp\":" << pending_trace_source_stamp.toSec()
-           << ",\"callback_stamp\":" << pending_trace_callback_time.toSec()
-           << ",\"control_apply_stamp\":" << apply_time.toSec() << "}";
-    message.data = stream.str();
-    control_trace_pub.publish(message);
-    if (latency_trace_file.good())
-    {
-        latency_trace_file << pending_trace_ind << "," << pending_trace_source << ","
-                           << std::fixed << std::setprecision(9)
-                           << pending_trace_source_stamp.toSec() << ","
-                           << pending_trace_callback_time.toSec() << ","
-                           << apply_time.toSec() << "\n";
-        latency_trace_file.flush();
-    }
-    pending_control_trace = false;
-}
-
-void StartRuntimeMotion(const sensor_msgs::Imu& msg, const std::string& source)
-{
-    if (runtime_motion_id_valid && last_runtime_motion_ind == msg.header.seq &&
-        last_runtime_motion_source == source && last_runtime_motion_stamp == msg.header.stamp)
-    {
-        return;
-    }
-    if (runtime_motion.active)
-    {
-        const double elapsed = (ros::WallTime::now() - runtime_motion.start_time).toSec();
-        PublishMotionStatus("preempted", elapsed / runtime_motion_duration,
-                            runtime_motion.ind, runtime_motion.source);
-    }
-
-    const Vector3d start_q = expect_q;
-    const Vector3d start_dq = expect_dq;
-    const Vector3d start_ddq = expect_ddq;
-    ApplyLogicalArmCommand(msg);
-    const Vector3d target_q = expect_q;
-    expect_q = start_q;
-    expect_dq = start_dq;
-    expect_ddq = start_ddq;
-
-    const double duration = runtime_motion_duration;
-    const double duration2 = duration * duration;
-    const double duration3 = duration2 * duration;
-    const double duration4 = duration3 * duration;
-    const double duration5 = duration4 * duration;
-    const Vector3d delta = target_q - start_q;
-    runtime_motion.coefficient[0] = start_q;
-    runtime_motion.coefficient[1] = start_dq;
-    runtime_motion.coefficient[2] = 0.5 * start_ddq;
-    runtime_motion.coefficient[3] =
-        (20.0 * delta - 12.0 * start_dq * duration - 3.0 * start_ddq * duration2) /
-        (2.0 * duration3);
-    runtime_motion.coefficient[4] =
-        (-30.0 * delta + 16.0 * start_dq * duration + 3.0 * start_ddq * duration2) /
-        (2.0 * duration4);
-    runtime_motion.coefficient[5] =
-        (12.0 * delta - 6.0 * start_dq * duration - start_ddq * duration2) /
-        (2.0 * duration5);
-    runtime_motion.active = true;
-    runtime_motion.ind = msg.header.seq;
-    runtime_motion.source = source;
-    runtime_motion.start_time = ros::WallTime::now();
-    runtime_motion.last_status_progress = -1.0;
-    runtime_motion_id_valid = true;
-    last_runtime_motion_ind = msg.header.seq;
-    last_runtime_motion_source = source;
-    last_runtime_motion_stamp = msg.header.stamp;
-    if (private_node_handle != NULL) private_node_handle->setParam("runtime_motion_complete", false);
-    PublishMotionStatus("accepted", 0.0, runtime_motion.ind, runtime_motion.source);
-    RecordPendingControlTrace(msg, source);
-}
-
-void UpdateRuntimeMotion()
-{
-    if (!runtime_motion.active) return;
-    const double elapsed = (ros::WallTime::now() - runtime_motion.start_time).toSec();
-    const double t = std::max(0.0, std::min(runtime_motion_duration, elapsed));
-    const double t2 = t * t;
-    const double t3 = t2 * t;
-    const double t4 = t3 * t;
-    const double t5 = t4 * t;
-    expect_q = runtime_motion.coefficient[0] + runtime_motion.coefficient[1] * t +
-               runtime_motion.coefficient[2] * t2 + runtime_motion.coefficient[3] * t3 +
-               runtime_motion.coefficient[4] * t4 + runtime_motion.coefficient[5] * t5;
-    expect_dq = runtime_motion.coefficient[1] + 2.0 * runtime_motion.coefficient[2] * t +
-                3.0 * runtime_motion.coefficient[3] * t2 + 4.0 * runtime_motion.coefficient[4] * t3 +
-                5.0 * runtime_motion.coefficient[5] * t4;
-    expect_ddq = 2.0 * runtime_motion.coefficient[2] + 6.0 * runtime_motion.coefficient[3] * t +
-                 12.0 * runtime_motion.coefficient[4] * t2 + 20.0 * runtime_motion.coefficient[5] * t3;
-
-    const double progress = t / runtime_motion_duration;
-    if (runtime_motion.last_status_progress < 0.0 || progress - runtime_motion.last_status_progress >= 0.02)
-    {
-        PublishMotionStatus("running", progress, runtime_motion.ind, runtime_motion.source);
-        runtime_motion.last_status_progress = progress;
-    }
-    if (elapsed >= runtime_motion_duration)
-    {
-        expect_dq.setZero();
-        expect_ddq.setZero();
-        runtime_motion.active = false;
-        if (private_node_handle != NULL) private_node_handle->setParam("runtime_motion_complete", true);
-        PublishMotionStatus("complete", 1.0, runtime_motion.ind, runtime_motion.source);
-    }
-}
-
-void CancelRuntimeMotion(const std::string& state)
-{
-    if (!runtime_motion.active) return;
-    const double elapsed = (ros::WallTime::now() - runtime_motion.start_time).toSec();
-    PublishMotionStatus(state, elapsed / runtime_motion_duration,
-                        runtime_motion.ind, runtime_motion.source);
-    runtime_motion.active = false;
-    expect_q = q;
-    expect_dq.setZero();
-    expect_ddq.setZero();
-    joint4angle = joint4_actual_angle;
-    KB_D = 0.0;
-    if (private_node_handle != NULL) private_node_handle->setParam("runtime_motion_complete", true);
-}
-
 void ActiveControlSourceCallback(const std_msgs::String& msg)
 {
     static const std::vector<std::string> allowed = {
@@ -870,53 +520,25 @@ void ActiveControlSourceCallback(const std_msgs::String& msg)
     }
     if (active_control_source != msg.data)
     {
-        if (runtime_motion.active && msg.data != "home" && msg.data != "preset" && msg.data != "estop")
-        {
-            ROS_WARN_THROTTLE(1.0, "Ignoring control source change during runtime motion");
-            return;
-        }
-        if (msg.data == "estop")
-        {
-            CancelRuntimeMotion("preempted");
-        }
-        // ROS_INFO("Arm control source: %s -> %s", active_control_source.c_str(), msg.data.c_str());
+        ROS_INFO("Arm control source: %s -> %s", active_control_source.c_str(), msg.data.c_str());
         active_control_source = msg.data;
     }
 }
 
 void TeleOperationCallback(const sensor_msgs::Imu& msg)
 {
-    if (startup_homing_active)
-    {
-        ROS_WARN_THROTTLE(1.0, "Ignoring teleoperation command during torque startup homing");
-        return;
-    }
     if (active_control_source != "teleop") return;
     ApplyLogicalArmCommand(msg);
 }
 
 void H5TeleOperationCallback(const sensor_msgs::Imu& msg)
 {
-    if (startup_homing_active)
-    {
-        ROS_WARN_THROTTLE(1.0, "Ignoring H5 command during torque startup homing");
-        return;
-    }
     const std::string prefix = "h5:";
     const std::string frame_id = msg.header.frame_id;
     if (frame_id.compare(0, prefix.size(), prefix) != 0) return;
     const std::string command_source = frame_id.substr(prefix.size());
-    const bool runtime_source = command_source == "home" || command_source == "preset";
-    if (command_source != active_control_source && !runtime_source) return;
-    if (runtime_source)
-    {
-        active_control_source = command_source;
-        StartRuntimeMotion(msg, command_source);
-        return;
-    }
-    if (runtime_motion.active) return;
+    if (command_source != active_control_source) return;
     ApplyLogicalArmCommand(msg);
-    RecordPendingControlTrace(msg, command_source);
 }
 
 void ApplyLogicalArmCommand(const sensor_msgs::Imu& msg)
@@ -926,10 +548,10 @@ void ApplyLogicalArmCommand(const sensor_msgs::Imu& msg)
     expect_q(2,0) = msg.orientation.z;
     joint4angle = msg.orientation.w;
 
-    // ROS_INFO("expect_q1=%lf",expect_q(0,0));
-    // ROS_INFO("expect_q2=%lf",expect_q(1,0));
-    // ROS_INFO("expect_q3=%lf",expect_q(2,0));
-    // ROS_INFO("joint4angle=%lf",joint4angle);
+    ROS_INFO("expect_q1=%lf",expect_q(0,0));
+    ROS_INFO("expect_q2=%lf",expect_q(1,0));
+    ROS_INFO("expect_q3=%lf",expect_q(2,0));
+    ROS_INFO("joint4angle=%lf",joint4angle);
 
     expect_dq(0,0) = -msg.angular_velocity.x;
     expect_dq(1,0) = msg.angular_velocity.y;
@@ -958,11 +580,6 @@ void ApplyLogicalArmCommand(const sensor_msgs::Imu& msg)
 // 【修改代码】接收模仿学习节点下发的期望轨迹的回调函数（已集成抓手信号）
 void ImitationCallback(const sensor_msgs::JointState::ConstPtr& msg)
 {
-    if (startup_homing_active)
-    {
-        ROS_WARN_THROTTLE(1.0, "Ignoring imitation command during torque startup homing");
-        return;
-    }
     if (active_control_source != "imitation") return;
     // 【修改】检查接收到的数据维度是否正确，position现在需要4个元素
     if (msg->position.size() < 4 || msg->velocity.size() < 3 || msg->effort.size() < 3)
@@ -1001,19 +618,16 @@ void MainpulatorCallback(const can_msgs::Frame &receive_message)
         case 0x181:
             joint1.current_angle(receive_message);
             q(0, 0) = joint1.get_current_angle();
-            joint_position_received[0] = true;
             //ROS_INFO("Joint1 = %lf", q(0, 0));
             break;
         case 0x182:
             joint2.current_angle(receive_message);
             q(1, 0) = joint2.get_current_angle();
-            joint_position_received[1] = true;
             //ROS_INFO("Joint1 = %lf", q(2, 0));
             break;
         case 0x183:
             joint3.current_angle(receive_message);
             q(2, 0) = joint3.get_current_angle();
-            joint_position_received[2] = true;
             break;
         case 0x184:
             joint4.current_angle(receive_message);
@@ -1028,17 +642,14 @@ void MainpulatorCallback(const can_msgs::Frame &receive_message)
         case 0x281:
             joint1.current_velocity(receive_message);
             dq(0, 0) = joint1.get_current_velocity();
-            joint_velocity_received[0] = true;
             break;
         case 0x282:
             joint2.current_velocity(receive_message);
             dq(1, 0) = joint2.get_current_velocity();
-            joint_velocity_received[1] = true;
             break;
         case 0x283:
             joint3.current_velocity(receive_message);
             dq(2, 0) = joint3.get_current_velocity();
-            joint_velocity_received[2] = true;
             break;
         case 0x284:
             joint4.current_velocity(receive_message);
@@ -1066,63 +677,106 @@ void  AdaptiveBACKSTEPPINGparam_init()
             kexi(i,j) = 0;
         }
     }
-    lambda1(0,0)  = 5;
-    lambda1(1,1)  = 4;
-    lambda1(2,2)  = 4.6;
-    lambda2(0,0)  = 27;
-    lambda2(1,1)  = 11;
-    lambda2(2,2)  = 31;
+    lambda1(0,0)  = 8;
+    lambda1(1,1)  = 8;
+    lambda1(2,2)  = 4; 
+
+    lambda2(0,0)  = 30;
+    lambda2(1,1)  = 30;
+    lambda2(2,2)  = 20; 
 
     // 我的参数  
-    theta(0,0) = 13.5;//24;//8;
-    theta(1,0) =2.5;//6.5;// 5;
-    theta(2,0) =0;//-7;
-    theta(3,0) =0;//-2;// -7;
-    theta(4,0)  =0;// -7;
-    theta(5,0) =0;//9.2;
-    theta(6,0) =0;// 15;//15;//12;
-    theta(7,0) = 0;//12.5;
-    theta(8,0) = 0;//(-15~15)
-    theta(9,0) = 0;//(-80~-30)
-    theta(10,0) = 0;//(-5~20)
+    theta(0,0) = 4;
+    theta(1,0) = 4.5;
 
-    theta_min(0,0) = 1;
-    theta_max(0,0) = 16;
-    theta_min(1,0) = 0.1;
-    theta_max(1,0) = 10;
-    theta_min(2,0) = -100;//-10;
-    theta_max(2,0) = 100;//10;
-    theta_max(3,0) = 50;//10;
-    theta_min(3,0)  = -50;//-2;
-    theta_max(4,0) = 30;//3;
-    theta_min(4,0)  =-300;//-10;
-    theta_max(5,0) = 100;//10;
-    theta_min(5,0)  = -20;//-2;
-    theta_max(6,0) = 50;//20;
-    theta_min(6,0)  = -10;//13.5;
-    theta_max(7,0) =20;// 15;
-    theta_min(6,0)  = 0;//0;
-    theta_max(8,0) = 100;//50;
-    theta_min(8,0)  =-100;// -50;
-    theta_max(9,0) = 50;//50;
-    theta_min(9,0)  =-50;// -50;
-    theta_max(10,0) = 50;//50;
-    theta_min(10,0)  =-50;// -50;
+    
+    theta(2,0) = 10;
+    theta(3,0) = 10;
+    theta(4,0) = 10;
 
-    gammamamm(0,0) = 500/10;
-    gammamamm(1,1) = 100/10;
+    theta(5,0) = 7.651;
+    theta(6,0) = 7.651;
+    theta(7,0) = 7.994;
 
-    gammamamm(2,2) = 1000/10;
-    gammamamm(3,3) = 1200/10;
-    gammamamm(4,4) = 1500/10;
+    theta(8,0) = 0;
+    theta(9,0) = 0;
+    theta(10,0) = 0;
+    
+    /*
+    theta(2,0) = 0;
+    theta(3,0) = 0;
+    theta(4,0) = 0;
 
-    gammamamm(5,5) = 1500/10;
-    gammamamm(6,6) = 1500/10;
-    gammamamm(7,7) = 1500/10;
+    theta(5,0) = 0;
+    theta(6,0) = 0;
+    theta(7,0) = 0;
 
-    gammamamm(8,8) = 1000/2.5;
-    gammamamm(9,9) = 1000/2.5;
-    gammamamm(10,10) = 1000/2.5;
+    theta(8,0) = 0;
+    theta(9,0) = -30;
+    theta(10,0) = -5;
+    */
+
+    theta_min(0,0) = 3;
+    theta_max(0,0) = 6;
+    theta_min(1,0) = 4;
+    theta_max(1,0) = 5;
+    
+    theta_min(2,0) = 5;
+    theta_max(2,0) = 15;
+    theta_max(3,0) = 15;
+    theta_min(3,0) = 5;
+    theta_max(4,0) = 15;
+    theta_min(4,0) = 5;
+    
+    theta_max(5,0) = 15;
+    theta_min(5,0) = 5;
+    theta_max(6,0) = 15;
+    theta_min(6,0) = 5;
+    theta_max(7,0) = 15;
+    theta_min(7,0) = 5;
+    
+    theta_max(8,0) = 30;
+    theta_min(8,0) =-30;
+    theta_max(9,0) = 50;
+    theta_min(9,0) =-50;
+    theta_max(10,0) = 30;
+    theta_min(10,0) =-30;
+
+    /*
+    theta_min(0,0) = 0;
+    theta_max(0,0) = 0;
+    theta_min(1,0) = 0;
+    theta_max(1,0) = 0;
+    
+    theta_min(2,0) = 0;
+    theta_max(2,0) = 0;
+    theta_max(3,0) = 0;
+    theta_min(3,0) = 0;
+    theta_max(4,0) = 0;
+    theta_min(4,0) = 0;
+    
+    theta_max(5,0) = 0;
+    theta_min(5,0) = 0;
+    theta_max(6,0) = 0;
+    theta_min(6,0) = 0;
+    theta_max(7,0) = 0;
+    theta_min(7,0) = 0;
+    */
+
+    gammamamm(0,0) = 30;//300;
+    gammamamm(1,1) = 10;//100;
+
+    gammamamm(2,2) = 100;//1500;
+    gammamamm(3,3) = 100;//1200;
+    gammamamm(4,4) = 100;//1000;
+
+    gammamamm(5,5) = 100;//1000;
+    gammamamm(6,6) = 100;//1000;
+    gammamamm(7,7) = 100;//1000;
+
+    gammamamm(8,8) = 400;
+    gammamamm(9,9) = 500;
+    gammamamm(10,10) = 250;
 }
 
 //反步控制，返回tol
@@ -1134,6 +788,7 @@ Vector3d AdaptiveBackstepping(Vector3d& expect_q,Vector3d& expect_dq,Vector3d& e
     alpha1 = -lambda1 * z1 + expect_dq;
     dalpha1 = -lambda1 * dz1 + expect_ddq;
     z2 = dq - alpha1;
+    double deadzone = 0.005;
 
     // 令M*dalpha1+C*alpha1+G+F+d = -fai^T * theta
     // theta = [m1 m2 fv1 fv2 fv3 fc1 fc2 fc3 d1 d2 d3];
@@ -1148,7 +803,7 @@ Vector3d AdaptiveBackstepping(Vector3d& expect_q,Vector3d& expect_dq,Vector3d& e
     fai(0,3) = 0;
     fai(0,4) = 0;
     //库伦
-    fai(0,5) = -atan2(900*dq(0,0),1)*2.0/(M_PI*1.0);
+    fai(0,5) = (abs(dq(0,0)) < deadzone) ? 0 : -atan2(100*dq(0,0),1)*2.0/M_PI;;
     fai(0,6) = 0;
     fai(0,7) = 0;
     //d
@@ -1171,7 +826,7 @@ Vector3d AdaptiveBackstepping(Vector3d& expect_q,Vector3d& expect_dq,Vector3d& e
     fai(1,4) = 0;
     //库伦
     fai(1,5) = 0;
-    fai(1,6) = -atan2(900*dq(1,0),1)*2.0/(M_PI*1.0);
+    fai(1,6) = (abs(dq(1,0)) < deadzone) ? 0 : -atan2(100*dq(1,0),1)*2.0/M_PI; 
     fai(1,7) = 0;
     //d
     fai(1,8) = 0;    
@@ -1191,7 +846,7 @@ Vector3d AdaptiveBackstepping(Vector3d& expect_q,Vector3d& expect_dq,Vector3d& e
     //库伦
     fai(2,5) = 0;
     fai(2,6) = 0;
-    fai(2,7) = -atan2(900*dq(2,0),1)*2.0/(M_PI*1.0);
+    fai(2,7) = (abs(dq(2,0)) < deadzone) ? 0 : -atan2(100*dq(2,0),1)*2.0/M_PI;
     //d
     fai(2,8) = 0;    
     fai(2,9) = 0;

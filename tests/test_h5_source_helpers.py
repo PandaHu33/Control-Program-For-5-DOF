@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 import sys
 import types
@@ -38,6 +39,32 @@ def load_h5_bridge(path, module_name):
 
 
 class H5SourceHelperTests(unittest.TestCase):
+    def test_active_source_is_initialized_once_in_constructor(self):
+        paths = [
+            ROOT / "DataSet_ws/src/h5_udp_bridge/scripts/h5_udp_bridge_node.py",
+            ROOT / "deployment/jetson_ros1_20.04/h5_udp_bridge/scripts/h5_udp_bridge_node.py",
+        ]
+        for path in paths:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            bridge_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "H5UdpBridge")
+            methods = {node.name: node for node in bridge_class.body if isinstance(node, ast.FunctionDef)}
+
+            def active_source_assignments(method):
+                return [
+                    node for node in ast.walk(method)
+                    if isinstance(node, (ast.Assign, ast.AnnAssign))
+                    and any(
+                        isinstance(target, ast.Attribute)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == "self"
+                        and target.attr == "active_source"
+                        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+                    )
+                ]
+
+            self.assertEqual(len(active_source_assignments(methods["__init__"])), 1, path)
+            self.assertEqual(len(active_source_assignments(methods["write_latency_trace"])), 0, path)
+
     def test_workspace_and_deployment_helpers_match(self):
         paths = [
             ROOT / "DataSet_ws/src/h5_udp_bridge/scripts/h5_udp_bridge_node.py",

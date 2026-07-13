@@ -34,6 +34,8 @@ class ArmFrameError(ValueError):
 
 @dataclass(frozen=True)
 class ArmFrameInfo:
+    ind: int
+    time_ms: int
     mode: int
     selector: int
     emergency_stop: bool
@@ -96,6 +98,8 @@ def parse_arm_frame(payload: bytes) -> ArmFrameInfo:
     owner = payload[H5_RESERVED_OFFSET:H5_RESERVED_OFFSET + H5_RESERVED_SIZE].hex()
     order = struct.unpack_from("<16f", payload, H5_ORDER_OFFSET)
     return ArmFrameInfo(
+        ind=struct.unpack_from("<I", payload, 0)[0],
+        time_ms=struct.unpack_from("<Q", payload, 4)[0],
         mode=mode,
         selector=mode & 0x0F,
         emergency_stop=bool(mode & 0x80),

@@ -50,6 +50,8 @@ class ControlArbitrationTests(unittest.TestCase):
 
     def test_frame_parser(self):
         frame = parse_arm_frame(make_frame("controller_delta"))
+        self.assertEqual(frame.ind, 1)
+        self.assertEqual(frame.time_ms, 2)
         self.assertEqual(frame.source, "controller_delta")
         self.assertEqual(frame.owner_id, CLIENT_A)
 

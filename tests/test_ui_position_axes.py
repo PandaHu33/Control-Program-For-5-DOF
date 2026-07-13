@@ -10,7 +10,7 @@ CAMERA_CONFIG = (ROOT / "control_ui" / "config.yaml").read_text(encoding="utf-8"
 class UiPositionAxesTests(unittest.TestCase):
     def test_keyboard_position_a_is_negative_y_and_d_is_positive_y(self):
         self.assertIn(
-            'const dy = (pressed.has("KeyD") ? POSITION_STEP : 0) - (pressed.has("KeyA") ? POSITION_STEP : 0);',
+            'const dy = (pressed.has("KeyD") ? step : 0) - (pressed.has("KeyA") ? step : 0);',
             UI,
         )
 

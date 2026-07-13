@@ -10,6 +10,7 @@ Hand_Tracker/logs/
 .vscode/
 
 # Local packaged/runtime artifacts
+build/
 control_ui/bridge.exe
 
 # Python caches and local conda environments

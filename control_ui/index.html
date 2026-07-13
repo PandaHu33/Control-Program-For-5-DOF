@@ -401,6 +401,38 @@
       font-size: 13px;
       line-height: 1.4;
     }
+    .experiment-form {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 8px;
+      align-items: end;
+    }
+    .experiment-form label {
+      display: grid;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .experiment-readout {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .experiment-readout div {
+      padding: 8px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .experiment-readout strong {
+      display: block;
+      color: var(--text);
+      font-size: 14px;
+      margin-top: 3px;
+    }
     /* Toggle (滑动开关) */
     .toggle { display: inline-flex; align-items: center; gap: 10px; user-select: none; }
     .toggle .word { font-size: 12px; color: var(--muted); }
@@ -460,6 +492,43 @@
     <div class="card console-wide">
       <h2>设备连接</h2>
       <div class="module-grid" id="moduleGrid"></div>
+    </div>
+
+    <div class="card console-wide">
+      <h2>实验记录</h2>
+      <div class="experiment-form">
+        <label>Task
+          <select id="experimentTask">
+            <option value="T1_reach">T1_reach</option>
+            <option value="T2_precision_align">T2_precision_align</option>
+          </select>
+        </label>
+        <label>Method
+          <select id="experimentMethod">
+            <option value="VR_wrist_hand">VR_wrist_hand</option>
+            <option value="glove_controller">glove_controller</option>
+            <option value="keyboard_or_gamepad">keyboard_or_gamepad</option>
+          </select>
+        </label>
+        <label>Trial
+          <input id="experimentTrialNo" type="number" min="1" value="1" />
+        </label>
+        <label>Success
+          <select id="experimentSuccess">
+            <option value="yes">yes</option>
+            <option value="no">no</option>
+          </select>
+        </label>
+        <button id="experimentStart">Start Trial</button>
+        <button id="experimentEnd" disabled>End Trial</button>
+      </div>
+      <div class="experiment-readout">
+        <div>Status<strong id="experimentStatus">idle</strong></div>
+        <div>Desired XYZ<strong id="experimentDesired">-</strong></div>
+        <div>Actual XYZ<strong id="experimentActual">-</strong></div>
+        <div>Error<strong id="experimentError">-</strong></div>
+        <div>Samples<strong id="experimentSamples">0</strong></div>
+      </div>
     </div>
 
     <div class="card">
@@ -605,9 +674,6 @@
         <button data-api="GET /api/arm/status">检查节点状态</button>
         <button data-api="POST /api/arm/start_nodes">启动 Jetson 节点</button>
         <button data-api="POST /api/arm/stop_nodes">停止 Jetson 节点</button>
-        <button data-api="POST /api/arm/preset_approach">预设接近位</button>
-        <button data-api="POST /api/arm/preset_grasp">预设抓取位</button>
-        <button data-api="POST /api/arm/preset_release">预设释放位</button>
         <button data-api="POST /api/arm/stop">机械臂停止</button>
       </div>
     </div>
@@ -860,6 +926,11 @@
     let dataLogRecording = false;
     let dataLogRows = [];
     const DATA_LOG_MAX_ROWS = 200000;
+    let experimentTrial = null;
+    let experimentPendingSamples = [];
+    let experimentFlushInFlight = null;
+    let experimentBusy = false;
+    const EXPERIMENT_FLUSH_INTERVAL_MS = 1000;
     const DATA_LOG_COLUMNS = [
       "time_ms", "time_iso", "sample_index", "mode", "mode_value",
       "target_x_m", "target_y_m", "target_z_m",
@@ -880,6 +951,17 @@
     const downloadDataLogBtn = document.getElementById("downloadDataLog");
     const clearDataLogBtn = document.getElementById("clearDataLog");
     const dataLogStatus = document.getElementById("dataLogStatus");
+    const experimentTask = document.getElementById("experimentTask");
+    const experimentMethod = document.getElementById("experimentMethod");
+    const experimentTrialNo = document.getElementById("experimentTrialNo");
+    const experimentSuccess = document.getElementById("experimentSuccess");
+    const experimentStartBtn = document.getElementById("experimentStart");
+    const experimentEndBtn = document.getElementById("experimentEnd");
+    const experimentStatus = document.getElementById("experimentStatus");
+    const experimentDesired = document.getElementById("experimentDesired");
+    const experimentActual = document.getElementById("experimentActual");
+    const experimentError = document.getElementById("experimentError");
+    const experimentSamples = document.getElementById("experimentSamples");
     const wsState = document.getElementById("wsState");
     const mainView = document.getElementById("mainView");
     const debugView = document.getElementById("debugView");
@@ -1031,6 +1113,12 @@
         lastPacket.textContent = owned
           ? `Arm authority: ${armAuthority.mode} / this page / ${freshness}`
           : `Arm authority: ${armAuthority.mode} / owner ${ownerText} / passive / ${freshness}`;
+      }
+      const motion = armAuthority.motion || {};
+      if (armStatusHint && ["accepted", "running", "complete", "failed"].includes(motion.state)) {
+        const progress = Math.max(0, Math.min(1, Number(motion.progress || 0)));
+        armStatusHint.textContent = `${motion.source === "home" ? "归零" : "预置"}: ${motion.state} ${(progress * 100).toFixed(1)}%`;
+        armStatusHint.classList.toggle("warning", motion.state === "failed");
       }
     }
 
@@ -1741,6 +1829,212 @@
       if (dataLogRows.length === 1 || dataLogRows.length % 20 === 0) updateDataLogStatus();
     }
 
+    function localExperimentDateKey() {
+      const now = new Date();
+      const y = now.getFullYear();
+      const m = String(now.getMonth() + 1).padStart(2, "0");
+      const d = String(now.getDate()).padStart(2, "0");
+      return `${y}${m}${d}`;
+    }
+
+    function vectorDistanceM(a, b) {
+      return Math.hypot(
+        Number(a?.[0] || 0) - Number(b?.[0] || 0),
+        Number(a?.[1] || 0) - Number(b?.[1] || 0),
+        Number(a?.[2] || 0) - Number(b?.[2] || 0),
+      );
+    }
+
+    function formatPosition(values) {
+      return (values || []).slice(0, 3).map((value) => Number(value || 0).toFixed(3)).join(", ");
+    }
+
+    function suggestedExperimentMethod() {
+      const mode = selectedControlMode();
+      if (mode === "hand_vision") return "VR_wrist_hand";
+      if (mode === "controller_delta") return "glove_controller";
+      return "keyboard_or_gamepad";
+    }
+
+    function experimentMeta() {
+      if (experimentMethod && !experimentMethod.dataset.userSet) {
+        experimentMethod.value = suggestedExperimentMethod();
+      }
+      return {
+        date: localExperimentDateKey(),
+        task: experimentTask?.value || "T1_reach",
+        method: experimentMethod?.value || suggestedExperimentMethod(),
+        trial: String(Math.max(1, Number(experimentTrialNo?.value || 1) || 1)),
+      };
+    }
+
+    function setExperimentUiState(message) {
+      if (experimentStatus) experimentStatus.textContent = message || (experimentTrial ? "recording" : "idle");
+      if (experimentStartBtn) experimentStartBtn.disabled = !!experimentTrial || experimentBusy;
+      if (experimentEndBtn) experimentEndBtn.disabled = !experimentTrial || experimentBusy;
+      if (experimentSamples) experimentSamples.textContent = experimentTrial ? String(experimentTrial.sampleCount || 0) : "0";
+    }
+
+    async function experimentApi(path, body) {
+      const res = await fetch(`${API_BASE}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      });
+      return res.json();
+    }
+
+    function currentExperimentSample(tsMs) {
+      const desired = targetPosition || [0, 0, 0];
+      const actual = armForwardKinematics(armAngles);
+      const joints = armAngles || [];
+      const errorMm = vectorDistanceM(desired, actual) * 1000.0;
+      if (experimentDesired) experimentDesired.textContent = formatPosition(desired);
+      if (experimentActual) experimentActual.textContent = formatPosition(actual);
+      if (experimentError) experimentError.textContent = `${errorMm.toFixed(1)} mm`;
+      return {
+        elapsed_ms: Math.max(0, Number(tsMs) - Number(experimentTrial?.startedAtMs || tsMs)),
+        desired_x_m: Number(desired[0] || 0),
+        desired_y_m: Number(desired[1] || 0),
+        desired_z_m: Number(desired[2] || 0),
+        actual_x_m: Number(actual[0] || 0),
+        actual_y_m: Number(actual[1] || 0),
+        actual_z_m: Number(actual[2] || 0),
+        actual_j1_rad: Number(joints[0] || 0),
+        actual_j2_rad: Number(joints[1] || 0),
+        actual_j3_rad: Number(joints[2] || 0),
+        actual_j4_rad: Number(joints[3] || 0),
+        actual_j5_rad: Number(joints[4] || 0),
+        error_mm: errorMm,
+      };
+    }
+
+    async function flushExperimentSamples(force=false) {
+      if (!experimentTrial) return true;
+      const now = Date.now();
+      if (!force && now - experimentTrial.lastFlushMs < EXPERIMENT_FLUSH_INTERVAL_MS) return true;
+      if (experimentFlushInFlight) await experimentFlushInFlight;
+      if (!experimentPendingSamples.length) {
+        experimentTrial.lastFlushMs = now;
+        return true;
+      }
+      const samples = experimentPendingSamples.splice(0, experimentPendingSamples.length);
+      const payload = {
+        trial_id: experimentTrial.trialId,
+        date: experimentTrial.date,
+        samples,
+      };
+      experimentFlushInFlight = experimentApi("/api/experiment/trial/samples", payload)
+        .then((data) => {
+          if (!data?.ok) {
+            experimentPendingSamples = samples.concat(experimentPendingSamples);
+            appendConsoleLog("ERROR", data?.message || "实验采样保存失败");
+            return false;
+          }
+          experimentTrial.lastFlushMs = Date.now();
+          return true;
+        })
+        .catch((err) => {
+          experimentPendingSamples = samples.concat(experimentPendingSamples);
+          appendConsoleLog("ERROR", "实验采样保存失败", err.message);
+          return false;
+        })
+        .finally(() => {
+          experimentFlushInFlight = null;
+        });
+      return experimentFlushInFlight;
+    }
+
+    function recordExperimentSample(tsMs) {
+      if (!experimentTrial) return;
+      const sample = currentExperimentSample(tsMs);
+      experimentPendingSamples.push(sample);
+      experimentTrial.sampleCount += 1;
+      if (experimentSamples) experimentSamples.textContent = String(experimentTrial.sampleCount);
+      flushExperimentSamples(false);
+    }
+
+    async function startExperimentTrial() {
+      if (experimentTrial) return;
+      ensureTargetInitialized();
+      const meta = experimentMeta();
+      experimentBusy = true;
+      setExperimentUiState("starting...");
+      try {
+        const data = await experimentApi("/api/experiment/trial/start", meta);
+        if (!data?.ok) {
+          appendConsoleLog("ERROR", data?.message || "实验 trial 创建失败");
+          experimentBusy = false;
+          setExperimentUiState("start failed");
+          return;
+        }
+        experimentPendingSamples = [];
+        experimentTrial = {
+          trialId: data.trial_id,
+          date: data.date || meta.date,
+          task: meta.task,
+          method: meta.method,
+          trial: meta.trial,
+          startedAtMs: Date.now(),
+          lastFlushMs: 0,
+          sampleCount: 0,
+        };
+        experimentPendingSamples.push(currentExperimentSample(experimentTrial.startedAtMs));
+        experimentTrial.sampleCount = 1;
+        experimentBusy = false;
+        setExperimentUiState("recording");
+        appendConsoleLog("OK", `实验开始: ${experimentTrial.trialId}`);
+      } catch (err) {
+        appendConsoleLog("ERROR", "实验 trial 创建失败", err.message);
+        experimentBusy = false;
+        setExperimentUiState("start failed");
+      }
+    }
+
+    async function finishExperimentTrial() {
+      if (!experimentTrial) return;
+      const trial = experimentTrial;
+      experimentPendingSamples.push(currentExperimentSample(Date.now()));
+      trial.sampleCount += 1;
+      experimentBusy = true;
+      setExperimentUiState("finishing...");
+      const flushed = await flushExperimentSamples(true);
+      if (!flushed) {
+        experimentBusy = false;
+        setExperimentUiState("flush failed");
+        return;
+      }
+      try {
+        const data = await experimentApi("/api/experiment/trial/finish", {
+          trial_id: trial.trialId,
+          date: trial.date,
+          task: trial.task,
+          method: trial.method,
+          trial: trial.trial,
+          success: experimentSuccess?.value || "unknown",
+          samples: [],
+        });
+        if (!data?.ok) {
+          appendConsoleLog("ERROR", data?.message || "实验 trial 结束失败");
+          experimentBusy = false;
+          setExperimentUiState("finish failed");
+          return;
+        }
+        experimentTrial = null;
+        experimentPendingSamples = [];
+        const summary = data.summary || {};
+        experimentBusy = false;
+        setExperimentUiState(`saved: error ${Number(summary.final_error_mm || 0).toFixed(1)} mm, efficiency ${Number(summary.path_efficiency || 0).toFixed(3)}`);
+        if (experimentSamples) experimentSamples.textContent = String(trial.sampleCount);
+        appendConsoleLog("OK", `实验已保存: ${data.summary_path}`);
+        if (experimentTrialNo) experimentTrialNo.value = String((Number(experimentTrialNo.value || 1) || 1) + 1);
+      } catch (err) {
+        appendConsoleLog("ERROR", "实验 trial 结束失败", err.message);
+        experimentBusy = false;
+        setExperimentUiState("finish failed");
+      }
+    }
+
     function radToDeg(value) {
       const n = Number(value);
       return Number.isFinite(n) ? n * 180 / Math.PI : 0;
@@ -2028,25 +2322,27 @@
 
     function applyPositionKeyboardStep() {
       ensureTargetInitialized();
-      const dx = (pressed.has("KeyW") ? POSITION_STEP : 0) - (pressed.has("KeyS") ? POSITION_STEP : 0);
+      const step = POSITION_STEP * CONTROL_PERIOD_SCALE;
+      const dx = (pressed.has("KeyW") ? step : 0) - (pressed.has("KeyS") ? step : 0);
       // Position-space Y follows the physical operator view: A=left, D=right.
       // J1 is converted from logical to physical once on Jetson, so do not
       // apply the old pre-J1-inversion sign here.
-      const dy = (pressed.has("KeyD") ? POSITION_STEP : 0) - (pressed.has("KeyA") ? POSITION_STEP : 0);
-      const dz = (pressed.has("KeyQ") ? POSITION_STEP : 0) - (pressed.has("KeyE") ? POSITION_STEP : 0);
-      applyJoint4Axis(keyboardJoint4Axis());
+      const dy = (pressed.has("KeyD") ? step : 0) - (pressed.has("KeyA") ? step : 0);
+      const dz = (pressed.has("KeyQ") ? step : 0) - (pressed.has("KeyE") ? step : 0);
+      applyJoint4Axis(keyboardJoint4Axis(), CONTROL_PERIOD_SCALE);
       applyPositionDelta(dx, dy, dz);
     }
 
     function applyJointKeyboardStep() {
       ensureTargetInitialized();
-      if (pressed.has("KeyA")) targetAngles[0] -= JOINT_STEP;
-      if (pressed.has("KeyD")) targetAngles[0] += JOINT_STEP;
-      if (pressed.has("KeyS")) targetAngles[1] -= JOINT_STEP;
-      if (pressed.has("KeyW")) targetAngles[1] += JOINT_STEP;
-      if (pressed.has("KeyQ")) targetAngles[2] -= JOINT_STEP;
-      if (pressed.has("KeyE")) targetAngles[2] += JOINT_STEP;
-      applyJoint4Axis(keyboardJoint4Axis());
+      const step = JOINT_STEP * CONTROL_PERIOD_SCALE;
+      if (pressed.has("KeyA")) targetAngles[0] -= step;
+      if (pressed.has("KeyD")) targetAngles[0] += step;
+      if (pressed.has("KeyS")) targetAngles[1] -= step;
+      if (pressed.has("KeyW")) targetAngles[1] += step;
+      if (pressed.has("KeyQ")) targetAngles[2] -= step;
+      if (pressed.has("KeyE")) targetAngles[2] += step;
+      applyJoint4Axis(keyboardJoint4Axis(), CONTROL_PERIOD_SCALE);
       targetPosition = armForwardKinematics(targetAngles);
       positionTargetInitialized = true;
       updateKeyboardTargetHint();
@@ -2224,9 +2520,9 @@
       return 0;
     }
 
-    function applyJoint4Axis(axis) {
+    function applyJoint4Axis(axis, scale=1) {
       const value = clampNumber(Number(axis) || 0, -1, 1);
-      if (value) targetAngles[3] += value * JOINT_STEP;
+      if (value) targetAngles[3] += value * JOINT_STEP * scale;
     }
 
     function setStickDot(dot, x, y) {
@@ -2367,8 +2663,9 @@
       const axisX = applyGamepadDeadzone(gp.axes?.[0] || 0);
       const axisY = applyGamepadDeadzone(gp.axes?.[1] || 0);
       const zAxis = gamepadZAxis(gp);
-      applyJoint4Axis(gamepadJoint4Axis(gp));
-      applyPositionDelta(-axisY * POSITION_STEP, -axisX * POSITION_STEP, zAxis * POSITION_STEP);
+      applyJoint4Axis(gamepadJoint4Axis(gp), CONTROL_PERIOD_SCALE);
+      const step = POSITION_STEP * CONTROL_PERIOD_SCALE;
+      applyPositionDelta(-axisY * step, -axisX * step, zAxis * step);
     }
 
     function applyGamepadJointStep() {
@@ -2383,10 +2680,11 @@
       const axisY = applyGamepadDeadzone(gp.axes?.[1] || 0);
       const qAxis = gamepadZAxis(gp);
       const j4Axis = gamepadJoint4Axis(gp);
-      targetAngles[0] += axisX * JOINT_STEP;  // A/D
-      targetAngles[1] += -axisY * JOINT_STEP; // W/S
-      targetAngles[2] += qAxis * JOINT_STEP;  // Q/E
-      applyJoint4Axis(j4Axis);
+      const step = JOINT_STEP * CONTROL_PERIOD_SCALE;
+      targetAngles[0] += axisX * step;  // A/D
+      targetAngles[1] += -axisY * step; // W/S
+      targetAngles[2] += qAxis * step;  // Q/E
+      applyJoint4Axis(j4Axis, CONTROL_PERIOD_SCALE);
       targetPosition = armForwardKinematics(targetAngles);
       positionTargetInitialized = true;
       updateKeyboardTargetHint();
@@ -2562,6 +2860,9 @@
     };
     const GRIPPER_ORDER_INDEX = 10;
     const JOINT_STEP = 0.05;
+    const requestedControlPeriod = Number(new URLSearchParams(location.search).get("arm_period_ms"));
+    const ARM_COMMAND_PERIOD_MS = [20, 50, 100].includes(requestedControlPeriod) ? requestedControlPeriod : 100;
+    const CONTROL_PERIOD_SCALE = ARM_COMMAND_PERIOD_MS / 100.0;
     const GAMEPAD_DEADZONE = 0.15;
     const GAMEPAD_Z_DOWN_BUTTON = 4;
     const GAMEPAD_Z_UP_BUTTON = 6;
@@ -2581,6 +2882,19 @@
       if (!f.crcOk){ logDebug(`RX frame CRC mismatch len=${buf.length}`); }
 
       const note = String(f.note || "");
+      if (note.startsWith("motion:")) {
+        const parts = note.split(":");
+        const state = parts[1] || "unknown";
+        const source = parts[2] || "preset";
+        const progress = Math.max(0, Math.min(1, Number(f.order?.[0] || 0)));
+        const duration = Math.max(0, Number(f.order?.[1] || 0));
+        if (armStatusHint) {
+          armStatusHint.textContent = `${source === "home" ? "归零" : "预置"}: ${state} ${(progress * 100).toFixed(1)}% / ${duration.toFixed(1)}s`;
+          armStatusHint.classList.toggle("warning", state === "failed");
+        }
+        logDebug(`MOTION ind=${f.ind} source=${source} state=${state} progress=${progress.toFixed(3)}`);
+        return;
+      }
       const heartbeatOnly = note === "ready" && f.angle && f.angle.slice(0, 3).every((v) => Number(v) === -1);
       const hasJointTelemetry = f.angle && f.angle.length >= 3 && !heartbeatOnly;
       if (hasJointTelemetry) {
@@ -2719,23 +3033,25 @@
     }
 
     window.addEventListener("keydown", (e) => {
+      const inputEventTimeMs = Date.now();
       if (isEditableTarget(e.target)) return;
       if (keyMap.includes(e.code)) {
         e.preventDefault();
         if (!pressed.has(e.code)) pressed.add(e.code);
         updateKeyUI();
         updateInputIndicators();
-        if (autoSend) sendFrame();
+        if (autoSend) sendFrame(inputEventTimeMs);
       }
     });
     window.addEventListener("keyup", (e) => {
+      const inputEventTimeMs = Date.now();
       if (isEditableTarget(e.target)) return;
       if (keyMap.includes(e.code)) {
         e.preventDefault();
         pressed.delete(e.code);
         updateKeyUI();
         updateInputIndicators();
-        if (autoSend) sendFrame();
+        if (autoSend) sendFrame(inputEventTimeMs);
       }
     });
 
@@ -3014,7 +3330,19 @@
         appendConsoleLog("INFO", "已清空控制数据记录");
       });
     }
+    if (experimentMethod) {
+      experimentMethod.addEventListener("change", () => {
+        experimentMethod.dataset.userSet = "1";
+      });
+    }
+    if (experimentStartBtn) {
+      experimentStartBtn.addEventListener("click", startExperimentTrial);
+    }
+    if (experimentEndBtn) {
+      experimentEndBtn.addEventListener("click", finishExperimentTrial);
+    }
     updateDataLogStatus();
+    setExperimentUiState("idle");
 
     // Build a custom payload: [mode:1][buttons:1 bitmask][keys:2 bitmask][timestamp:4]
     let frameCounter = 0;
@@ -3048,7 +3376,7 @@
       return out;
     }
 
-    function sendFrame(){
+    function sendFrame(sourceTimeMs=null){
       updateInputIndicators();
       const sem = FRAME_SCHEMA.semantics?.main;
       const bits = sem?.mode?.bits || { emergency_stop:7, joint_space:6, elbow_control:5, compliance:4 };
@@ -3180,7 +3508,7 @@
         setPair(2, "KeyD", "KeyA");
       }
       
-      const tsMs = Date.now();
+      const tsMs = Number.isFinite(sourceTimeMs) ? Math.round(sourceTimeMs) : Date.now();
       const obj = {
         ind: frameCounter++,
         time: tsMs,
@@ -3199,12 +3527,13 @@
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(frame);
         recordDataSample(tsMs, modeSel, modeVal, orderVec);
+        recordExperimentSample(tsMs);
       }
     }
 
     // Auto heartbeat
     connectUdpWebSocket();
-    setInterval(() => { if (autoSend) sendFrame(); }, 100);
+    setInterval(() => { if (autoSend) sendFrame(); }, ARM_COMMAND_PERIOD_MS);
   </script>
 </body>
 </html>

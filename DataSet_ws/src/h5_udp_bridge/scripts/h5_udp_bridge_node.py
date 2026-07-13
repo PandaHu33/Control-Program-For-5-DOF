@@ -3,7 +3,9 @@
 from __future__ import print_function
 
 import binascii
+import csv
 import json
+import os
 import select
 import socket
 import struct
@@ -147,6 +149,7 @@ def parse_command_frame(data, source):
         "crc_actual": actual_crc,
         "crc_ok": expected_crc == actual_crc,
         "recv_time": time.time(),
+        "recv_time_ns": int(time.time() * 1000000000),
     }
 
 
@@ -186,6 +189,8 @@ class H5UdpBridge(object):
         self.send_heartbeat = bool(rospy.get_param("~send_heartbeat", True))
         self.heartbeat_hz = float(rospy.get_param("~heartbeat_hz", 2.0))
         self.learn_telemetry_target = bool(rospy.get_param("~learn_telemetry_target", True))
+        self.latency_trace_enabled = bool(rospy.get_param("~latency_trace_enabled", False))
+        self.latency_trace_path = rospy.get_param("~latency_trace_path", "/tmp/h5_latency_trace.csv")
 
         command_topic = rospy.get_param("~command_topic", "/h5/arm_command")
         status_topic = rospy.get_param("~status_topic", "/h5/udp_status")
@@ -195,6 +200,7 @@ class H5UdpBridge(object):
         matlab_dataplot_topic = rospy.get_param("~matlab_dataplot_topic", "/Matlab/dataplot")
         imitation_state_topic = rospy.get_param("~imitation_state_topic", "/robot/imitation_state")
         joint_states_topic = rospy.get_param("~joint_states_topic", "/joint_states")
+        motion_status_topic = rospy.get_param("~motion_status_topic", "/arm/motion_status")
 
         self.command_pub = rospy.Publisher(command_topic, String, queue_size=20)
         self.status_pub = rospy.Publisher(status_topic, String, queue_size=20)
@@ -210,6 +216,9 @@ class H5UdpBridge(object):
         self.joint_states_sub = rospy.Subscriber(
             joint_states_topic, JointState, self.on_joint_states, queue_size=20
         )
+        self.motion_status_sub = rospy.Subscriber(
+            motion_status_topic, String, self.on_motion_status, queue_size=20
+        )
         self.tx_queue = queue.Queue()
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -223,8 +232,27 @@ class H5UdpBridge(object):
         self.last_selector = 0
         self.telemetry_ind = 0
         self.last_imitation_state_time = 0.0
+        self.motion_active = False
+        self.recent_command_keys = {}
         self.active_source = "idle"
         self.active_source_pub.publish(String(data=self.active_source))
+
+    def write_latency_trace(self, command):
+        if not self.latency_trace_enabled:
+            return
+        path = self.latency_trace_path
+        needs_header = not os.path.exists(path) or os.path.getsize(path) == 0
+        try:
+            with open(path, "a") as handle:
+                writer = csv.writer(handle)
+                if needs_header:
+                    writer.writerow(["ind", "source", "source_time_ms", "udp_rx_ns", "ros_publish_ns"])
+                writer.writerow([
+                    command["ind"], source_from_note(command["note"]) or "unknown",
+                    command["time"], command["recv_time_ns"], command["ros_publish_time_ns"],
+                ])
+        except Exception as exc:
+            self.publish_status("ERROR", "LATENCY_TRACE_WRITE_FAILED", str(exc))
 
     def set_active_source(self, source, event="SOURCE_SWITCH"):
         source = normalize_arm_source(source)
@@ -267,6 +295,28 @@ class H5UdpBridge(object):
             self.tx_queue.put(payload)
         except Exception as exc:
             self.publish_status("ERROR", "BAD_TELEMETRY_JSON", str(exc))
+
+    def on_motion_status(self, msg):
+        try:
+            payload = json.loads(msg.data) if msg.data else {}
+            state = to_text(payload.get("state")).strip().lower()
+            source = normalize_arm_source(payload.get("source")) or "preset"
+            progress = max(0.0, min(1.0, float(payload.get("progress", 0.0))))
+            duration = max(0.0, float(payload.get("duration_sec", 0.0)))
+            self.motion_active = state in set(["accepted", "running"])
+            status = STATUS_EXECUTING if self.motion_active else STATUS_READY
+            if state == "failed":
+                status = STATUS_FAILED
+            self.tx_queue.put({
+                "ind": int(payload.get("ind", 0)) & 0xFFFFFFFF,
+                "time": int(float(payload.get("stamp", time.time())) * 1000),
+                "status": status,
+                "selector": 10 if source == "home" else 0,
+                "order": [progress, duration] + [-1.0] * 14,
+                "note": "motion:%s:%s" % (state or "unknown", source),
+            })
+        except Exception as exc:
+            self.publish_status("ERROR", "BAD_MOTION_STATUS", str(exc))
 
     def on_matlab_dataplot(self, msg):
         if time.time() - self.last_imitation_state_time < 1.0:
@@ -392,10 +442,15 @@ class H5UdpBridge(object):
                 "updated telemetry target from UDP command source",
                 {"target_ip": self.target_ip, "target_port": self.target_port},
             )
-        self.publish_json(self.command_pub, command)
-
         requested_source = source_switch_from_note(command["note"])
         if requested_source is not None:
+            if self.motion_active and requested_source not in set(["home", "preset", "estop"]):
+                self.publish_status(
+                    "WARNING", "SOURCE_SWITCH_REJECTED",
+                    "runtime motion is active",
+                    {"requested_source": requested_source, "active_source": self.active_source},
+                )
+                return
             self.set_active_source(requested_source)
             return
 
@@ -403,6 +458,9 @@ class H5UdpBridge(object):
         if command["emergency_stop"]:
             self.set_active_source("estop", "ESTOP_SOURCE")
             command_source = "estop"
+        elif command_source in set(["home", "preset"]):
+            self.set_active_source(command_source, "SYSTEM_COMMAND_SOURCE")
+            self.motion_active = True
         elif command_source not in LOCAL_H5_SOURCES or command_source != self.active_source:
             self.publish_status(
                 "WARNING",
@@ -412,9 +470,22 @@ class H5UdpBridge(object):
             )
             return
 
+        now = time.time()
+        for key, seen_at in list(self.recent_command_keys.items()):
+            if now - seen_at > 10.0:
+                del self.recent_command_keys[key]
+        command_key = (command_source, command["ind"], command["time"])
+        if command_key in self.recent_command_keys:
+            return
+        self.recent_command_keys[command_key] = now
+        command["ros_publish_time_ns"] = int(time.time() * 1000000000)
+        self.write_latency_trace(command)
+        self.publish_json(self.command_pub, command)
+
         # 转发为期望关节角到 /pub_joint_state
         imu_msg = Imu()
-        imu_msg.header.stamp = rospy.Time.now()
+        imu_msg.header.seq = command["ind"]
+        imu_msg.header.stamp = rospy.Time.from_sec(float(command["time"]) / 1000.0)
         imu_msg.header.frame_id = "h5:%s" % command_source
         # 将UDP传来的 order 数据映射为期望关节角
         imu_msg.orientation.x = command["order"][0]  # expect_q1
@@ -434,9 +505,9 @@ class H5UdpBridge(object):
             self.publish_status("ERROR", "ESTOP_COMMAND", "received emergency stop command", {"source": command["source"]})
 
     def spin(self):
-        rospy.loginfo("h5_udp_bridge listening on %s:%d", self.listen_ip, self.listen_port)
-        if self.target_ip:
-            rospy.loginfo("h5_udp_bridge telemetry target %s:%d", self.target_ip, self.target_port)
+        # rospy.loginfo("h5_udp_bridge listening on %s:%d", self.listen_ip, self.listen_port)
+        # if self.target_ip:
+        #     rospy.loginfo("h5_udp_bridge telemetry target %s:%d", self.target_ip, self.target_port)
 
         next_heartbeat = 0.0
         timeout = 1.0 / max(1.0, self.heartbeat_hz)

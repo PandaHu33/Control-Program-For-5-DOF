@@ -1,5 +1,6 @@
 import base64
 import binascii
+import csv
 import hashlib
 import json
 import math
@@ -28,6 +29,25 @@ except ImportError:
         arbitrate_ws_frame,
         normalize_arm_mode,
         normalize_client_id,
+    )
+
+try:
+    from experiment_metrics import (
+        RAW_COLUMNS,
+        SUMMARY_COLUMNS,
+        compute_trial_summary,
+        normalize_raw_sample,
+        normalize_success,
+        safe_slug,
+    )
+except ImportError:
+    from control_ui.experiment_metrics import (
+        RAW_COLUMNS,
+        SUMMARY_COLUMNS,
+        compute_trial_summary,
+        normalize_raw_sample,
+        normalize_success,
+        safe_slug,
     )
 
 
@@ -138,6 +158,8 @@ jetson_cfg = cfg.get("jetson", {})
 program_cfg = cfg.get("programs", {})
 local_check_cfg = cfg.get("local_checks", {})
 hand_control_cfg = cfg.get("hand_control", {})
+experiment_cfg = cfg.get("experiment", {})
+arm_control_cfg = cfg.get("arm_control", {})
 
 SSH_COMMON_OPTIONS = [
     "-o", "BatchMode=yes",
@@ -170,6 +192,11 @@ HAND_CONTROL_REPEAT_COUNT = max(1, int(local_check_cfg.get("hand_control_repeat_
 HAND_CONTROL_REPEAT_INTERVAL_SEC = max(0.0, float(local_check_cfg.get("hand_control_repeat_interval_sec", 0.025)))
 LOOP_FILTER = str(udp_cfg.get("loop_filter", 1)).lower() not in ["0", "false", "no"]
 LOOP_FILTER_WINDOW = float(udp_cfg.get("loop_filter_window", 0.5))
+EXPERIMENT_LOG_DIR = BASE_DIR / str(experiment_cfg.get("log_dir", "experiment_logs"))
+RUNTIME_MOTION_DURATION_SEC = max(0.001, float(arm_control_cfg.get("runtime_motion_duration_sec", 5.0)))
+ARM_LEGACY_HOME_FALLBACK = str(arm_control_cfg.get("legacy_home_fallback", False)).strip().lower() in {"1", "true", "yes", "on"}
+LATENCY_TRACE_ENABLED = str(arm_control_cfg.get("latency_trace_enabled", False)).strip().lower() in {"1", "true", "yes", "on"}
+LATENCY_TRACE_LOG_DIR = BASE_DIR / str(arm_control_cfg.get("latency_trace_log_dir", "latency_logs"))
 
 
 def config_bool(value, default=False):
@@ -210,7 +237,11 @@ STATUS_CLIENTS = set()
 CLIENT_LOCK = threading.RLock()
 STATE_LOCK = threading.RLock()
 CAMERA_FRAME_LOCK = threading.RLock()
+EXPERIMENT_LOCK = threading.RLock()
+ARM_COMMAND_LOCK = threading.RLock()
+LATENCY_TRACE_LOCK = threading.RLock()
 LOGS = deque(maxlen=300)
+PENDING_ARM_COMMANDS = {}
 PROCESSES = {}
 LAST_UDP_RESET_LOG = 0.0
 LAST_CAMERA_STATUS_PUSH = 0.0
@@ -221,6 +252,153 @@ CAMERA_FRAME = {
     "time": 0.0,
     "seq": 0,
 }
+
+
+def experiment_date_key():
+    return time.strftime("%Y%m%d", time.localtime())
+
+
+def experiment_day_dir(day=None):
+    return EXPERIMENT_LOG_DIR / (safe_slug(day or experiment_date_key(), experiment_date_key()))
+
+
+def experiment_raw_dir(day=None):
+    return experiment_day_dir(day) / "raw"
+
+
+def experiment_paths(trial_id, day=None):
+    safe_id = safe_slug(trial_id, "trial")
+    day_dir = experiment_day_dir(day)
+    return {
+        "day_dir": day_dir,
+        "raw_dir": day_dir / "raw",
+        "raw_file": day_dir / "raw" / f"{safe_id}_samples.csv",
+        "summary_file": day_dir / "summary.csv",
+    }
+
+
+def ensure_csv_header(path, columns):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    needs_header = not path.exists() or path.stat().st_size == 0
+    if needs_header:
+        with path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=columns)
+            writer.writeheader()
+
+
+def append_csv_rows(path, columns, rows):
+    if not rows:
+        return 0
+    ensure_csv_header(path, columns)
+    with path.open("a", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=columns, extrasaction="ignore")
+        for row in rows:
+            writer.writerow(row)
+    return len(rows)
+
+
+def read_raw_samples(path):
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", newline="") as fh:
+        return [row for row in csv.DictReader(fh)]
+
+
+def relative_to_base(path):
+    try:
+        return str(path.resolve().relative_to(BASE_DIR.resolve()))
+    except Exception:
+        return str(path)
+
+
+def normalize_experiment_samples(samples):
+    if samples is None:
+        return []
+    if not isinstance(samples, list):
+        raise ValueError("samples must be a list")
+    return [normalize_raw_sample(sample) for sample in samples]
+
+
+def experiment_metadata_from_body(body):
+    body = body or {}
+    return {
+        "date": safe_slug(body.get("date") or experiment_date_key(), experiment_date_key()),
+        "task": safe_slug(body.get("task"), "task"),
+        "method": safe_slug(body.get("method"), "method"),
+        "trial": safe_slug(body.get("trial"), "1"),
+        "success": normalize_success(body.get("success")),
+    }
+
+
+def start_experiment_trial(body):
+    meta = experiment_metadata_from_body(body)
+    stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+    msec = int((time.time() % 1.0) * 1000)
+    trial_id = safe_slug(
+        f"{stamp}_{meta['task']}_{meta['method']}_trial{meta['trial']}_{msec:03d}",
+        "trial",
+    )
+    paths = experiment_paths(trial_id, meta["date"])
+    with EXPERIMENT_LOCK:
+        ensure_csv_header(paths["raw_file"], RAW_COLUMNS)
+        ensure_csv_header(paths["summary_file"], SUMMARY_COLUMNS)
+    return command_result(
+        True,
+        "experiment trial started",
+        {
+            "trial_id": trial_id,
+            "raw_path": relative_to_base(paths["raw_file"]),
+            "summary_path": relative_to_base(paths["summary_file"]),
+            "date": meta["date"],
+        },
+    )
+
+
+def append_experiment_samples(body):
+    body = body or {}
+    trial_id = safe_slug(body.get("trial_id"), "")
+    if not trial_id:
+        return command_result(False, "trial_id is required")
+    date_key = safe_slug(body.get("date") or experiment_date_key(), experiment_date_key())
+    try:
+        samples = normalize_experiment_samples(body.get("samples"))
+    except Exception as exc:
+        return command_result(False, str(exc))
+    paths = experiment_paths(trial_id, date_key)
+    with EXPERIMENT_LOCK:
+        count = append_csv_rows(paths["raw_file"], RAW_COLUMNS, samples)
+    return command_result(True, f"experiment samples saved: {count}", {"saved": count})
+
+
+def finish_experiment_trial(body):
+    body = body or {}
+    trial_id = safe_slug(body.get("trial_id"), "")
+    if not trial_id:
+        return command_result(False, "trial_id is required")
+    meta = experiment_metadata_from_body(body)
+    try:
+        samples = normalize_experiment_samples(body.get("samples"))
+    except Exception as exc:
+        return command_result(False, str(exc))
+    paths = experiment_paths(trial_id, meta["date"])
+    with EXPERIMENT_LOCK:
+        append_csv_rows(paths["raw_file"], RAW_COLUMNS, samples)
+        raw_rows = read_raw_samples(paths["raw_file"])
+        try:
+            summary = compute_trial_summary(meta, raw_rows)
+        except Exception as exc:
+            return command_result(False, str(exc))
+        append_csv_rows(paths["summary_file"], SUMMARY_COLUMNS, [summary])
+    return command_result(
+        True,
+        "experiment trial finished",
+        {
+            "trial_id": trial_id,
+            "summary": summary,
+            "raw_path": relative_to_base(paths["raw_file"]),
+            "summary_path": relative_to_base(paths["summary_file"]),
+        },
+    )
 
 H5_FRAME_CRC_OFFSET = 289
 H5_ORDER_COUNT = 16
@@ -235,6 +413,66 @@ ARM_PRESET_REPEAT_COUNT = 8
 ARM_PRESET_REPEAT_INTERVAL_SEC = 0.035
 ARM_TELEMETRY_TIMEOUT_SEC = 1.0
 ARM_FRAME_COUNTER = 0
+LATENCY_TRACE_COLUMNS = [
+    "date", "ind", "source", "source_time_ms", "ws_rx_ns", "udp_tx_ns", "bridge_us"
+]
+
+
+def record_latency_trace(frame, ws_rx_ns, udp_tx_ns):
+    if not LATENCY_TRACE_ENABLED or frame is None:
+        return
+    day = time.strftime("%Y%m%d", time.localtime())
+    path = LATENCY_TRACE_LOG_DIR / f"bridge_{day}.csv"
+    row = {
+        "date": day,
+        "ind": int(frame.ind),
+        "source": frame.source or "unknown",
+        "source_time_ms": int(frame.time_ms),
+        "ws_rx_ns": int(ws_rx_ns),
+        "udp_tx_ns": int(udp_tx_ns),
+        "bridge_us": (int(udp_tx_ns) - int(ws_rx_ns)) / 1000.0,
+    }
+    with LATENCY_TRACE_LOCK:
+        append_csv_rows(path, LATENCY_TRACE_COLUMNS, [row])
+
+
+def acknowledge_arm_command(ind):
+    with ARM_COMMAND_LOCK:
+        PENDING_ARM_COMMANDS.pop(int(ind) & 0xFFFFFFFF, None)
+
+
+def send_h5_arm_frame_async(frame, attempts=3):
+    ind = struct.unpack_from("<I", frame, 0)[0]
+    with ARM_COMMAND_LOCK:
+        PENDING_ARM_COMMANDS[ind] = True
+    try:
+        udp.sendto(frame, (UDP_HOST, UDP_SEND_PORT))
+    except Exception as exc:
+        acknowledge_arm_command(ind)
+        return False, str(exc), ind
+
+    def retry_worker():
+        for delay in (0.05, 0.10)[:max(0, int(attempts) - 1)]:
+            time.sleep(delay)
+            with ARM_COMMAND_LOCK:
+                if ind not in PENDING_ARM_COMMANDS:
+                    return
+            try:
+                udp.sendto(frame, (UDP_HOST, UDP_SEND_PORT))
+            except Exception:
+                break
+        with ARM_COMMAND_LOCK:
+            unacknowledged = PENDING_ARM_COMMANDS.pop(ind, None) is not None
+        if unacknowledged:
+            with STATE_LOCK:
+                motion = SYSTEM["arm_control"].get("motion", {})
+                if motion.get("ind") == ind and motion.get("state") == "accepted":
+                    motion["state"] = "failed"
+                    SYSTEM["state"] = "ERROR"
+            push_status()
+
+    threading.Thread(target=retry_worker, daemon=True, name=f"arm-command-retry-{ind}").start()
+    return True, f"H5 UDP {UDP_HOST}:{UDP_SEND_PORT} <- binary frame len={len(frame)} async", ind
 
 SYSTEM = {
     "state": "OFFLINE",
@@ -246,6 +484,14 @@ SYSTEM = {
         "last_telemetry_time": 0.0,
         "last_angles": None,
         "last_command_source": None,
+        "motion": {
+            "ind": None,
+            "source": None,
+            "state": "idle",
+            "progress": 0.0,
+            "duration_sec": RUNTIME_MOTION_DURATION_SEC,
+        },
+        "motion_companion_ok": True,
         "accepted_frames": 0,
         "rejected_frames": 0,
         "last_reject_reason": "",
@@ -407,10 +653,40 @@ def update_arm_telemetry(data):
     if expected_crc != actual_crc:
         return False
     try:
+        ind = struct.unpack_from("<I", data, 0)[0]
         angles = list(struct.unpack_from("<7f", data, 12))
     except struct.error:
         return False
     note = data[225:289].split(b"\x00", 1)[0].decode("utf-8", "ignore")
+    if note.startswith("motion:"):
+        parts = note.split(":", 2)
+        state = parts[1] if len(parts) > 1 else "unknown"
+        source = parts[2] if len(parts) > 2 else "preset"
+        try:
+            progress, duration = struct.unpack_from("<2f", data, 145)
+        except struct.error:
+            progress, duration = 0.0, RUNTIME_MOTION_DURATION_SEC
+        motion = {
+            "ind": ind,
+            "source": source,
+            "state": state,
+            "progress": max(0.0, min(1.0, float(progress))),
+            "duration_sec": max(0.0, float(duration)),
+        }
+        with STATE_LOCK:
+            control = SYSTEM["arm_control"]
+            control["last_telemetry_time"] = time.time()
+            control["motion"] = motion
+            companion_ok = bool(control.get("motion_companion_ok", True))
+            if state in {"accepted", "running"}:
+                SYSTEM["state"] = ("HOMING" if source == "home" else "MOVING") if companion_ok else "ERROR"
+            elif state == "complete":
+                SYSTEM["state"] = "READY" if companion_ok else "ERROR"
+            elif state == "failed":
+                SYSTEM["state"] = "ERROR"
+        acknowledge_arm_command(ind)
+        push_status()
+        return True
     if note == "ready" and all(abs(float(value) + 1.0) < 1e-6 for value in angles[:3]):
         return False
     if not all(math.isfinite(float(value)) for value in angles[:4]):
@@ -810,7 +1086,7 @@ def send_arm_home_frame():
         [0.0] * H5_ORDER_COUNT,
         "bridge:home",
     )
-    return send_h5_arm_frame(frame, ARM_HOME_REPEAT_COUNT, ARM_HOME_REPEAT_INTERVAL_SEC)
+    return send_h5_arm_frame_async(frame)
 
 
 def send_arm_source_frame(mode):
@@ -848,16 +1124,16 @@ def acquire_arm_authority(mode, owner_id=None, require_telemetry=False):
 
 def send_arm_preset_frame(degrees, name="preset"):
     if not isinstance(degrees, list) or len(degrees) != 4:
-        return False, "degrees must contain exactly four joint angles"
+        return False, "degrees must contain exactly four joint angles", None
     try:
         radians = [math.radians(float(value)) for value in degrees]
     except (TypeError, ValueError):
-        return False, "degrees must contain finite numbers"
+        return False, "degrees must contain finite numbers", None
     if not all(math.isfinite(value) for value in radians):
-        return False, "degrees must contain finite numbers"
+        return False, "degrees must contain finite numbers", None
     order = radians + [0.0] * (H5_ORDER_COUNT - len(radians))
     frame = pack_h5_arm_command_frame(0x40, order, f"bridge:preset:{str(name or 'preset')[:40]}")
-    return send_h5_arm_frame(frame, ARM_PRESET_REPEAT_COUNT, ARM_PRESET_REPEAT_INTERVAL_SEC)
+    return send_h5_arm_frame_async(frame)
 
 
 HAND_PRESETS = {
@@ -963,9 +1239,19 @@ def do_command(method, path, body=None):
     log_event("ACTION", f"{method} {path}")
     if path == "/api/status":
         return command_result(True, "状态已返回")
+    if path == "/api/experiment/trial/start" and method == "POST":
+        return start_experiment_trial(body)
+    if path == "/api/experiment/trial/samples" and method == "POST":
+        return append_experiment_samples(body)
+    if path == "/api/experiment/trial/finish" and method == "POST":
+        return finish_experiment_trial(body)
     if path == "/api/arm/control" and method == "POST":
         requested_mode = str((body or {}).get("mode") or "").strip().lower()
         requested_owner = normalize_client_id((body or {}).get("client_id"))
+        with STATE_LOCK:
+            motion_state = str(SYSTEM["arm_control"].get("motion", {}).get("state") or "idle")
+        if motion_state in {"accepted", "running"}:
+            return command_result(False, "runtime arm motion is active; manual control remains locked")
         if requested_mode == "idle":
             _current_mode, current_owner = current_arm_authority()
             if current_owner and requested_owner != current_owner:
@@ -987,10 +1273,25 @@ def do_command(method, path, body=None):
             return command_result(False, "arm telemetry is stale; preset was not sent")
         degrees = (body or {}).get("degrees")
         name = str((body or {}).get("name") or "preset")
-        ok, msg = acquire_arm_authority("preset")
+        ok, msg, command_ind = send_arm_preset_frame(degrees, name)
         if ok:
-            ok, msg = send_arm_preset_frame(degrees, name)
-        return command_result(ok, f"arm preset sent: {name}" if ok else msg, {"output": msg, "degrees": degrees})
+            update_arm_authority_state("preset", None)
+            with STATE_LOCK:
+                SYSTEM["arm_control"]["motion_companion_ok"] = True
+                SYSTEM["arm_control"]["motion"] = {
+                    "ind": command_ind, "source": "preset", "state": "accepted",
+                    "progress": 0.0, "duration_sec": RUNTIME_MOTION_DURATION_SEC,
+                }
+            set_state("MOVING", f"arm preset {name}")
+        return command_result(
+            ok,
+            f"arm preset accepted: {name}" if ok else msg,
+            {
+                "output": msg, "degrees": degrees, "command_ind": command_ind,
+                "motion_state": "accepted" if ok else "failed",
+                "duration_sec": RUNTIME_MOTION_DURATION_SEC,
+            },
+        )
     if path == "/api/system/reboot_board":
         ok, msg = ssh_run_command("sudo -n reboot", timeout=10)
         disconnected_for_reboot = "closed by remote host" in (msg or "").lower() or (
@@ -1076,17 +1377,30 @@ def do_command(method, path, body=None):
     if path == "/api/system/reset":
         with STATE_LOCK:
             SYSTEM["faults"].clear()
-        authority_ok, authority_msg = acquire_arm_authority("home")
-        arm_ok, arm_msg = send_arm_home_frame()
-        legacy_arm_ok, legacy_arm_msg = send_udp(MATLAB_HOST, MATLAB_PORT, "HOME")
-        arm_ok = authority_ok and (arm_ok or legacy_arm_ok)
-        arm_msg = f"authority {authority_msg}; {arm_msg}; legacy {legacy_arm_msg}"
+        arm_ok, arm_msg, command_ind = send_arm_home_frame()
+        legacy_arm_ok, legacy_arm_msg = False, "disabled"
+        if ARM_LEGACY_HOME_FALLBACK and not arm_ok:
+            legacy_arm_ok, legacy_arm_msg = send_udp(MATLAB_HOST, MATLAB_PORT, "HOME")
+        arm_ok = arm_ok or legacy_arm_ok
+        if arm_ok:
+            update_arm_authority_state("home", None)
         hand_ok, hand_msg = send_hand_control("preset", HAND_PRESETS["reset"], "reset")
-        set_state("READY" if arm_ok and hand_ok else "ERROR", "复位：机械臂 0/0/0，灵巧手 2000")
+        with STATE_LOCK:
+            SYSTEM["arm_control"]["motion_companion_ok"] = bool(hand_ok)
+            SYSTEM["arm_control"]["motion"] = {
+                "ind": command_ind, "source": "home", "state": "accepted" if arm_ok else "failed",
+                "progress": 0.0, "duration_sec": RUNTIME_MOTION_DURATION_SEC,
+            }
+        set_state("HOMING" if arm_ok and hand_ok else "ERROR", "arm homing accepted")
         return command_result(
             arm_ok and hand_ok,
             "已发送复位：机械臂回 0/0/0，灵巧手回 2000",
-            {"arm_output": arm_msg, "hand_output": hand_msg, "hand_positions": HAND_PRESETS["reset"]},
+            {
+                "arm_output": arm_msg, "legacy_arm_output": legacy_arm_msg,
+                "hand_output": hand_msg, "hand_positions": HAND_PRESETS["reset"],
+                "command_ind": command_ind, "motion_state": "accepted" if arm_ok else "failed",
+                "duration_sec": RUNTIME_MOTION_DURATION_SEC,
+            },
         )
     if path == "/api/arm/start_nodes":
         ok, msg = ssh_run("start_script")
@@ -1342,6 +1656,7 @@ def websocket_client_loop(client):
             if opcode == 0x8:
                 break
             if client.path == UDP_PATH and opcode == 0x2:
+                ws_rx_ns = time.time_ns()
                 active_mode, active_owner = current_arm_authority()
                 decision = arbitrate_ws_frame(
                     payload,
@@ -1357,7 +1672,9 @@ def websocket_client_loop(client):
                 if LOOP_FILTER:
                     recent_ws_crc.append((binascii.crc32(payload) & 0xFFFFFFFF, time.time(), len(payload)))
                 udp.sendto(payload, (UDP_HOST, UDP_SEND_PORT))
-                print(f"[WS->UDP] sent {len(payload)} bytes to {UDP_HOST}:{UDP_SEND_PORT}")
+                udp_tx_ns = time.time_ns()
+                record_latency_trace(decision.frame, ws_rx_ns, udp_tx_ns)
+                # Per-frame output is intentionally disabled to avoid control-path jitter.
     except Exception as exc:
         print(f"[WS] client closed: {exc}")
     finally:

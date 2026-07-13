@@ -2,7 +2,9 @@
   <arg name="listen_ip" default="0.0.0.0" />
   <arg name="listen_port" default="$(optenv H5_UDP_LISTEN_PORT 14551)" />
   <arg name="telemetry_target_ip" default="$(optenv H5_TELEMETRY_TARGET_IP 192.168.1.11)" />
-  <arg name="telemetry_target_port" default="$(optenv H5_TELEMETRY_TARGET_PORT 14550)" />
+    <arg name="telemetry_target_port" default="$(optenv H5_TELEMETRY_TARGET_PORT 14550)" />
+    <arg name="latency_trace_enabled" default="false" />
+    <arg name="latency_trace_path" default="/tmp/h5_latency_trace.csv" />
 
   <node pkg="h5_udp_bridge" type="h5_udp_bridge_node.py" name="h5_udp_bridge" output="screen">
     <param name="listen_ip" value="$(arg listen_ip)" />
@@ -17,6 +19,9 @@
     <param name="matlab_dataplot_topic" value="/Matlab/dataplot" />
     <param name="imitation_state_topic" value="/robot/imitation_state" />
     <param name="joint_states_topic" value="/joint_states" />
+    <param name="motion_status_topic" value="/arm/motion_status" />
+    <param name="latency_trace_enabled" value="$(arg latency_trace_enabled)" />
+    <param name="latency_trace_path" value="$(arg latency_trace_path)" />
     <param name="drop_bad_crc" value="true" />
     <param name="command_timeout_sec" value="1.0" />
     <param name="send_heartbeat" value="true" />
