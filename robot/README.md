@@ -75,6 +75,20 @@ UDP_BRIDGE_CMD="roslaunch h5_udp_bridge h5_udp_bridge.launch"
 
 with your real package, launch file, and workspace.
 
+The 100 Hz joint planner and motion CSV logger are both disabled by default.
+Enable them for a planned-data run with a fresh output path:
+
+```bash
+export ARM_TRAJECTORY_PLANNER_ENABLE=1
+export ARM_MOTION_DATA_LOG_ENABLE=1
+export ARM_MOTION_DATA_LOG_PATH=/home/night/robot/logs/arm_motion_planned.csv
+/home/night/robot/start_arm.sh
+```
+
+For the unplanned A/B baseline, leave `ARM_TRAJECTORY_PLANNER_ENABLE=0` and
+use a different `ARM_MOTION_DATA_LOG_PATH`. Restart the arm node after changing
+either switch; they are startup-only settings.
+
 For the template bridge package, use:
 
 ```bash

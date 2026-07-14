@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.0.2)
 project(mainpulator)
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 ## Compile as C++11, supported in ROS Kinetic and newer
 # add_compile_options(-std=c++11)
 
@@ -18,7 +22,15 @@ find_package(catkin REQUIRED COMPONENTS
 #uncomment the following 4 lines to use the Eigen library
 find_package(cmake_modules REQUIRED)
 find_package(Eigen3 REQUIRED)
-find_package(qpOASES REQUIRED)
+find_package(qpOASES QUIET)
+if(qpOASES_FOUND)
+  set(QPOASES_LINK_LIBRARIES qpOASES)
+else()
+  find_package(qpoases_vendor REQUIRED)
+  set(qpOASES_INCLUDE_DIRS ${qpoases_vendor_INCLUDE_DIRS})
+  set(QPOASES_LINK_LIBRARIES ${qpoases_vendor_LIBRARIES})
+endif()
+find_package(Threads REQUIRED)
 include_directories(
     ${EIGEN3_INCLUDE_DIR}
     ${qpOASES_INCLUDE_DIRS})
@@ -140,6 +152,7 @@ catkin_package(
 ## Your package locations should be listed before other locations
 include_directories(
   include
+  third_party/ruckig/include
   ${catkin_INCLUDE_DIRS}
 )
 include_directories("../mainpulator/include/mavlink/common")#引入mavlink的库
@@ -148,6 +161,21 @@ include_directories("../mainpulator/include/mavlink/ardupilotmega")#引入mavlin
 # add_library(${PROJECT_NAME}
 #   src/${PROJECT_NAME}/mainpulator.cpp
 # )
+add_library(ruckig_local
+  third_party/ruckig/src/ruckig/brake.cpp
+  third_party/ruckig/src/ruckig/position_first_step1.cpp
+  third_party/ruckig/src/ruckig/position_first_step2.cpp
+  third_party/ruckig/src/ruckig/position_second_step1.cpp
+  third_party/ruckig/src/ruckig/position_second_step2.cpp
+  third_party/ruckig/src/ruckig/position_third_step1.cpp
+  third_party/ruckig/src/ruckig/position_third_step2.cpp
+  third_party/ruckig/src/ruckig/velocity_second_step1.cpp
+  third_party/ruckig/src/ruckig/velocity_second_step2.cpp
+  third_party/ruckig/src/ruckig/velocity_third_step1.cpp
+  third_party/ruckig/src/ruckig/velocity_third_step2.cpp
+)
+target_include_directories(ruckig_local PUBLIC third_party/ruckig/include)
+
 add_library(mainpulator_library
   include/mainpulator/mainpulator_control.h
   src/mainpulator_control.cpp
@@ -165,9 +193,17 @@ add_library(mainpulator_library
 
   include/mainpulator/PipeFilterExpansion.h
 
+  include/mainpulator/online_joint_planner.h
+  src/online_joint_planner.cpp
+
+  include/mainpulator/motion_csv_logger.h
+  src/motion_csv_logger.cpp
+
 )
 target_link_libraries(mainpulator_library
  ${catkin_LIBRARIES}
+ ruckig_local
+ Threads::Threads
 )
 
 
@@ -209,7 +245,7 @@ add_executable(test_node src/test_node.cpp)
 target_link_libraries(test_node
    mainpulator_library
    ${catkin_LIBRARIES}
-   qpOASES
+   ${QPOASES_LINK_LIBRARIES}
 )
 # target_link_libraries(Z_demo01_pub 
 #     ${catkin_LIBRARIES}
@@ -341,10 +377,17 @@ target_link_libraries(Imu_111_Node
 #############
 
 ## Add gtest based cpp test target and link libraries
-# catkin_add_gtest(${PROJECT_NAME}-test test/test_mainpulator.cpp)
-# if(TARGET ${PROJECT_NAME}-test)
-#   target_link_libraries(${PROJECT_NAME}-test ${PROJECT_NAME})
-# endif()
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(test_online_joint_planner test/test_online_joint_planner.cpp)
+  if(TARGET test_online_joint_planner)
+    target_link_libraries(test_online_joint_planner mainpulator_library)
+  endif()
+
+  catkin_add_gtest(test_motion_csv_logger test/test_motion_csv_logger.cpp)
+  if(TARGET test_motion_csv_logger)
+    target_link_libraries(test_motion_csv_logger mainpulator_library)
+  endif()
+endif()
 
 ## Add folders to be run by python nosetests
 # catkin_add_nosetests(test)

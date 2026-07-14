@@ -24,7 +24,10 @@ export ARM_CONTROL_TYPE="${ARM_CONTROL_TYPE:-torque}"
 export ARM_HOME_TIMEOUT="${ARM_HOME_TIMEOUT:-12}"
 export ARM_RUNTIME_MOTION_DURATION="${ARM_RUNTIME_MOTION_DURATION:-5.0}"
 export ARM_LATENCY_TRACE_ENABLE="${ARM_LATENCY_TRACE_ENABLE:-0}"
-export ARM_CMD="${ARM_CMD:-roslaunch mainpulator mainpulatorlaunch.launch control_type:=${ARM_CONTROL_TYPE} runtime_motion_duration:=${ARM_RUNTIME_MOTION_DURATION} latency_trace_enabled:=${ARM_LATENCY_TRACE_ENABLE}}"
+export ARM_TRAJECTORY_PLANNER_ENABLE="${ARM_TRAJECTORY_PLANNER_ENABLE:-1}"
+export ARM_MOTION_DATA_LOG_ENABLE="${ARM_MOTION_DATA_LOG_ENABLE:-1}"
+export ARM_MOTION_DATA_LOG_PATH="${ARM_MOTION_DATA_LOG_PATH:-${ROBOT_LOG_DIR}/arm_motion_planned_2x.csv}"
+export ARM_CMD="${ARM_CMD:-roslaunch mainpulator mainpulatorlaunch.launch control_type:=${ARM_CONTROL_TYPE} runtime_motion_duration:=${ARM_RUNTIME_MOTION_DURATION} latency_trace_enabled:=${ARM_LATENCY_TRACE_ENABLE} trajectory_planner_enabled:=${ARM_TRAJECTORY_PLANNER_ENABLE} motion_data_log_enabled:=${ARM_MOTION_DATA_LOG_ENABLE} motion_data_log_path:=${ARM_MOTION_DATA_LOG_PATH}}"
 
 # Keep the H5 UDP bridge enabled so the UI receives arm telemetry even when
 # the low-level arm node also consumes the command stream directly.

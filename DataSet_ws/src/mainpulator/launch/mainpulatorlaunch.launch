@@ -4,6 +4,14 @@
     <arg name="runtime_motion_duration" default="5.0" />
     <arg name="latency_trace_enabled" default="false" />
     <arg name="latency_trace_path" default="/tmp/test_node_latency_trace.csv" />
+    <arg name="trajectory_planner_enabled" default="false" />
+    <arg name="trajectory_max_velocity" default="[1.0, 1.0, 1.0, 1.0]" />
+    <arg name="trajectory_max_acceleration" default="[2.0, 2.0, 2.0, 2.0]" />
+    <arg name="trajectory_max_jerk" default="[10.0, 10.0, 10.0, 10.0]" />
+    <arg name="motion_data_log_enabled" default="false" />
+    <arg name="motion_data_log_path" default="/home/night/robot/logs/arm_motion.csv" />
+    <arg name="motion_data_log_queue_capacity" default="8192" />
+    <arg name="motion_data_log_flush_rows" default="100" />
 
     <node pkg="mainpulator" type="test_node" name="test_node" output="screen" >
         <param name="control_type" type="string" value="$(arg control_type)" />
@@ -11,5 +19,13 @@
         <param name="runtime_motion_duration" type="double" value="$(arg runtime_motion_duration)" />
         <param name="latency_trace_enabled" type="bool" value="$(arg latency_trace_enabled)" />
         <param name="latency_trace_path" type="string" value="$(arg latency_trace_path)" />
+        <param name="trajectory_planner_enabled" type="bool" value="$(arg trajectory_planner_enabled)" />
+        <rosparam param="trajectory_max_velocity" subst_value="true">$(arg trajectory_max_velocity)</rosparam>
+        <rosparam param="trajectory_max_acceleration" subst_value="true">$(arg trajectory_max_acceleration)</rosparam>
+        <rosparam param="trajectory_max_jerk" subst_value="true">$(arg trajectory_max_jerk)</rosparam>
+        <param name="motion_data_log_enabled" type="bool" value="$(arg motion_data_log_enabled)" />
+        <param name="motion_data_log_path" type="string" value="$(arg motion_data_log_path)" />
+        <param name="motion_data_log_queue_capacity" type="int" value="$(arg motion_data_log_queue_capacity)" />
+        <param name="motion_data_log_flush_rows" type="int" value="$(arg motion_data_log_flush_rows)" />
     </node>
 </launch>

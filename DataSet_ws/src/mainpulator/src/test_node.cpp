@@ -10,6 +10,8 @@
 
 #include "mainpulator/mainpulator_param.h"
 #include "mainpulator/mainpulator_control.h"
+#include "mainpulator/motion_csv_logger.h"
+#include "mainpulator/online_joint_planner.h"
 #include <socketcan_bridge/topic_to_socketcan.h>
 #include <socketcan_bridge/socketcan_to_topic.h>
 #include <Eigen/Eigen>
@@ -17,11 +19,14 @@
 #include <Eigen/Geometry>
 #include <Eigen/Eigenvalues>
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cstdint>
 #include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <memory>
 #include <vector>
 //用到传9消息,需要一个合适的消息类型
 #include <sensor_msgs/Imu.h>
@@ -35,6 +40,7 @@
 #define PI acos(-1)
 using namespace std;
 using namespace Eigen;
+using mainpulator_motion::JointVector;
 
 enum class ControlMode
 {
@@ -47,6 +53,21 @@ ControlMode control_mode = ControlMode::Torque;
 string active_control_source = "idle";
 double torque_home_duration = 5.0;
 double runtime_motion_duration = 5.0;
+double runtime_motion_report_duration = 5.0;
+bool trajectory_planner_enabled = false;
+std::unique_ptr<mainpulator_motion::OnlineJointPlanner> online_joint_planner;
+bool online_joint_planner_initialized = false;
+JointVector raw_target_q {{0.0, 0.0, 0.0, 0.0}};
+JointVector raw_target_dq {{0.0, 0.0, 0.0, 0.0}};
+JointVector raw_target_ddq {{0.0, 0.0, 0.0, 0.0}};
+double expect_q4_velocity = 0.0;
+double expect_q4_acceleration = 0.0;
+std::string planner_result = "disabled";
+uint32_t latest_command_ind = 0;
+std::string latest_command_source = "idle";
+bool motion_data_log_enabled = false;
+std::string motion_data_log_path = "/home/night/robot/logs/arm_motion.csv";
+std::unique_ptr<mainpulator_motion::MotionCsvLogger> motion_csv_logger;
 bool latency_trace_enabled = false;
 std::string latency_trace_path = "/tmp/test_node_latency_trace.csv";
 std::ofstream latency_trace_file;
@@ -178,10 +199,12 @@ void MainpulatorCallback(const can_msgs::Frame &receive_message);
 void TeleOperationCallback(const  sensor_msgs::Imu& msg);
 void H5TeleOperationCallback(const sensor_msgs::Imu& msg);
 void ActiveControlSourceCallback(const std_msgs::String& msg);
-void ApplyLogicalArmCommand(const sensor_msgs::Imu& msg);
+bool ApplyLogicalArmCommand(const sensor_msgs::Imu& msg, const std::string& source);
 void StartRuntimeMotion(const sensor_msgs::Imu& msg, const std::string& source);
 void CancelRuntimeMotion(const std::string& state);
 void UpdateRuntimeMotion();
+bool InitializeOnlinePlannerFromReference();
+void RecordMotionLogSample(std::uint64_t loop_index, double dt_sec);
 void PublishMotionStatus(const std::string& state, double progress, uint32_t ind, const std::string& source);
 void RecordPendingControlTrace(const sensor_msgs::Imu& msg, const std::string& source);
 void PublishPendingControlTrace();
@@ -249,6 +272,20 @@ int main(int argc, char *argv[])
     nh.param("runtime_motion_duration", runtime_motion_duration, 5.0);
     nh.param("latency_trace_enabled", latency_trace_enabled, false);
     nh.param<std::string>("latency_trace_path", latency_trace_path, "/tmp/test_node_latency_trace.csv");
+    nh.param("trajectory_planner_enabled", trajectory_planner_enabled, false);
+    std::vector<double> trajectory_max_velocity;
+    std::vector<double> trajectory_max_acceleration;
+    std::vector<double> trajectory_max_jerk;
+    nh.param("trajectory_max_velocity", trajectory_max_velocity, std::vector<double>(4, 0.5));
+    nh.param("trajectory_max_acceleration", trajectory_max_acceleration, std::vector<double>(4, 1.0));
+    nh.param("trajectory_max_jerk", trajectory_max_jerk, std::vector<double>(4, 5.0));
+    nh.param("motion_data_log_enabled", motion_data_log_enabled, false);
+    nh.param<std::string>("motion_data_log_path", motion_data_log_path,
+                          "/home/night/robot/logs/arm_motion.csv");
+    int motion_data_log_queue_capacity = 8192;
+    int motion_data_log_flush_rows = 100;
+    nh.param("motion_data_log_queue_capacity", motion_data_log_queue_capacity, 8192);
+    nh.param("motion_data_log_flush_rows", motion_data_log_flush_rows, 100);
     if (control_mode == ControlMode::Torque && torque_home_duration <= 0.0)
     {
         ROS_FATAL("torque_home_duration must be greater than zero");
@@ -258,6 +295,57 @@ int main(int argc, char *argv[])
     {
         ROS_FATAL("runtime_motion_duration must be greater than zero");
         return 2;
+    }
+    if (trajectory_planner_enabled && control_mode != ControlMode::Torque)
+    {
+        ROS_FATAL("trajectory_planner_enabled requires control_type=torque");
+        return 2;
+    }
+    if (trajectory_planner_enabled)
+    {
+        if (trajectory_max_velocity.size() != 4 || trajectory_max_acceleration.size() != 4 ||
+            trajectory_max_jerk.size() != 4)
+        {
+            ROS_FATAL("trajectory limits must each contain exactly four values");
+            return 2;
+        }
+        JointVector max_velocity;
+        JointVector max_acceleration;
+        JointVector max_jerk;
+        std::copy(trajectory_max_velocity.begin(), trajectory_max_velocity.end(), max_velocity.begin());
+        std::copy(trajectory_max_acceleration.begin(), trajectory_max_acceleration.end(), max_acceleration.begin());
+        std::copy(trajectory_max_jerk.begin(), trajectory_max_jerk.end(), max_jerk.begin());
+        online_joint_planner.reset(new mainpulator_motion::OnlineJointPlanner(0.01));
+        std::string planner_error;
+        if (!online_joint_planner->configure(max_velocity, max_acceleration, max_jerk, &planner_error))
+        {
+            ROS_FATAL("Invalid trajectory planner configuration: %s", planner_error.c_str());
+            return 2;
+        }
+        planner_result = "startup_homing";
+    }
+    if (motion_data_log_enabled)
+    {
+        if (motion_data_log_queue_capacity <= 0 || motion_data_log_flush_rows <= 0)
+        {
+            ROS_ERROR("Motion data logging disabled: queue capacity and flush rows must be positive");
+            motion_data_log_enabled = false;
+        }
+        else
+        {
+            mainpulator_motion::MotionCsvLoggerConfig logger_config;
+            logger_config.path = motion_data_log_path;
+            logger_config.queue_capacity = static_cast<std::size_t>(motion_data_log_queue_capacity);
+            logger_config.flush_rows = static_cast<std::size_t>(motion_data_log_flush_rows);
+            motion_csv_logger.reset(new mainpulator_motion::MotionCsvLogger());
+            std::string logger_error;
+            if (!motion_csv_logger->start(logger_config, &logger_error))
+            {
+                ROS_ERROR("Motion data logging disabled: %s", logger_error.c_str());
+                motion_csv_logger.reset();
+                motion_data_log_enabled = false;
+            }
+        }
     }
     private_node_handle = &nh;
     if (latency_trace_enabled)
@@ -415,8 +503,13 @@ int main(int argc, char *argv[])
     fv(1,0)  = 13.758;
     fv(2,0) = 12.865; 
 
+    std::uint64_t loop_index = 0;
+    ros::WallTime previous_loop_time = ros::WallTime::now();
     while (ros::ok())
     {
+        const ros::WallTime loop_time = ros::WallTime::now();
+        const double loop_dt_sec = (loop_time - previous_loop_time).toSec();
+        previous_loop_time = loop_time;
         static long run_times = 0;
         if (run_times++ % 100 == 0)
         {
@@ -462,6 +555,8 @@ int main(int argc, char *argv[])
         {
             UpdateRuntimeMotion();
         }
+
+        RecordMotionLogSample(loop_index++, loop_dt_sec);
         
         // 【新增代码】发布机械臂的当前关节状态给模仿学习节点
         sensor_msgs::JointState current_imitation_state;
@@ -665,6 +760,11 @@ int main(int argc, char *argv[])
         socketcan_send_pub.publish(frames);
         loop_rate.sleep();
     }
+    if (motion_csv_logger)
+    {
+        motion_csv_logger->stop();
+    }
+    return 0;
 }
 
 
@@ -701,6 +801,80 @@ Vector3d VirtualForceGeneration(Vector3d& q, Vector3d& car_position)
 
 }
 // 遥操作回调函数
+bool InitializeOnlinePlannerFromReference()
+{
+    if (!trajectory_planner_enabled || !online_joint_planner)
+    {
+        return false;
+    }
+    const JointVector position {{expect_q(0,0), expect_q(1,0), expect_q(2,0), joint4_actual_angle}};
+    const JointVector velocity {{expect_dq(0,0), expect_dq(1,0), expect_dq(2,0), joint4_actual_velocity}};
+    const JointVector acceleration {{expect_ddq(0,0), expect_ddq(1,0), expect_ddq(2,0), 0.0}};
+    std::string error;
+    if (!online_joint_planner->initialize(position, velocity, acceleration, &error))
+    {
+        ROS_ERROR("Failed to initialize online trajectory planner: %s", error.c_str());
+        planner_result = "error_initialization";
+        return false;
+    }
+    raw_target_q = position;
+    raw_target_dq = velocity;
+    raw_target_ddq = acceleration;
+    joint4angle = position[3];
+    expect_q4_velocity = velocity[3];
+    expect_q4_acceleration = acceleration[3];
+    online_joint_planner_initialized = true;
+    planner_result = "initialized";
+    return true;
+}
+
+void RecordMotionLogSample(std::uint64_t loop_index, double dt_sec)
+{
+    if (!motion_data_log_enabled || !motion_csv_logger || !motion_csv_logger->running())
+    {
+        return;
+    }
+
+    mainpulator_motion::MotionLogSample sample;
+    sample.wall_time_ns = ros::WallTime::now().toNSec();
+    sample.ros_time_ns = ros::Time::now().toNSec();
+    sample.loop_index = loop_index;
+    sample.dt_sec = dt_sec;
+    sample.active_source = active_control_source;
+    sample.command_ind = latest_command_ind;
+    sample.planner_enabled = trajectory_planner_enabled && online_joint_planner_initialized &&
+                             !startup_homing_active;
+    sample.planner_result = startup_homing_active ? "startup_homing" : planner_result;
+
+    JointVector logged_raw_q = raw_target_q;
+    JointVector logged_raw_dq = raw_target_dq;
+    JointVector logged_raw_ddq = raw_target_ddq;
+    if (startup_homing_active)
+    {
+        logged_raw_q = JointVector {{expect_q(0,0), expect_q(1,0), expect_q(2,0), joint4_actual_angle}};
+        logged_raw_dq = JointVector {{expect_dq(0,0), expect_dq(1,0), expect_dq(2,0), 0.0}};
+        logged_raw_ddq = JointVector {{expect_ddq(0,0), expect_ddq(1,0), expect_ddq(2,0), 0.0}};
+    }
+    const JointVector expected_position {{expect_q(0,0), expect_q(1,0), expect_q(2,0), joint4angle}};
+    const JointVector expected_velocity {{expect_dq(0,0), expect_dq(1,0), expect_dq(2,0), expect_q4_velocity}};
+    const JointVector expected_acceleration {{expect_ddq(0,0), expect_ddq(1,0), expect_ddq(2,0), expect_q4_acceleration}};
+    const JointVector actual_position {{q(0,0), q(1,0), q(2,0), joint4_actual_angle}};
+    const JointVector actual_velocity {{dq(0,0), dq(1,0), dq(2,0), joint4_actual_velocity}};
+    for (std::size_t joint = 0; joint < 4; ++joint)
+    {
+        const double sign = joint == 0 ? -1.0 : 1.0;
+        sample.raw_q[joint] = sign * logged_raw_q[joint];
+        sample.raw_dq[joint] = sign * logged_raw_dq[joint];
+        sample.raw_ddq[joint] = sign * logged_raw_ddq[joint];
+        sample.expected_q[joint] = sign * expected_position[joint];
+        sample.expected_dq[joint] = sign * expected_velocity[joint];
+        sample.expected_ddq[joint] = sign * expected_acceleration[joint];
+        sample.actual_q[joint] = sign * actual_position[joint];
+        sample.actual_dq[joint] = sign * actual_velocity[joint];
+    }
+    motion_csv_logger->push(sample);
+}
+
 void PublishMotionStatus(const std::string& state, double progress, uint32_t ind, const std::string& source)
 {
     if (!motion_status_pub) return;
@@ -711,7 +885,7 @@ void PublishMotionStatus(const std::string& state, double progress, uint32_t ind
            << ",\"source\":\"" << source
            << "\",\"state\":\"" << state
            << "\",\"progress\":" << std::max(0.0, std::min(1.0, progress))
-           << ",\"duration_sec\":" << runtime_motion_duration
+           << ",\"duration_sec\":" << runtime_motion_report_duration
            << ",\"stamp\":" << ros::Time::now().toSec() << "}";
     message.data = stream.str();
     motion_status_pub.publish(message);
@@ -760,6 +934,36 @@ void StartRuntimeMotion(const sensor_msgs::Imu& msg, const std::string& source)
     {
         return;
     }
+    if (trajectory_planner_enabled)
+    {
+        if (!ApplyLogicalArmCommand(msg, source))
+        {
+            PublishMotionStatus("failed", 0.0, msg.header.seq, source);
+            return;
+        }
+        if (runtime_motion.active)
+        {
+            PublishMotionStatus("preempted",
+                                online_joint_planner ? online_joint_planner->progress() : 0.0,
+                                runtime_motion.ind, runtime_motion.source);
+        }
+        runtime_motion.active = true;
+        runtime_motion.ind = msg.header.seq;
+        runtime_motion.source = source;
+        runtime_motion.start_time = ros::WallTime::now();
+        runtime_motion.last_status_progress = -1.0;
+        runtime_motion_report_duration = 0.0;
+        runtime_motion_id_valid = true;
+        last_runtime_motion_ind = msg.header.seq;
+        last_runtime_motion_source = source;
+        last_runtime_motion_stamp = msg.header.stamp;
+        latest_command_ind = msg.header.seq;
+        latest_command_source = source;
+        if (private_node_handle != NULL) private_node_handle->setParam("runtime_motion_complete", false);
+        PublishMotionStatus("accepted", 0.0, runtime_motion.ind, runtime_motion.source);
+        RecordPendingControlTrace(msg, source);
+        return;
+    }
     if (runtime_motion.active)
     {
         const double elapsed = (ros::WallTime::now() - runtime_motion.start_time).toSec();
@@ -770,7 +974,11 @@ void StartRuntimeMotion(const sensor_msgs::Imu& msg, const std::string& source)
     const Vector3d start_q = expect_q;
     const Vector3d start_dq = expect_dq;
     const Vector3d start_ddq = expect_ddq;
-    ApplyLogicalArmCommand(msg);
+    if (!ApplyLogicalArmCommand(msg, source))
+    {
+        PublishMotionStatus("failed", 0.0, msg.header.seq, source);
+        return;
+    }
     const Vector3d target_q = expect_q;
     expect_q = start_q;
     expect_dq = start_dq;
@@ -799,10 +1007,13 @@ void StartRuntimeMotion(const sensor_msgs::Imu& msg, const std::string& source)
     runtime_motion.source = source;
     runtime_motion.start_time = ros::WallTime::now();
     runtime_motion.last_status_progress = -1.0;
+    runtime_motion_report_duration = runtime_motion_duration;
     runtime_motion_id_valid = true;
     last_runtime_motion_ind = msg.header.seq;
     last_runtime_motion_source = source;
     last_runtime_motion_stamp = msg.header.stamp;
+    latest_command_ind = msg.header.seq;
+    latest_command_source = source;
     if (private_node_handle != NULL) private_node_handle->setParam("runtime_motion_complete", false);
     PublishMotionStatus("accepted", 0.0, runtime_motion.ind, runtime_motion.source);
     RecordPendingControlTrace(msg, source);
@@ -810,6 +1021,91 @@ void StartRuntimeMotion(const sensor_msgs::Imu& msg, const std::string& source)
 
 void UpdateRuntimeMotion()
 {
+    if (trajectory_planner_enabled)
+    {
+        if (!online_joint_planner_initialized && !InitializeOnlinePlannerFromReference())
+        {
+            expect_dq.setZero();
+            expect_ddq.setZero();
+            expect_q4_velocity = 0.0;
+            expect_q4_acceleration = 0.0;
+            if (runtime_motion.active)
+            {
+                runtime_motion.active = false;
+                if (private_node_handle != NULL) private_node_handle->setParam("runtime_motion_complete", true);
+                PublishMotionStatus("failed", 0.0, runtime_motion.ind, runtime_motion.source);
+            }
+            else
+            {
+                PublishMotionStatus("failed", 0.0, latest_command_ind, latest_command_source);
+            }
+            return;
+        }
+
+        const ruckig::Result result = online_joint_planner->update();
+        planner_result = mainpulator_motion::OnlineJointPlanner::resultName(result);
+        if (result == ruckig::Result::Working || result == ruckig::Result::Finished)
+        {
+            const JointVector& planned_q = online_joint_planner->position();
+            const JointVector& planned_dq = online_joint_planner->velocity();
+            const JointVector& planned_ddq = online_joint_planner->acceleration();
+            for (int joint = 0; joint < 3; ++joint)
+            {
+                expect_q(joint,0) = planned_q[static_cast<std::size_t>(joint)];
+                expect_dq(joint,0) = planned_dq[static_cast<std::size_t>(joint)];
+                expect_ddq(joint,0) = planned_ddq[static_cast<std::size_t>(joint)];
+            }
+            joint4angle = planned_q[3];
+            expect_q4_velocity = planned_dq[3];
+            expect_q4_acceleration = planned_ddq[3];
+            runtime_motion_report_duration = online_joint_planner->trajectoryDuration();
+
+            if (runtime_motion.active)
+            {
+                const double progress = online_joint_planner->progress();
+                if (runtime_motion.last_status_progress < 0.0 ||
+                    progress - runtime_motion.last_status_progress >= 0.02)
+                {
+                    PublishMotionStatus("running", progress, runtime_motion.ind, runtime_motion.source);
+                    runtime_motion.last_status_progress = progress;
+                }
+                if (result == ruckig::Result::Finished)
+                {
+                    runtime_motion.active = false;
+                    if (private_node_handle != NULL) private_node_handle->setParam("runtime_motion_complete", true);
+                    PublishMotionStatus("complete", 1.0, runtime_motion.ind, runtime_motion.source);
+                }
+            }
+            return;
+        }
+
+        const JointVector& held_q = online_joint_planner->position();
+        expect_q(0,0) = held_q[0];
+        expect_q(1,0) = held_q[1];
+        expect_q(2,0) = held_q[2];
+        joint4angle = held_q[3];
+        expect_dq.setZero();
+        expect_ddq.setZero();
+        expect_q4_velocity = 0.0;
+        expect_q4_acceleration = 0.0;
+        const double failure_progress = online_joint_planner->progress();
+        online_joint_planner->hold();
+        ROS_ERROR_THROTTLE(1.0, "Online trajectory planner failed: %s", planner_result.c_str());
+        if (runtime_motion.active)
+        {
+            runtime_motion.active = false;
+            if (private_node_handle != NULL) private_node_handle->setParam("runtime_motion_complete", true);
+            PublishMotionStatus("failed", failure_progress,
+                                runtime_motion.ind, runtime_motion.source);
+        }
+        else
+        {
+            PublishMotionStatus("failed", failure_progress,
+                                latest_command_ind, latest_command_source);
+        }
+        return;
+    }
+
     if (!runtime_motion.active) return;
     const double elapsed = (ros::WallTime::now() - runtime_motion.start_time).toSec();
     const double t = std::max(0.0, std::min(runtime_motion_duration, elapsed));
@@ -844,6 +1140,40 @@ void UpdateRuntimeMotion()
 
 void CancelRuntimeMotion(const std::string& state)
 {
+    if (trajectory_planner_enabled)
+    {
+        if (runtime_motion.active)
+        {
+            PublishMotionStatus(state,
+                                online_joint_planner ? online_joint_planner->progress() : 0.0,
+                                runtime_motion.ind, runtime_motion.source);
+        }
+        runtime_motion.active = false;
+        expect_q = q;
+        expect_dq.setZero();
+        expect_ddq.setZero();
+        joint4angle = joint4_actual_angle;
+        expect_q4_velocity = 0.0;
+        expect_q4_acceleration = 0.0;
+        raw_target_q = JointVector {{q(0,0), q(1,0), q(2,0), joint4_actual_angle}};
+        raw_target_dq.fill(0.0);
+        raw_target_ddq.fill(0.0);
+        KB_D = 0.0;
+        planner_result = "estop_hold";
+        if (online_joint_planner)
+        {
+            std::string error;
+            online_joint_planner_initialized = online_joint_planner->initialize(
+                raw_target_q, raw_target_dq, raw_target_ddq, &error);
+            if (!online_joint_planner_initialized)
+            {
+                planner_result = "error_estop_hold";
+                ROS_ERROR("Failed to reset planner during stop: %s", error.c_str());
+            }
+        }
+        if (private_node_handle != NULL) private_node_handle->setParam("runtime_motion_complete", true);
+        return;
+    }
     if (!runtime_motion.active) return;
     const double elapsed = (ros::WallTime::now() - runtime_motion.start_time).toSec();
     PublishMotionStatus(state, elapsed / runtime_motion_duration,
@@ -892,7 +1222,7 @@ void TeleOperationCallback(const sensor_msgs::Imu& msg)
         return;
     }
     if (active_control_source != "teleop") return;
-    ApplyLogicalArmCommand(msg);
+    ApplyLogicalArmCommand(msg, "teleop");
 }
 
 void H5TeleOperationCallback(const sensor_msgs::Imu& msg)
@@ -915,16 +1245,73 @@ void H5TeleOperationCallback(const sensor_msgs::Imu& msg)
         return;
     }
     if (runtime_motion.active) return;
-    ApplyLogicalArmCommand(msg);
+    if (trajectory_planner_enabled && command_source == "estop")
+    {
+        CancelRuntimeMotion("preempted");
+        RecordPendingControlTrace(msg, command_source);
+        return;
+    }
+    ApplyLogicalArmCommand(msg, command_source);
     RecordPendingControlTrace(msg, command_source);
 }
 
-void ApplyLogicalArmCommand(const sensor_msgs::Imu& msg)
+bool ApplyLogicalArmCommand(const sensor_msgs::Imu& msg, const std::string& source)
 {
-    expect_q(0,0) = -msg.orientation.x;
-    expect_q(1,0) = msg.orientation.y;
-    expect_q(2,0) = msg.orientation.z;
-    joint4angle = msg.orientation.w;
+    JointVector target_q {{-msg.orientation.x, msg.orientation.y, msg.orientation.z, msg.orientation.w}};
+    JointVector target_dq {{-msg.angular_velocity.x, msg.angular_velocity.y,
+                            msg.angular_velocity.z, 0.0}};
+    JointVector target_ddq {{-msg.linear_acceleration.x, msg.linear_acceleration.y,
+                              msg.linear_acceleration.z, 0.0}};
+    if (trajectory_planner_enabled && source != "teleop")
+    {
+        target_dq.fill(0.0);
+        target_ddq.fill(0.0);
+    }
+    const bool finite_target =
+        std::all_of(target_q.begin(), target_q.end(), [](double value) { return std::isfinite(value); }) &&
+        std::all_of(target_dq.begin(), target_dq.end(), [](double value) { return std::isfinite(value); }) &&
+        std::all_of(target_ddq.begin(), target_ddq.end(), [](double value) { return std::isfinite(value); });
+    if (!finite_target)
+    {
+        ROS_WARN("Rejected non-finite arm target from source '%s'", source.c_str());
+        return false;
+    }
+
+    if (trajectory_planner_enabled)
+    {
+        if (!online_joint_planner_initialized && !InitializeOnlinePlannerFromReference())
+        {
+            return false;
+        }
+        std::string planner_error;
+        if (!online_joint_planner->setTarget(target_q, target_dq, target_ddq, &planner_error))
+        {
+            ROS_WARN("Rejected trajectory target from source '%s': %s",
+                     source.c_str(), planner_error.c_str());
+            return false;
+        }
+    }
+    else
+    {
+        expect_q(0,0) = target_q[0];
+        expect_q(1,0) = target_q[1];
+        expect_q(2,0) = target_q[2];
+        expect_dq(0,0) = target_dq[0];
+        expect_dq(1,0) = target_dq[1];
+        expect_dq(2,0) = target_dq[2];
+        expect_ddq(0,0) = target_ddq[0];
+        expect_ddq(1,0) = target_ddq[1];
+        expect_ddq(2,0) = target_ddq[2];
+        joint4angle = target_q[3];
+        expect_q4_velocity = 0.0;
+        expect_q4_acceleration = 0.0;
+        planner_result = "disabled";
+    }
+    raw_target_q = target_q;
+    raw_target_dq = target_dq;
+    raw_target_ddq = target_ddq;
+    latest_command_ind = msg.header.seq;
+    latest_command_source = source;
 
     // ROS_INFO("expect_q1=%lf",expect_q(0,0));
     // ROS_INFO("expect_q2=%lf",expect_q(1,0));
@@ -954,6 +1341,7 @@ void ApplyLogicalArmCommand(const sensor_msgs::Imu& msg)
     {
         KB_D = 0.0;
     }
+    return true;
 }
 // 【修改代码】接收模仿学习节点下发的期望轨迹的回调函数（已集成抓手信号）
 void ImitationCallback(const sensor_msgs::JointState::ConstPtr& msg)
@@ -971,26 +1359,52 @@ void ImitationCallback(const sensor_msgs::JointState::ConstPtr& msg)
         return;
     }
 
-    // 解析消息，更新期望轨迹
-    expect_q(0,0) = -msg->position[0];
-    expect_q(1,0) = msg->position[1];
-    expect_q(2,0) = msg->position[2];
-
-    // position[3] is joint4 target angle. It is independent from J1-J3 IK.
-    joint4angle = msg->position[3];
-
-    // 解析期望角速度和角加速度（这部分不变）
-    expect_dq(0,0) = -msg->velocity[0];
-    expect_dq(1,0) = msg->velocity[1];
-    expect_dq(2,0) = msg->velocity[2];
-
-    expect_ddq(0,0) = msg->effort[0]; // 复用 effort 字段
-    expect_ddq(1,0) = msg->effort[1];
-    expect_ddq(2,0) = msg->effort[2];
-    expect_ddq(0,0) = -expect_ddq(0,0);
-
-    // 取消下面这行代码的注释以进行调试
-    // ROS_INFO("Received new trajectory: q=[%f,%f,%f], q4=%f", expect_q(0,0), expect_q(1,0), expect_q(2,0), joint4angle);
+    const JointVector target_q {{-msg->position[0], msg->position[1], msg->position[2], msg->position[3]}};
+    const JointVector target_dq {{-msg->velocity[0], msg->velocity[1], msg->velocity[2], 0.0}};
+    const JointVector target_ddq {{-msg->effort[0], msg->effort[1], msg->effort[2], 0.0}};
+    const bool finite_target =
+        std::all_of(target_q.begin(), target_q.end(), [](double value) { return std::isfinite(value); }) &&
+        std::all_of(target_dq.begin(), target_dq.end(), [](double value) { return std::isfinite(value); }) &&
+        std::all_of(target_ddq.begin(), target_ddq.end(), [](double value) { return std::isfinite(value); });
+    if (!finite_target)
+    {
+        ROS_WARN("Rejected non-finite imitation trajectory target");
+        return;
+    }
+    if (trajectory_planner_enabled)
+    {
+        if (!online_joint_planner_initialized && !InitializeOnlinePlannerFromReference())
+        {
+            return;
+        }
+        std::string planner_error;
+        if (!online_joint_planner->setTarget(target_q, target_dq, target_ddq, &planner_error))
+        {
+            ROS_WARN("Rejected imitation trajectory target: %s", planner_error.c_str());
+            return;
+        }
+    }
+    else
+    {
+        expect_q(0,0) = target_q[0];
+        expect_q(1,0) = target_q[1];
+        expect_q(2,0) = target_q[2];
+        expect_dq(0,0) = target_dq[0];
+        expect_dq(1,0) = target_dq[1];
+        expect_dq(2,0) = target_dq[2];
+        expect_ddq(0,0) = target_ddq[0];
+        expect_ddq(1,0) = target_ddq[1];
+        expect_ddq(2,0) = target_ddq[2];
+        joint4angle = target_q[3];
+        expect_q4_velocity = 0.0;
+        expect_q4_acceleration = 0.0;
+        planner_result = "disabled";
+    }
+    raw_target_q = target_q;
+    raw_target_dq = target_dq;
+    raw_target_ddq = target_ddq;
+    latest_command_ind = msg->header.seq;
+    latest_command_source = "imitation";
 }
 
 
