@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import csv
 import json
 import math
 import socket
@@ -68,9 +67,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "input": {
         "source": "vr",
-    },
-    "logging": {
-        "wrist_latency_csv": "logs/wrist_latency.csv",
     },
     "teleop": {
         "phase": "approach",
@@ -198,57 +194,7 @@ def apply_deadzone_hysteresis(value: float, deadzone: float, hysteresis: float, 
     return math.copysign(max(magnitude - deadzone, 0.0), value), True
 
 
-WRIST_LATENCY_LOG_FIELDS = [
-    "source",
-    "frame_id",
-    "unity_time",
-    "unity_send_time",
-    "python_recv_time",
-    "bridge_send_time",
-    "ros_recv_time",
-    "control_output_time",
-    "robot_feedback_time",
-    "tracking_active",
-    "control_active",
-    "phase",
-    "axis_x",
-    "axis_y",
-    "axis_z",
-    "stale",
-    "dropped",
-    "message",
-]
-
-
 VALID_VR_POSE_SOURCES = {"xr_hand_wrist", "right_controller"}
-
-
-class CsvLatencyLogger:
-    def __init__(self, path_value: Any, fieldnames: List[str]):
-        self.fieldnames = fieldnames
-        self.path = self._resolve_path(path_value)
-        if self.path is not None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-
-    @staticmethod
-    def _resolve_path(path_value: Any) -> Optional[Path]:
-        if path_value in (None, "", False):
-            return None
-        path = Path(str(path_value))
-        if not path.is_absolute():
-            path = Path(__file__).resolve().parent / path
-        return path
-
-    def write(self, row: Dict[str, Any]) -> None:
-        if self.path is None:
-            return
-        out = {key: row.get(key, "") for key in self.fieldnames}
-        needs_header = not self.path.exists() or self.path.stat().st_size == 0
-        with self.path.open("a", encoding="utf-8", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=self.fieldnames)
-            if needs_header:
-                writer.writeheader()
-            writer.writerow(out)
 
 
 @dataclass
@@ -1405,31 +1351,6 @@ def draw_vr_frame(status: Dict[str, Any]) -> bytes:
     return encoded.tobytes() if ok else b""
 
 
-def write_wrist_latency_sample(logger: CsvLatencyLogger, status: Dict[str, Any], pose: Optional[Dict[str, Any]]) -> None:
-    axis = status.get("axis") or {}
-    message = str(status.get("message", ""))
-    logger.write({
-        "source": status.get("pose_source", pose.get("source", "pico_wrist") if pose is not None else "pico_wrist"),
-        "frame_id": int(pose.get("seq", -1)) if pose is not None else "",
-        "unity_time": float(pose.get("device_time")) if pose is not None else "",
-        "unity_send_time": "",
-        "python_recv_time": float(pose.get("wall_time")) if pose is not None else "",
-        "bridge_send_time": "",
-        "ros_recv_time": "",
-        "control_output_time": float(status.get("time", time.time())),
-        "robot_feedback_time": "",
-        "tracking_active": 1 if status.get("tracking_active") else 0,
-        "control_active": 1 if status.get("control_active") else 0,
-        "phase": status.get("phase", ""),
-        "axis_x": axis.get("x", 0.0),
-        "axis_y": axis.get("y", 0.0),
-        "axis_z": axis.get("z", 0.0),
-        "stale": 1 if "stale" in message.lower() else 0,
-        "dropped": 0,
-        "message": message,
-    })
-
-
 def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: ControlSettings) -> None:
     stopped = shared.stopped
     host = str(cfg_get(config, ("vr", "host"), "127.0.0.1"))
@@ -1443,7 +1364,6 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
     )
     controller = VRWristAxisController(config, settings)
     controller_delta = ControllerDeltaAxisController(config)
-    latency_logger = CsvLatencyLogger(cfg_get(config, ("logging", "wrist_latency_csv"), ""), WRIST_LATENCY_LOG_FIELDS)
     interval = 1.0 / max(float(cfg_get(config, ("service", "event_hz"), 20.0)), 1.0)
     receiver.start()
     gesture_receiver.start()
@@ -1461,7 +1381,6 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
             controller_delta_status = controller_delta.update(controller_pose, receiver.status())
             shared.update_status(status)
             shared.update_controller_delta_status(controller_delta_status)
-            write_wrist_latency_sample(latency_logger, status, pose)
             frame = draw_vr_frame(status)
             if frame:
                 shared.update_frame(frame)

@@ -11,6 +11,7 @@ Hand_Tracker/logs/
 
 # Local packaged/runtime artifacts
 build/
+analysis_outputs/
 control_ui/bridge.exe
 
 # Python caches and local conda environments

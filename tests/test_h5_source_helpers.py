@@ -63,7 +63,6 @@ class H5SourceHelperTests(unittest.TestCase):
                 ]
 
             self.assertEqual(len(active_source_assignments(methods["__init__"])), 1, path)
-            self.assertEqual(len(active_source_assignments(methods["write_latency_trace"])), 0, path)
 
     def test_workspace_and_deployment_helpers_match(self):
         paths = [

@@ -2,8 +2,6 @@
     <arg name="control_type" default="torque" />
     <arg name="torque_home_duration" default="5.0" />
     <arg name="runtime_motion_duration" default="5.0" />
-    <arg name="latency_trace_enabled" default="false" />
-    <arg name="latency_trace_path" default="/tmp/test_node_latency_trace.csv" />
     <arg name="trajectory_planner_enabled" default="false" />
     <arg name="trajectory_max_velocity" default="[1.0, 1.0, 1.0, 1.0]" />
     <arg name="trajectory_max_acceleration" default="[2.0, 2.0, 2.0, 2.0]" />
@@ -17,8 +15,6 @@
         <param name="control_type" type="string" value="$(arg control_type)" />
         <param name="torque_home_duration" type="double" value="$(arg torque_home_duration)" />
         <param name="runtime_motion_duration" type="double" value="$(arg runtime_motion_duration)" />
-        <param name="latency_trace_enabled" type="bool" value="$(arg latency_trace_enabled)" />
-        <param name="latency_trace_path" type="string" value="$(arg latency_trace_path)" />
         <param name="trajectory_planner_enabled" type="bool" value="$(arg trajectory_planner_enabled)" />
         <rosparam param="trajectory_max_velocity" subst_value="true">$(arg trajectory_max_velocity)</rosparam>
         <rosparam param="trajectory_max_acceleration" subst_value="true">$(arg trajectory_max_acceleration)</rosparam>

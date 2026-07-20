@@ -3,9 +3,7 @@
 from __future__ import print_function
 
 import binascii
-import csv
 import json
-import os
 import select
 import socket
 import struct
@@ -149,7 +147,6 @@ def parse_command_frame(data, source):
         "crc_actual": actual_crc,
         "crc_ok": expected_crc == actual_crc,
         "recv_time": time.time(),
-        "recv_time_ns": int(time.time() * 1000000000),
     }
 
 
@@ -189,8 +186,6 @@ class H5UdpBridge(object):
         self.send_heartbeat = bool(rospy.get_param("~send_heartbeat", True))
         self.heartbeat_hz = float(rospy.get_param("~heartbeat_hz", 2.0))
         self.learn_telemetry_target = bool(rospy.get_param("~learn_telemetry_target", True))
-        self.latency_trace_enabled = bool(rospy.get_param("~latency_trace_enabled", False))
-        self.latency_trace_path = rospy.get_param("~latency_trace_path", "/tmp/h5_latency_trace.csv")
 
         command_topic = rospy.get_param("~command_topic", "/h5/arm_command")
         status_topic = rospy.get_param("~status_topic", "/h5/udp_status")
@@ -236,23 +231,6 @@ class H5UdpBridge(object):
         self.recent_command_keys = {}
         self.active_source = "idle"
         self.active_source_pub.publish(String(data=self.active_source))
-
-    def write_latency_trace(self, command):
-        if not self.latency_trace_enabled:
-            return
-        path = self.latency_trace_path
-        needs_header = not os.path.exists(path) or os.path.getsize(path) == 0
-        try:
-            with open(path, "a") as handle:
-                writer = csv.writer(handle)
-                if needs_header:
-                    writer.writerow(["ind", "source", "source_time_ms", "udp_rx_ns", "ros_publish_ns"])
-                writer.writerow([
-                    command["ind"], source_from_note(command["note"]) or "unknown",
-                    command["time"], command["recv_time_ns"], command["ros_publish_time_ns"],
-                ])
-        except Exception as exc:
-            self.publish_status("ERROR", "LATENCY_TRACE_WRITE_FAILED", str(exc))
 
     def set_active_source(self, source, event="SOURCE_SWITCH"):
         source = normalize_arm_source(source)
@@ -478,8 +456,6 @@ class H5UdpBridge(object):
         if command_key in self.recent_command_keys:
             return
         self.recent_command_keys[command_key] = now
-        command["ros_publish_time_ns"] = int(time.time() * 1000000000)
-        self.write_latency_trace(command)
         self.publish_json(self.command_pub, command)
 
         # 转发为期望关节角到 /pub_joint_state

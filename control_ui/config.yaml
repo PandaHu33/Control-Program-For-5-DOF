@@ -26,8 +26,6 @@ experiment:
 arm_control:
   runtime_motion_duration_sec: 5.0
   legacy_home_fallback: false
-    latency_trace_enabled: false
-  latency_trace_log_dir: "latency_logs"
 
 websocket:
   host: "0.0.0.0"
@@ -41,6 +39,8 @@ api:
 
 rtsp_dual_camera:
   enabled: true
+  # display: browser shows both cameras; stream: publish RTSP/HLS on startup.
+  startup_mode: "display"
   capture_backend: "latest_frame"
   left_video_device: "RGB Camera"
   left_camera_index: 1

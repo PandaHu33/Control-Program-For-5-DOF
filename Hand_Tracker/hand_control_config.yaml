@@ -8,9 +8,6 @@ service:
   mjpeg_hz: 15
   jpeg_quality: 80
 
-logging:
-  wrist_latency_csv: "logs/wrist_latency.csv"
-
 teleop:
   phase: "approach"
 

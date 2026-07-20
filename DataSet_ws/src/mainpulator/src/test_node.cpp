@@ -23,7 +23,6 @@
 #include <cctype>
 #include <cstdint>
 #include <cmath>
-#include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <memory>
@@ -68,9 +67,6 @@ std::string latest_command_source = "idle";
 bool motion_data_log_enabled = false;
 std::string motion_data_log_path = "/home/night/robot/logs/arm_motion.csv";
 std::unique_ptr<mainpulator_motion::MotionCsvLogger> motion_csv_logger;
-bool latency_trace_enabled = false;
-std::string latency_trace_path = "/tmp/test_node_latency_trace.csv";
-std::ofstream latency_trace_file;
 bool startup_homing_active = false;
 bool joint_position_received[3] = {false, false, false};
 bool joint_velocity_received[3] = {false, false, false};
@@ -92,13 +88,7 @@ uint32_t last_runtime_motion_ind = 0;
 std::string last_runtime_motion_source;
 ros::Time last_runtime_motion_stamp;
 ros::Publisher motion_status_pub;
-ros::Publisher control_trace_pub;
 ros::NodeHandle* private_node_handle = NULL;
-bool pending_control_trace = false;
-uint32_t pending_trace_ind = 0;
-std::string pending_trace_source;
-ros::Time pending_trace_source_stamp;
-ros::WallTime pending_trace_callback_time;
 control::mainpulator joint1(1, 262144); //pi   //12509
 control::mainpulator joint2(2, 262144); //pi
 control::mainpulator joint3(3, 236009); //196608//0.75pi   //236009//367081//新机械臂327680向下，65536向上
@@ -206,8 +196,6 @@ void UpdateRuntimeMotion();
 bool InitializeOnlinePlannerFromReference();
 void RecordMotionLogSample(std::uint64_t loop_index, double dt_sec);
 void PublishMotionStatus(const std::string& state, double progress, uint32_t ind, const std::string& source);
-void RecordPendingControlTrace(const sensor_msgs::Imu& msg, const std::string& source);
-void PublishPendingControlTrace();
 
 void CarPosition_Callback(const  std_msgs::Float64MultiArray& msg);
 
@@ -270,8 +258,6 @@ int main(int argc, char *argv[])
     }
     nh.param("torque_home_duration", torque_home_duration, 5.0);
     nh.param("runtime_motion_duration", runtime_motion_duration, 5.0);
-    nh.param("latency_trace_enabled", latency_trace_enabled, false);
-    nh.param<std::string>("latency_trace_path", latency_trace_path, "/tmp/test_node_latency_trace.csv");
     nh.param("trajectory_planner_enabled", trajectory_planner_enabled, false);
     std::vector<double> trajectory_max_velocity;
     std::vector<double> trajectory_max_acceleration;
@@ -348,18 +334,6 @@ int main(int argc, char *argv[])
         }
     }
     private_node_handle = &nh;
-    if (latency_trace_enabled)
-    {
-        std::ifstream existing_trace(latency_trace_path.c_str());
-        const bool trace_is_empty = !existing_trace.good() || existing_trace.peek() == std::ifstream::traits_type::eof();
-        existing_trace.close();
-        latency_trace_file.open(latency_trace_path.c_str(), std::ios::out | std::ios::app);
-        if (trace_is_empty && latency_trace_file.good())
-        {
-            latency_trace_file << "ind,source,source_stamp,callback_stamp,control_apply_stamp\n";
-            latency_trace_file.flush();
-        }
-    }
     startup_homing_active = (control_mode == ControlMode::Torque);
     nh.setParam("startup_homing_complete", false);
     nh.setParam("runtime_motion_complete", true);
@@ -391,7 +365,6 @@ int main(int argc, char *argv[])
     // 1. 发布机械臂当前状态给 AI PC
     ros::Publisher imitation_state_pub = nh.advertise<sensor_msgs::JointState>("/robot/imitation_state", 10);
     motion_status_pub = nh.advertise<std_msgs::String>("/arm/motion_status", 10, true);
-    control_trace_pub = nh.advertise<std_msgs::String>("/arm/control_trace", 50);
     // 2. 订阅来自 AI PC 的期望轨迹
     ros::Subscriber imitation_trajectory_sub = nh.subscribe<sensor_msgs::JointState>("/imitation/desired_trajectory", 10, ImitationCallback);
 
@@ -649,7 +622,6 @@ int main(int argc, char *argv[])
         //ROS_INFO("car_position = %lf, %lf, %lf", car_position(0,0), car_position(1,0), car_position(2,0));
         // ROS_INFO("q = %lf, %lf, %lf", q(0,0), q(1,0), q(2,0));
         can_msgs::Frame frames;
-        PublishPendingControlTrace();
         if (torque_control)
         {
             tol = AdaptiveBackstepping(expect_q, expect_dq, expect_ddq, q, dq, zerovector, 0.002);
@@ -891,42 +863,6 @@ void PublishMotionStatus(const std::string& state, double progress, uint32_t ind
     motion_status_pub.publish(message);
 }
 
-void RecordPendingControlTrace(const sensor_msgs::Imu& msg, const std::string& source)
-{
-    if (!latency_trace_enabled) return;
-    pending_control_trace = true;
-    pending_trace_ind = msg.header.seq;
-    pending_trace_source = source;
-    pending_trace_source_stamp = msg.header.stamp;
-    pending_trace_callback_time = ros::WallTime::now();
-}
-
-void PublishPendingControlTrace()
-{
-    if (!latency_trace_enabled || !pending_control_trace || !control_trace_pub) return;
-    const ros::WallTime apply_time = ros::WallTime::now();
-    std_msgs::String message;
-    std::ostringstream stream;
-    stream << std::fixed << std::setprecision(9)
-           << "{\"ind\":" << pending_trace_ind
-           << ",\"source\":\"" << pending_trace_source
-           << "\",\"source_stamp\":" << pending_trace_source_stamp.toSec()
-           << ",\"callback_stamp\":" << pending_trace_callback_time.toSec()
-           << ",\"control_apply_stamp\":" << apply_time.toSec() << "}";
-    message.data = stream.str();
-    control_trace_pub.publish(message);
-    if (latency_trace_file.good())
-    {
-        latency_trace_file << pending_trace_ind << "," << pending_trace_source << ","
-                           << std::fixed << std::setprecision(9)
-                           << pending_trace_source_stamp.toSec() << ","
-                           << pending_trace_callback_time.toSec() << ","
-                           << apply_time.toSec() << "\n";
-        latency_trace_file.flush();
-    }
-    pending_control_trace = false;
-}
-
 void StartRuntimeMotion(const sensor_msgs::Imu& msg, const std::string& source)
 {
     if (runtime_motion_id_valid && last_runtime_motion_ind == msg.header.seq &&
@@ -961,7 +897,6 @@ void StartRuntimeMotion(const sensor_msgs::Imu& msg, const std::string& source)
         latest_command_source = source;
         if (private_node_handle != NULL) private_node_handle->setParam("runtime_motion_complete", false);
         PublishMotionStatus("accepted", 0.0, runtime_motion.ind, runtime_motion.source);
-        RecordPendingControlTrace(msg, source);
         return;
     }
     if (runtime_motion.active)
@@ -1016,7 +951,6 @@ void StartRuntimeMotion(const sensor_msgs::Imu& msg, const std::string& source)
     latest_command_source = source;
     if (private_node_handle != NULL) private_node_handle->setParam("runtime_motion_complete", false);
     PublishMotionStatus("accepted", 0.0, runtime_motion.ind, runtime_motion.source);
-    RecordPendingControlTrace(msg, source);
 }
 
 void UpdateRuntimeMotion()
@@ -1248,11 +1182,9 @@ void H5TeleOperationCallback(const sensor_msgs::Imu& msg)
     if (trajectory_planner_enabled && command_source == "estop")
     {
         CancelRuntimeMotion("preempted");
-        RecordPendingControlTrace(msg, command_source);
         return;
     }
     ApplyLogicalArmCommand(msg, command_source);
-    RecordPendingControlTrace(msg, command_source);
 }
 
 bool ApplyLogicalArmCommand(const sensor_msgs::Imu& msg, const std::string& source)

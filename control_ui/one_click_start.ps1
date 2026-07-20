@@ -32,6 +32,8 @@ $VrStaticErr = Join-Path $LogDir "vr_static_http_stderr.log"
 $RtspCameraStartOut = Join-Path $LogDir "rtsp_camera_start_stdout.log"
 $RtspCameraStartErr = Join-Path $LogDir "rtsp_camera_start_stderr.log"
 $RtspCameraPidFile = Join-Path $LogDir "rtsp_camera_pids.json"
+$CameraStartupSettings = Join-Path $LogDir "camera_startup_mode.json"
+$ConfigPath = Join-Path $Root "config.yaml"
 $VrStaticPort = 8070
 $UiUrl = "http://127.0.0.1:$VrStaticPort/control_ui/index.html"
 $script:StartedSystem = $false
@@ -58,6 +60,47 @@ function Write-Warn($Text) {
 
 function Write-Fail($Text) {
     Write-Host "[FAIL] $Text" -ForegroundColor Red
+}
+
+function Normalize-CameraStartupMode($Value, $Fallback = "display") {
+    $mode = "$Value".Trim().ToLowerInvariant()
+    if ($mode -in @("display", "stream")) {
+        return $mode
+    }
+    return $Fallback
+}
+
+function Get-CameraConfigDefaultMode {
+    if (-not (Test-Path $ConfigPath)) {
+        return "display"
+    }
+    $inside = $false
+    foreach ($raw in Get-Content -Path $ConfigPath -Encoding UTF8) {
+        $line = ($raw -split "#", 2)[0].TrimEnd()
+        if (-not $line.Trim()) { continue }
+        if ($line -notmatch "^\s") {
+            $inside = ($line.Trim() -eq "rtsp_dual_camera:")
+            continue
+        }
+        if ($inside -and $line -match '^\s+startup_mode:\s*["'']?([^"'']+)["'']?\s*$') {
+            return Normalize-CameraStartupMode $Matches[1] "display"
+        }
+    }
+    return "display"
+}
+
+function Get-CameraStartupMode {
+    $defaultMode = Get-CameraConfigDefaultMode
+    if (-not (Test-Path $CameraStartupSettings)) {
+        return $defaultMode
+    }
+    try {
+        $settings = Get-Content -Path $CameraStartupSettings -Raw -Encoding UTF8 | ConvertFrom-Json
+        return Normalize-CameraStartupMode $settings.mode $defaultMode
+    } catch {
+        Write-Warn "Camera startup setting is invalid; using config default '$defaultMode'."
+        return $defaultMode
+    }
 }
 
 function Get-ApiStatus {
@@ -845,9 +888,19 @@ try {
     Write-Host "========================================"
     Write-Host ""
 
+    $cameraStartupMode = Get-CameraStartupMode
+    $env:UEM_CAMERA_ACTIVE_MODE = $cameraStartupMode
+    Write-Info "Camera startup mode: $cameraStartupMode"
+
     Start-VrWebViewSupport
     Start-Backend
-    $rtspCameraReady = Start-RtspCameraStream
+    $rtspCameraReady = $null
+    if ($cameraStartupMode -eq "stream") {
+        $rtspCameraReady = Start-RtspCameraStream
+    } else {
+        Write-Info "Using browser dual-camera display mode; RTSP/HLS startup is skipped."
+        Stop-RtspCameraStream
+    }
     Open-H5Console
     $wristServiceReady = Start-HandTracker
     $unityHandBridgeReady = Start-UnityHandBridge
@@ -881,7 +934,7 @@ try {
     if (-not $unityHandBridgeReady) {
         Write-Warn "VR right-hand dexterous input is unavailable until the Unity hand bridge starts."
     }
-    if (-not $rtspCameraReady) {
+    if ($cameraStartupMode -eq "stream" -and -not $rtspCameraReady) {
         Write-Warn "Dual RTSP USB camera stream is unavailable until FFmpeg and MediaMTX are configured."
     }
     Wait-SystemStop

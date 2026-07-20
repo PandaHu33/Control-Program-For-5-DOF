@@ -193,9 +193,50 @@
       margin-top: 0;
     }
     #usbCameraFrame {
-      max-height: 240px;
-      padding-top: 42%;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+      padding-top: 0;
+      overflow: visible;
+      background: transparent;
+      border: 0;
     }
+    .camera-slot {
+      position: relative;
+      width: 100%;
+      padding-top: 56.25%;
+      border-radius: 10px;
+      overflow: hidden;
+      background: #0b1221;
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .camera-slot video {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #0b1221;
+    }
+    .camera-slot-label {
+      position: absolute;
+      left: 8px;
+      top: 8px;
+      z-index: 2;
+      padding: 4px 8px;
+      border-radius: 999px;
+      color: #fff;
+      background: rgba(3,7,18,0.72);
+      font-size: 12px;
+    }
+    .camera-slot-status { margin: -4px 2px 0; }
+    .camera-mode-settings {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(255,255,255,0.08);
+    }
+    .camera-mode-settings .radios { flex-direction: row; flex-wrap: wrap; gap: 12px; }
+    .camera-mode-summary { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     html.vr-webview #usbCameraCard {
       display: none;
     }
@@ -612,11 +653,42 @@
     </div>
 
     <div class="card" id="usbCameraCard">
-      <h2>腕部相机</h2>
+      <h2>双摄像头</h2>
       <div class="video-frame" id="usbCameraFrame">
-        <video id="usbCameraPreview" autoplay muted playsinline></video>
+        <div>
+          <div class="camera-slot">
+            <span class="camera-slot-label" id="leftCameraLabel">左摄像头</span>
+            <video id="leftCameraPreview" autoplay muted playsinline></video>
+          </div>
+          <p class="status-line camera-slot-status" id="leftCameraStatus">等待左摄像头...</p>
+        </div>
+        <div>
+          <div class="camera-slot">
+            <span class="camera-slot-label" id="rightCameraLabel">右摄像头</span>
+            <video id="rightCameraPreview" autoplay muted playsinline></video>
+          </div>
+          <p class="status-line camera-slot-status" id="rightCameraStatus">等待右摄像头...</p>
+        </div>
       </div>
-      <p class="status-line" id="usbCameraHint">等待腕部相机...</p>
+      <div class="video-frame" id="cameraStreamFrame" style="display:none;">
+        <video id="cameraStreamPreview" autoplay muted playsinline></video>
+        <iframe id="cameraStreamHlsPlayer" title="dual camera stream" allow="autoplay; fullscreen" style="display:none;"></iframe>
+      </div>
+      <p class="status-line" id="usbCameraHint">正在读取摄像头启动模式...</p>
+      <div class="camera-mode-settings">
+        <div class="camera-mode-summary">
+          <span class="status-line">当前模式：<strong id="cameraActiveMode">读取中</strong></span>
+          <span class="status-line">下次启动：<strong id="cameraNextMode">读取中</strong></span>
+        </div>
+        <div class="flex" style="margin-top:8px;">
+          <div class="radios" id="cameraStartupModeGroup">
+            <label><input type="radio" name="cameraStartupMode" value="display" /> 显控显示</label>
+            <label><input type="radio" name="cameraStartupMode" value="stream" /> 推流</label>
+          </div>
+          <button id="saveCameraStartupMode">保存为下次启动模式</button>
+        </div>
+        <p class="status-line" id="cameraModeSaveHint">模式切换在下次运行“一键启动显控”时生效。</p>
+      </div>
     </div>
 
     <div class="card" id="armStatus">
@@ -993,7 +1065,20 @@
     const dpadLeft = document.getElementById("dpadLeft");
     const dpadRight = document.getElementById("dpadRight");
     const usbCameraFrame = document.getElementById("usbCameraFrame");
-    const usbCameraPreview = document.getElementById("usbCameraPreview");
+    const leftCameraPreview = document.getElementById("leftCameraPreview");
+    const rightCameraPreview = document.getElementById("rightCameraPreview");
+    const leftCameraLabel = document.getElementById("leftCameraLabel");
+    const rightCameraLabel = document.getElementById("rightCameraLabel");
+    const leftCameraStatus = document.getElementById("leftCameraStatus");
+    const rightCameraStatus = document.getElementById("rightCameraStatus");
+    const cameraStreamFrame = document.getElementById("cameraStreamFrame");
+    const cameraStreamPreview = document.getElementById("cameraStreamPreview");
+    const cameraStreamHlsPlayer = document.getElementById("cameraStreamHlsPlayer");
+    const cameraActiveMode = document.getElementById("cameraActiveMode");
+    const cameraNextMode = document.getElementById("cameraNextMode");
+    const cameraStartupModeGroup = document.getElementById("cameraStartupModeGroup");
+    const saveCameraStartupModeBtn = document.getElementById("saveCameraStartupMode");
+    const cameraModeSaveHint = document.getElementById("cameraModeSaveHint");
     const handVisionPreview = document.getElementById("handVisionPreview");
     const usbCameraHint = document.getElementById("usbCameraHint");
     const handVisionHint = document.getElementById("handVisionHint");
@@ -1040,14 +1125,10 @@
     const MAIN_MODULE_KEYS = ["arm", "hand", "glove", "camera", "matlab"];
     let lastStatus = null;
     let cameraLocalStatus = null;
-    let cameraStream = null;
-    let cameraDeviceId = null;
-    let cameraFailedDeviceIds = new Set();
-    let usbCameraStreamFallback = null;
-    let usbCameraFrameTimer = null;
-    let cameraFramePublishTimer = null;
-    let cameraFramePublishCanvas = null;
-    let cameraFramePublishBusy = false;
+    let cameraModeSettings = null;
+    let cameraRefreshBusy = false;
+    const cameraStreams = { left: null, right: null };
+    const cameraDeviceIds = { left: null, right: null };
     let handVisionEvents = null;
     let handVisionState = null;
     let handVisionLastSeen = 0;
@@ -1403,223 +1484,257 @@
       return false;
     };
 
-    function setUsbCameraServerStreamActive(active) {
-      if (!usbCameraFrame || !usbCameraPreview) return false;
+    function cameraModeLabel(mode) {
+      return mode === "stream" ? "推流" : "显控显示";
+    }
 
-      if (!usbCameraStreamFallback) {
-        usbCameraStreamFallback = document.createElement("img");
-        usbCameraStreamFallback.id = "usbCameraStreamFallback";
-        usbCameraStreamFallback.alt = "camera stream";
-        usbCameraStreamFallback.style.display = "none";
-        usbCameraStreamFallback.onerror = () => {
-          if (usbCameraHint) usbCameraHint.textContent = "Camera stream unavailable";
+    function updateCameraModeUi(settings) {
+      if (!settings) return;
+      if (cameraActiveMode) cameraActiveMode.textContent = cameraModeLabel(settings.active_mode);
+      if (cameraNextMode) cameraNextMode.textContent = cameraModeLabel(settings.next_mode);
+      if (cameraStartupModeGroup) {
+        const input = cameraStartupModeGroup.querySelector(`input[value="${settings.next_mode}"]`);
+        if (input) input.checked = true;
+      }
+      if (cameraModeSaveHint) {
+        cameraModeSaveHint.textContent = settings.restart_required
+          ? "设置已保存；重启“一键启动显控”后生效。"
+          : "当前模式与下次启动模式一致。";
+        cameraModeSaveHint.classList.toggle("warning", !!settings.restart_required);
+      }
+    }
+
+    async function loadCameraModeSettings() {
+      try {
+        const res = await fetch(`${API_BASE}/api/camera/startup-mode`, { cache: "no-store" });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.message || "mode request failed");
+        cameraModeSettings = data;
+        updateCameraModeUi(data);
+        return data;
+      } catch (err) {
+        cameraModeSettings = {
+          active_mode: "display",
+          next_mode: "display",
+          default_mode: "display",
+          restart_required: false,
+          cameras: [
+            { slot: "left", name: "左摄像头", index: 0, mirror: true },
+            { slot: "right", name: "右摄像头", index: 1, mirror: true },
+          ],
+          video: { width: 640, height: 480, framerate: 30, layout: "vstack" },
+          hls_url: DEFAULT_VIDEO_URL,
         };
-        usbCameraStreamFallback.onload = () => {
-          if (usbCameraHint) usbCameraHint.textContent = "Camera stream from hand service";
-        };
-        usbCameraFrame.appendChild(usbCameraStreamFallback);
+        updateCameraModeUi(cameraModeSettings);
+        if (cameraModeSaveHint) {
+          cameraModeSaveHint.textContent = `无法读取模式配置: ${err.message || err}`;
+          cameraModeSaveHint.classList.add("warning");
+        }
+        return cameraModeSettings;
+      }
+    }
+
+    function cameraElements(slot) {
+      return slot === "left"
+        ? { video: leftCameraPreview, label: leftCameraLabel, status: leftCameraStatus }
+        : { video: rightCameraPreview, label: rightCameraLabel, status: rightCameraStatus };
+    }
+
+    function stopCameraSlot(slot) {
+      const stream = cameraStreams[slot];
+      if (stream) stream.getTracks().forEach((track) => track.stop());
+      cameraStreams[slot] = null;
+      cameraDeviceIds[slot] = null;
+      const { video } = cameraElements(slot);
+      if (video) video.srcObject = null;
+    }
+
+    function stopLocalCameraPreviews() {
+      stopCameraSlot("left");
+      stopCameraSlot("right");
+    }
+
+    function normalizeCameraName(value) {
+      return String(value || "").trim().toLowerCase();
+    }
+
+    function selectConfiguredCamera(devices, config, usedIds) {
+      const desiredName = normalizeCameraName(config?.name);
+      let selected = null;
+      if (desiredName) {
+        selected = devices.find((device) => {
+          if (usedIds.has(device.deviceId)) return false;
+          const label = normalizeCameraName(device.label);
+          return label && (label === desiredName || label.includes(desiredName) || desiredName.includes(label));
+        });
+      }
+      const configuredIndex = Number(config?.index);
+      if (!selected && Number.isInteger(configuredIndex)) {
+        const indexed = devices[configuredIndex];
+        if (indexed && !usedIds.has(indexed.deviceId)) selected = indexed;
+      }
+      return selected || devices.find((device) => !usedIds.has(device.deviceId)) || null;
+    }
+
+    async function enumerateLabeledCameras() {
+      let devices = (await navigator.mediaDevices.enumerateDevices()).filter((item) => item.kind === "videoinput");
+      if (devices.length && !devices.some((item) => item.label)) {
+        const permissionStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        permissionStream.getTracks().forEach((track) => track.stop());
+        devices = (await navigator.mediaDevices.enumerateDevices()).filter((item) => item.kind === "videoinput");
+      }
+      return devices;
+    }
+
+    async function openCameraSlot(config, device) {
+      const slot = config.slot;
+      const { video, label, status } = cameraElements(slot);
+      if (!video || !status) return false;
+      if (!device) {
+        stopCameraSlot(slot);
+        status.textContent = `${slot === "left" ? "左" : "右"}摄像头未找到`;
+        status.classList.add("warning");
+        return false;
       }
 
-      if (active) {
-        if (cameraStream) {
-          cameraStream.getTracks().forEach((track) => track.stop());
-          cameraStream = null;
-          cameraDeviceId = null;
-        }
-
-        usbCameraPreview.srcObject = null;
-        usbCameraPreview.style.display = "none";
-        usbCameraStreamFallback.style.display = "block";
-        const loadFrame = () => {
-          usbCameraStreamFallback.src = `${HAND_SERVICE_BASE}/frame.jpg?ts=${Date.now()}`;
-        };
-        if (!usbCameraFrameTimer) {
-          loadFrame();
-          usbCameraFrameTimer = window.setInterval(loadFrame, 250);
-        }
-        if (usbCameraHint) usbCameraHint.textContent = "Camera stream from hand service";
+      const currentStream = cameraStreams[slot];
+      const currentTrack = currentStream?.getVideoTracks?.()[0];
+      if (currentTrack?.readyState === "live" && cameraDeviceIds[slot] === device.deviceId) {
         return true;
       }
 
-      if (usbCameraFrameTimer) {
-        window.clearInterval(usbCameraFrameTimer);
-        usbCameraFrameTimer = null;
+      stopCameraSlot(slot);
+      const videoConfig = cameraModeSettings?.video || {};
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            deviceId: { exact: device.deviceId },
+            width: { ideal: Number(videoConfig.width) || 640 },
+            height: { ideal: Number(videoConfig.height) || 480 },
+            frameRate: { ideal: Number(videoConfig.framerate) || 30 },
+          },
+        });
+        cameraStreams[slot] = stream;
+        cameraDeviceIds[slot] = device.deviceId;
+        video.srcObject = stream;
+        // Browser display shows the camera's physical orientation. The configured
+        // mirror flags belong to the RTSP/HLS streaming pipeline only.
+        video.style.transform = "none";
+        video.play().catch(() => {});
+        const track = stream.getVideoTracks()[0];
+        const shownName = track?.label || device.label || config.name || `${slot} camera`;
+        if (label) label.textContent = `${slot === "left" ? "左" : "右"}：${shownName}`;
+        status.textContent = `在线 · ${shownName}`;
+        status.classList.remove("warning");
+        if (track) {
+          track.addEventListener("ended", () => {
+            if (cameraStreams[slot] !== stream) return;
+            cameraStreams[slot] = null;
+            cameraDeviceIds[slot] = null;
+            video.srcObject = null;
+            status.textContent = "摄像头连接已断开，等待重试";
+            status.classList.add("warning");
+          }, { once: true });
+        }
+        return true;
+      } catch (err) {
+        status.textContent = `打开失败: ${err?.message || err || "未知错误"}`;
+        status.classList.add("warning");
+        return false;
       }
-      usbCameraPreview.style.display = "";
-      usbCameraStreamFallback.style.display = "none";
-      usbCameraStreamFallback.removeAttribute("src");
-      return true;
+    }
+
+    function clearVideoPair(video, player) {
+      if (video) {
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+      }
+      if (player) {
+        player.removeAttribute("src");
+        player.style.display = "none";
+      }
+    }
+
+    function stopCameraStreamPlayback() {
+      clearVideoPair(cameraStreamPreview, cameraStreamHlsPlayer);
+      clearVideoPair(document.getElementById("monitor"), document.getElementById("monitorHlsPlayer"));
+      clearVideoPair(debugMonitor, document.getElementById("debugHlsPlayer"));
     }
 
     async function refreshCameraStatus() {
-      if (IS_VR_WEBVIEW) {
-        setUsbCameraServerStreamActive(false);
-        cameraLocalStatus = { status: "ONLINE", message: "Camera shown through Unity LibVLC RTSP panel" };
-        if (lastStatus) renderSupervisorStatus(lastStatus);
-        return;
-      }
-
-      setUsbCameraServerStreamActive(false);
-      stopUsbCameraPreview();
-      cameraLocalStatus = { status: "ONLINE", message: "USB camera is streamed by FFmpeg + MediaMTX RTSP" };
-      if (lastStatus) renderSupervisorStatus(lastStatus);
-      return;
-
-      if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
-        cameraLocalStatus = { status: "WARNING", message: "浏览器不支持摄像头检测" };
-        stopUsbCameraPreview();
-      } else {
-        try {
-          const devices = await navigator.mediaDevices.enumerateDevices();
-          const cameras = devices.filter((item) => item.kind === "videoinput");
-          if (!cameras.length) {
-            const started = await startUsbCameraPreview(null, cameras);
-            cameraLocalStatus = started
-              ? { status: "ONLINE", message: "Camera preview started" }
-              : { status: "OFFLINE", message: "No camera detected or permission denied" };
-            if (lastStatus) renderSupervisorStatus(lastStatus);
-            return;
-          }
-          if (cameras.length) {
-            const preferred = selectWristCamera(cameras);
-            const labeled = cameras.find((item) => item.label);
-            const message = labeled?.label
-              ? `已连接: ${labeled.label}`
-              : `腕部相机已连接 (${cameras.length})`;
-            const started = await startUsbCameraPreview(preferred?.deviceId || null, cameras);
-            cameraLocalStatus = started
-              ? { status: "ONLINE", message }
-              : { status: "WARNING", message: "腕部相机预览失败，可能被手势识别相机占用" };
-          } else {
-            cameraLocalStatus = { status: "OFFLINE", message: "未检测到腕部相机" };
-            stopUsbCameraPreview();
-          }
-        } catch (err) {
-          const detail = err && err.message ? err.message : String(err || "unknown");
-          cameraLocalStatus = { status: "WARNING", message: `摄像头检测失败: ${detail}` };
-          stopUsbCameraPreview();
+      if (cameraRefreshBusy) return;
+      cameraRefreshBusy = true;
+      try {
+        const settings = cameraModeSettings || await loadCameraModeSettings();
+        if (IS_VR_WEBVIEW) {
+          stopLocalCameraPreviews();
+          cameraLocalStatus = settings.active_mode === "stream"
+            ? { status: "ONLINE", message: "双摄像头由 Unity LibVLC 显示" }
+            : { status: "OFFLINE", message: "显控显示模式仅在桌面浏览器显示摄像头" };
+          return;
         }
-      }
-      if (lastStatus) renderSupervisorStatus(lastStatus);
-    }
 
-    function selectWristCamera(cameras) {
-      if (!Array.isArray(cameras) || !cameras.length) return null;
-      const current = cameras.find((item) => item.deviceId === cameraDeviceId);
-      if (current) return current;
-      const available = cameras.filter((item) => !cameraFailedDeviceIds.has(item.deviceId));
-      const pool = available.length ? available : cameras;
-      return pool[pool.length - 1];
-    }
+        if (settings.active_mode === "stream") {
+          stopLocalCameraPreviews();
+          if (usbCameraFrame) usbCameraFrame.style.display = "none";
+          if (cameraStreamFrame) cameraStreamFrame.style.display = "block";
+          applyVideoSource(settings.hls_url || DEFAULT_VIDEO_URL);
+          let streamReady = false;
+          try {
+            const response = await fetch(`${settings.hls_url || DEFAULT_VIDEO_URL}?ts=${Date.now()}`, { cache: "no-store" });
+            streamReady = response.ok;
+          } catch (_err) {}
+          cameraLocalStatus = streamReady
+            ? { status: "ONLINE", message: "双摄像头 RTSP/HLS 推流中" }
+            : { status: "WARNING", message: "推流模式已启用，等待 HLS 画面" };
+          if (usbCameraHint) usbCameraHint.textContent = cameraLocalStatus.message;
+          return;
+        }
 
-    function stopUsbCameraPreview() {
-      stopCameraFramePublisher();
-      if (cameraStream) {
-        cameraStream.getTracks().forEach((track) => track.stop());
-      }
-      cameraStream = null;
-      cameraDeviceId = null;
-      if (usbCameraPreview) usbCameraPreview.srcObject = null;
-      if (usbCameraHint) usbCameraHint.textContent = "未检测到腕部相机";
-    }
+        stopCameraStreamPlayback();
+        if (cameraStreamFrame) cameraStreamFrame.style.display = "none";
+        if (usbCameraFrame) usbCameraFrame.style.display = "grid";
+        if (!navigator.mediaDevices?.enumerateDevices || !navigator.mediaDevices?.getUserMedia) {
+          stopLocalCameraPreviews();
+          cameraLocalStatus = { status: "WARNING", message: "浏览器不支持双摄像头预览" };
+          if (usbCameraHint) usbCameraHint.textContent = cameraLocalStatus.message;
+          return;
+        }
 
-    function startCameraFramePublisher() {
-      if (IS_VR_WEBVIEW || !usbCameraPreview || cameraFramePublishTimer) return;
-      cameraFramePublishCanvas = cameraFramePublishCanvas || document.createElement("canvas");
+        let devices = [];
+        try {
+          devices = await enumerateLabeledCameras();
+        } catch (err) {
+          stopLocalCameraPreviews();
+          cameraLocalStatus = { status: "WARNING", message: `摄像头权限或检测失败: ${err?.message || err}` };
+          if (leftCameraStatus) leftCameraStatus.textContent = cameraLocalStatus.message;
+          if (rightCameraStatus) rightCameraStatus.textContent = cameraLocalStatus.message;
+          if (usbCameraHint) usbCameraHint.textContent = cameraLocalStatus.message;
+          return;
+        }
 
-      const publishFrame = () => {
-        if (cameraFramePublishBusy || !cameraStream || !usbCameraPreview.videoWidth || !usbCameraPreview.videoHeight) return;
-
-        const maxWidth = 640;
-        const scale = Math.min(1, maxWidth / usbCameraPreview.videoWidth);
-        const width = Math.max(1, Math.round(usbCameraPreview.videoWidth * scale));
-        const height = Math.max(1, Math.round(usbCameraPreview.videoHeight * scale));
-        cameraFramePublishCanvas.width = width;
-        cameraFramePublishCanvas.height = height;
-
-        const ctx = cameraFramePublishCanvas.getContext("2d", { alpha: false });
-        if (!ctx) return;
-        ctx.drawImage(usbCameraPreview, 0, 0, width, height);
-
-        cameraFramePublishBusy = true;
-        cameraFramePublishCanvas.toBlob((blob) => {
-          if (!blob) {
-            cameraFramePublishBusy = false;
-            return;
-          }
-          fetch(`${API_BASE}/api/camera/frame`, {
-            method: "POST",
-            headers: { "Content-Type": "image/jpeg" },
-            body: blob,
-            cache: "no-store",
-          }).catch(() => {}).finally(() => {
-            cameraFramePublishBusy = false;
-          });
-        }, "image/jpeg", 0.72);
-      };
-
-      publishFrame();
-      cameraFramePublishTimer = window.setInterval(publishFrame, 250);
-    }
-
-    function stopCameraFramePublisher() {
-      if (cameraFramePublishTimer) {
-        window.clearInterval(cameraFramePublishTimer);
-        cameraFramePublishTimer = null;
-      }
-      cameraFramePublishBusy = false;
-    }
-
-    function cameraCandidateIds(deviceId, cameras) {
-      const ids = [];
-      const add = (id) => {
-        if (id && !ids.includes(id)) ids.push(id);
-      };
-      add(deviceId);
-      if (Array.isArray(cameras)) {
-        cameras.forEach((camera) => {
-          if (!cameraFailedDeviceIds.has(camera.deviceId)) add(camera.deviceId);
+        const configs = Array.isArray(settings.cameras) ? settings.cameras : [];
+        const usedIds = new Set();
+        const selections = configs.map((config) => {
+          const device = selectConfiguredCamera(devices, config, usedIds);
+          if (device) usedIds.add(device.deviceId);
+          return { config, device };
         });
-        cameras.forEach((camera) => add(camera.deviceId));
+        const results = [];
+        for (const selection of selections) results.push(await openCameraSlot(selection.config, selection.device));
+        const onlineCount = results.filter(Boolean).length;
+        cameraLocalStatus = onlineCount === 2
+          ? { status: "ONLINE", message: "双摄像头正在显控网页中显示" }
+          : onlineCount === 1
+            ? { status: "WARNING", message: "仅一路摄像头可用" }
+            : { status: "OFFLINE", message: "两路摄像头均不可用" };
+        if (usbCameraHint) usbCameraHint.textContent = cameraLocalStatus.message;
+      } finally {
+        if (lastStatus) renderSupervisorStatus(lastStatus);
+        cameraRefreshBusy = false;
       }
-      return ids;
-    }
-
-    async function startUsbCameraPreview(deviceId, cameras=[]) {
-      if (!usbCameraPreview || !navigator.mediaDevices?.getUserMedia) return false;
-      if (cameraStream && (!deviceId || deviceId === cameraDeviceId)) {
-        if (usbCameraHint) usbCameraHint.textContent = "腕部相机预览中";
-        return true;
-      }
-      const candidates = cameraCandidateIds(deviceId, cameras);
-      const attempts = candidates.length
-        ? candidates.map((id) => ({ id, constraints: { video: { deviceId: { exact: id } } } }))
-        : [{ id: null, constraints: { video: true } }];
-      if (!attempts.some((item) => item.id === null)) attempts.push({ id: null, constraints: { video: true } });
-
-      let lastDetail = "";
-      for (const attempt of attempts) {
-        stopUsbCameraPreview();
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia(attempt.constraints);
-          cameraStream = stream;
-          const track = stream.getVideoTracks()[0];
-          cameraDeviceId = track?.getSettings()?.deviceId || attempt.id || null;
-          if (cameraDeviceId) cameraFailedDeviceIds.delete(cameraDeviceId);
-          usbCameraPreview.srcObject = stream;
-          usbCameraPreview.play().catch(() => {});
-          startCameraFramePublisher();
-          if (usbCameraHint) usbCameraHint.textContent = "腕部相机预览中";
-          return true;
-        } catch (err) {
-          lastDetail = err && err.message ? err.message : String(err || "unknown");
-          if (attempt.id) cameraFailedDeviceIds.add(attempt.id);
-        }
-      }
-      if (usbCameraHint) {
-        usbCameraHint.textContent = `腕部相机预览失败: ${lastDetail || "无法打开摄像头"}；已尝试其它摄像头`;
-      }
-      return false;
     }
 
     function updateButtonAvailability(_state) {
@@ -1699,6 +1814,21 @@
       });
     }
 
+    if (saveCameraStartupModeBtn && cameraStartupModeGroup) {
+      saveCameraStartupModeBtn.addEventListener("click", async () => {
+        const mode = cameraStartupModeGroup.querySelector('input[name="cameraStartupMode"]:checked')?.value;
+        if (!mode) return;
+        const data = await callApi("POST /api/camera/startup-mode", { mode }, saveCameraStartupModeBtn);
+        if (data?.ok) {
+          cameraModeSettings = { ...(cameraModeSettings || {}), ...data };
+          updateCameraModeUi(cameraModeSettings);
+        } else if (cameraModeSaveHint) {
+          cameraModeSaveHint.textContent = data?.message || "摄像头模式保存失败";
+          cameraModeSaveHint.classList.add("warning");
+        }
+      });
+    }
+
     if (armPresetCard) {
       armPresetCard.querySelectorAll("[data-send-arm-preset]").forEach((btn) => {
         btn.addEventListener("click", () => sendArmPresetFromCard(btn.dataset.sendArmPreset));
@@ -1730,6 +1860,10 @@
     if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
       navigator.mediaDevices.addEventListener("devicechange", refreshCameraStatus);
     }
+    window.addEventListener("beforeunload", () => {
+      stopLocalCameraPreviews();
+      stopCameraStreamPlayback();
+    });
     setInterval(refreshCameraStatus, 8000);
     setInterval(refreshHandVisionStatus, 8000);
     setInterval(refreshControllerDeltaStatus, 8000);
@@ -3232,6 +3366,7 @@
       if (!url) return;
       const mainVideo = document.getElementById("monitor");
       const pairs = [
+        [cameraStreamPreview, cameraStreamHlsPlayer],
         [mainVideo, document.getElementById("monitorHlsPlayer")],
         [debugMonitor, document.getElementById("debugHlsPlayer")],
       ];
@@ -3256,8 +3391,6 @@
         video.play().catch(() => {});
       });
     }
-
-    applyVideoSource(DEFAULT_VIDEO_URL);
 
     // Video loader (requires gateway for RTSP)
     document.getElementById("loadVideo").addEventListener("click", () => {

@@ -160,6 +160,7 @@ local_check_cfg = cfg.get("local_checks", {})
 hand_control_cfg = cfg.get("hand_control", {})
 experiment_cfg = cfg.get("experiment", {})
 arm_control_cfg = cfg.get("arm_control", {})
+rtsp_camera_cfg = cfg.get("rtsp_dual_camera", {})
 
 SSH_COMMON_OPTIONS = [
     "-o", "BatchMode=yes",
@@ -195,8 +196,6 @@ LOOP_FILTER_WINDOW = float(udp_cfg.get("loop_filter_window", 0.5))
 EXPERIMENT_LOG_DIR = BASE_DIR / str(experiment_cfg.get("log_dir", "experiment_logs"))
 RUNTIME_MOTION_DURATION_SEC = max(0.001, float(arm_control_cfg.get("runtime_motion_duration_sec", 5.0)))
 ARM_LEGACY_HOME_FALLBACK = str(arm_control_cfg.get("legacy_home_fallback", False)).strip().lower() in {"1", "true", "yes", "on"}
-LATENCY_TRACE_ENABLED = str(arm_control_cfg.get("latency_trace_enabled", False)).strip().lower() in {"1", "true", "yes", "on"}
-LATENCY_TRACE_LOG_DIR = BASE_DIR / str(arm_control_cfg.get("latency_trace_log_dir", "latency_logs"))
 
 
 def config_bool(value, default=False):
@@ -205,6 +204,107 @@ def config_bool(value, default=False):
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+CAMERA_STARTUP_MODES = {"display", "stream"}
+CAMERA_STARTUP_SETTINGS_PATH = BASE_DIR / "logs" / "camera_startup_mode.json"
+
+
+def normalize_camera_startup_mode(value, default="display"):
+    mode = str(value or "").strip().lower()
+    if mode in CAMERA_STARTUP_MODES:
+        return mode
+    return default
+
+
+def read_camera_startup_override(path=None):
+    settings_path = Path(path or CAMERA_STARTUP_SETTINGS_PATH)
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8-sig"))
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return None
+    return normalize_camera_startup_mode(data.get("mode"), None) if isinstance(data, dict) else None
+
+
+def save_camera_startup_override(mode, path=None):
+    normalized = normalize_camera_startup_mode(mode, None)
+    if normalized is None:
+        raise ValueError("mode must be 'display' or 'stream'")
+
+    settings_path = Path(path or CAMERA_STARTUP_SETTINGS_PATH)
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = settings_path.with_name(
+        f"{settings_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    payload = {
+        "mode": normalized,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime()),
+    }
+    try:
+        temp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temp_path, settings_path)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+    return normalized
+
+
+CAMERA_DEFAULT_STARTUP_MODE = normalize_camera_startup_mode(
+    rtsp_camera_cfg.get("startup_mode"), "display"
+)
+CAMERA_ACTIVE_MODE = normalize_camera_startup_mode(
+    os.environ.get("UEM_CAMERA_ACTIVE_MODE"),
+    read_camera_startup_override() or CAMERA_DEFAULT_STARTUP_MODE,
+)
+
+
+def camera_video_size():
+    raw = str(rtsp_camera_cfg.get("video_size", "640x480")).lower().split("x", 1)
+    try:
+        width, height = int(raw[0]), int(raw[1])
+    except (ValueError, IndexError):
+        return 640, 480
+    return max(1, width), max(1, height)
+
+
+def camera_startup_settings():
+    next_mode = read_camera_startup_override() or CAMERA_DEFAULT_STARTUP_MODE
+    width, height = camera_video_size()
+    hls_port = int(rtsp_camera_cfg.get("hls_port", 8081))
+    stream_path = str(rtsp_camera_cfg.get("stream_path", "usb_camera")).strip("/") or "usb_camera"
+    cameras = [
+        {
+            "slot": "left",
+            "name": str(rtsp_camera_cfg.get("left_video_device", "") or ""),
+            "index": int(rtsp_camera_cfg.get("left_camera_index", 0)),
+            "mirror": config_bool(rtsp_camera_cfg.get("left_mirror"), True),
+        },
+        {
+            "slot": "right",
+            "name": str(rtsp_camera_cfg.get("right_video_device", "") or ""),
+            "index": int(rtsp_camera_cfg.get("right_camera_index", 1)),
+            "mirror": config_bool(rtsp_camera_cfg.get("right_mirror"), True),
+        },
+    ]
+    return {
+        "active_mode": CAMERA_ACTIVE_MODE,
+        "next_mode": next_mode,
+        "default_mode": CAMERA_DEFAULT_STARTUP_MODE,
+        "restart_required": next_mode != CAMERA_ACTIVE_MODE,
+        "cameras": cameras,
+        "video": {
+            "width": width,
+            "height": height,
+            "framerate": max(1, int(rtsp_camera_cfg.get("framerate", 30))),
+            "layout": str(rtsp_camera_cfg.get("layout", "vstack") or "vstack"),
+        },
+        "hls_url": f"http://localhost:{hls_port}/{stream_path}/index.m3u8",
+    }
 
 
 def normalize_hand_mode(mode):
@@ -239,7 +339,6 @@ STATE_LOCK = threading.RLock()
 CAMERA_FRAME_LOCK = threading.RLock()
 EXPERIMENT_LOCK = threading.RLock()
 ARM_COMMAND_LOCK = threading.RLock()
-LATENCY_TRACE_LOCK = threading.RLock()
 LOGS = deque(maxlen=300)
 PENDING_ARM_COMMANDS = {}
 PROCESSES = {}
@@ -413,29 +512,6 @@ ARM_PRESET_REPEAT_COUNT = 8
 ARM_PRESET_REPEAT_INTERVAL_SEC = 0.035
 ARM_TELEMETRY_TIMEOUT_SEC = 1.0
 ARM_FRAME_COUNTER = 0
-LATENCY_TRACE_COLUMNS = [
-    "date", "ind", "source", "source_time_ms", "ws_rx_ns", "udp_tx_ns", "bridge_us"
-]
-
-
-def record_latency_trace(frame, ws_rx_ns, udp_tx_ns):
-    if not LATENCY_TRACE_ENABLED or frame is None:
-        return
-    day = time.strftime("%Y%m%d", time.localtime())
-    path = LATENCY_TRACE_LOG_DIR / f"bridge_{day}.csv"
-    row = {
-        "date": day,
-        "ind": int(frame.ind),
-        "source": frame.source or "unknown",
-        "source_time_ms": int(frame.time_ms),
-        "ws_rx_ns": int(ws_rx_ns),
-        "udp_tx_ns": int(udp_tx_ns),
-        "bridge_us": (int(udp_tx_ns) - int(ws_rx_ns)) / 1000.0,
-    }
-    with LATENCY_TRACE_LOCK:
-        append_csv_rows(path, LATENCY_TRACE_COLUMNS, [row])
-
-
 def acknowledge_arm_command(ind):
     with ARM_COMMAND_LOCK:
         PENDING_ARM_COMMANDS.pop(int(ind) & 0xFFFFFFFF, None)
@@ -1239,6 +1315,21 @@ def do_command(method, path, body=None):
     log_event("ACTION", f"{method} {path}")
     if path == "/api/status":
         return command_result(True, "状态已返回")
+    if path == "/api/camera/startup-mode" and method == "GET":
+        return command_result(True, "摄像头启动模式已返回", camera_startup_settings())
+    if path == "/api/camera/startup-mode" and method == "POST":
+        requested_mode = (body or {}).get("mode") if isinstance(body, dict) else None
+        try:
+            saved_mode = save_camera_startup_override(requested_mode)
+        except ValueError as exc:
+            return command_result(False, str(exc), camera_startup_settings())
+        except OSError as exc:
+            return command_result(False, f"摄像头启动模式保存失败: {exc}", camera_startup_settings())
+        return command_result(
+            True,
+            "摄像头模式已保存，将在下次一键启动时生效",
+            {**camera_startup_settings(), "next_mode": saved_mode},
+        )
     if path == "/api/experiment/trial/start" and method == "POST":
         return start_experiment_trial(body)
     if path == "/api/experiment/trial/samples" and method == "POST":
@@ -1656,7 +1747,6 @@ def websocket_client_loop(client):
             if opcode == 0x8:
                 break
             if client.path == UDP_PATH and opcode == 0x2:
-                ws_rx_ns = time.time_ns()
                 active_mode, active_owner = current_arm_authority()
                 decision = arbitrate_ws_frame(
                     payload,
@@ -1672,8 +1762,6 @@ def websocket_client_loop(client):
                 if LOOP_FILTER:
                     recent_ws_crc.append((binascii.crc32(payload) & 0xFFFFFFFF, time.time(), len(payload)))
                 udp.sendto(payload, (UDP_HOST, UDP_SEND_PORT))
-                udp_tx_ns = time.time_ns()
-                record_latency_trace(decision.frame, ws_rx_ns, udp_tx_ns)
                 # Per-frame output is intentionally disabled to avoid control-path jitter.
     except Exception as exc:
         print(f"[WS] client closed: {exc}")
