@@ -394,7 +394,7 @@ function Start-AdbReverseForVr {
     }
 
     Write-Info "Configuring ADB reverse ports for VR WebView on device $deviceId..."
-    foreach ($port in @(8070, 8080, 8090, 8091, 8081, 5005, 5006)) {
+    foreach ($port in @(8070, 8080, 8090, 8091, 8092, 8081, 5005, 5006)) {
         & $adb -s $deviceId reverse "tcp:$port" "tcp:$port" | Out-Host
         if ($LASTEXITCODE -eq 0) {
             Write-Ok "adb reverse tcp:$port tcp:$port"
@@ -895,12 +895,7 @@ try {
     Start-VrWebViewSupport
     Start-Backend
     $rtspCameraReady = $null
-    if ($cameraStartupMode -eq "stream") {
-        $rtspCameraReady = Start-RtspCameraStream
-    } else {
-        Write-Info "Using browser dual-camera display mode; RTSP/HLS startup is skipped."
-        Stop-RtspCameraStream
-    }
+    $rtspCameraReady = Start-RtspCameraStream
     Open-H5Console
     $wristServiceReady = Start-HandTracker
     $unityHandBridgeReady = Start-UnityHandBridge
@@ -934,8 +929,8 @@ try {
     if (-not $unityHandBridgeReady) {
         Write-Warn "VR right-hand dexterous input is unavailable until the Unity hand bridge starts."
     }
-    if ($cameraStartupMode -eq "stream" -and -not $rtspCameraReady) {
-        Write-Warn "Dual RTSP USB camera stream is unavailable until FFmpeg and MediaMTX are configured."
+    if (-not $rtspCameraReady) {
+        Write-Warn "Dual camera capture/recording service is unavailable until FFmpeg and MediaMTX are configured."
     }
     Wait-SystemStop
 } catch {

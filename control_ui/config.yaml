@@ -23,6 +23,16 @@ hand_control:
 experiment:
   log_dir: "experiment_logs"
 
+recording:
+  root_dir: "recordings"
+  alignment_hz: 20
+  camera_service_host: "127.0.0.1"
+  camera_service_port: 8092
+  hand_telemetry_host: "127.0.0.1"
+  hand_telemetry_port: 25003
+  min_free_gib: 2.0
+  max_duration_minutes: 10.0
+
 arm_control:
   runtime_motion_duration_sec: 5.0
   legacy_home_fallback: false
@@ -60,7 +70,7 @@ rtsp_dual_camera:
   # Reuse the existing path so Unity/LibVLC can keep the same URL.
   stream_path: "usb_camera"
   video_size: "640x480"
-  framerate: 30
+  framerate: 20
   layout: "vstack"
 
 jetson:
@@ -71,6 +81,8 @@ jetson:
   check_script: "/home/night/robot/check_arm.sh"
 
 programs:
+  # Canonical WA100 runtime generated from the current workspace source.
+  # Keep this aligned with WA100_RUNTIME_DIR in wa100-sdk-publish/CMakeLists.txt.
   hand_exe: "wa100-sdk-publish\\build\\bin\\udp_receiver_unity.exe"
   hand_args: "right"
   unity_glove: "right1\\My project.exe"

@@ -33,6 +33,7 @@
 #include <std_msgs/Int8MultiArray.h>
 #include <std_msgs/String.h>
 #include <sensor_msgs/JointState.h>
+#include <mainpulator/ArmRecordingState.h>
 #include <std_msgs/Float64MultiArray.h>
 
 
@@ -65,6 +66,7 @@ std::string planner_result = "disabled";
 uint32_t latest_command_ind = 0;
 std::string latest_command_source = "idle";
 bool motion_data_log_enabled = false;
+bool actual_current_feedback_enabled = true;
 std::string motion_data_log_path = "/home/night/robot/logs/arm_motion.csv";
 std::unique_ptr<mainpulator_motion::MotionCsvLogger> motion_csv_logger;
 bool startup_homing_active = false;
@@ -106,6 +108,9 @@ double joint4_actual_angle = 0.0001;
 double joint5_actual_angle = 0.0;
 double joint4_actual_velocity = 0.0;
 double joint5_actual_current = 0.0;
+std::array<double, 5> joint_actual_current_ma {{NAN, NAN, NAN, NAN, NAN}};
+std::array<bool, 5> joint_current_valid {{false, false, false, false, false}};
+std::array<ros::WallTime, 5> joint_current_received_at;
 
 
 //电动机械臂自身参数和变量
@@ -266,6 +271,7 @@ int main(int argc, char *argv[])
     nh.param("trajectory_max_acceleration", trajectory_max_acceleration, std::vector<double>(4, 1.0));
     nh.param("trajectory_max_jerk", trajectory_max_jerk, std::vector<double>(4, 5.0));
     nh.param("motion_data_log_enabled", motion_data_log_enabled, false);
+    nh.param("actual_current_feedback_enabled", actual_current_feedback_enabled, true);
     nh.param<std::string>("motion_data_log_path", motion_data_log_path,
                           "/home/night/robot/logs/arm_motion.csv");
     int motion_data_log_queue_capacity = 8192;
@@ -364,6 +370,7 @@ int main(int argc, char *argv[])
     // 【新增代码】为模仿学习创建发布器和订阅器
     // 1. 发布机械臂当前状态给 AI PC
     ros::Publisher imitation_state_pub = nh.advertise<sensor_msgs::JointState>("/robot/imitation_state", 10);
+    ros::Publisher recording_state_pub = nh.advertise<mainpulator::ArmRecordingState>("/robot/recording_state", 20);
     motion_status_pub = nh.advertise<std_msgs::String>("/arm/motion_status", 10, true);
     // 2. 订阅来自 AI PC 的期望轨迹
     ros::Subscriber imitation_trajectory_sub = nh.subscribe<sensor_msgs::JointState>("/imitation/desired_trajectory", 10, ImitationCallback);
@@ -373,6 +380,7 @@ int main(int argc, char *argv[])
     expect_dq.setZero();
     expect_ddq.setZero();
     zerovector.setZero();
+    tol.setZero();
 
     const bool torque_control = (control_mode == ControlMode::Torque);
     ros::Rate loop_rate(torque_control ? 100.0 : 20.0);
@@ -400,6 +408,26 @@ int main(int argc, char *argv[])
         param::PositionInit(joint3, socket_can);
         param::PositionInit(joint4, socket_can);
         param::MomentInit(joint5, socket_can);
+    }
+    if (actual_current_feedback_enabled)
+    {
+        control::mainpulator* joints[5] = {&joint1, &joint2, &joint3, &joint4, &joint5};
+        for (std::size_t index = 0; index < 5; ++index)
+        {
+            if (!param::ConfigureActualCurrentFeedback(*joints[index], socket_can))
+            {
+                ROS_ERROR("Actual-current TPDO3 setup failed for joint %zu; current recording disabled", index + 1);
+                actual_current_feedback_enabled = false;
+                for (std::size_t rollback = 0; rollback < 5; ++rollback)
+                {
+                    if (!param::DisableActualCurrentFeedback(*joints[rollback], socket_can))
+                    {
+                        ROS_ERROR("Actual-current PDO rollback failed for joint %zu", rollback + 1);
+                    }
+                }
+                break;
+            }
+        }
     }
     usleep(500000);
 
@@ -550,6 +578,36 @@ int main(int argc, char *argv[])
         current_imitation_state.velocity[4] = 0.0;
         
         imitation_state_pub.publish(current_imitation_state);
+
+        // Fixed, versioned recorder state; invalid feedback remains NaN with
+        // the corresponding validity bit clear.
+        mainpulator::ArmRecordingState recording_state;
+        recording_state.header.seq = static_cast<std::uint32_t>(loop_index);
+        recording_state.header.stamp = ros::Time::now();
+        recording_state.schema_version = 1;
+        recording_state.control_mode = control_type;
+        recording_state.current_valid_mask = 0;
+        recording_state.velocity_valid_mask = 0;
+        const double actual_q_values[5] = {-q(0,0), q(1,0), q(2,0), joint4_actual_angle, joint5_actual_angle};
+        const double target_q_values[5] = {-expect_q(0,0), expect_q(1,0), expect_q(2,0), joint4angle, NAN};
+        const double actual_dq_values[5] = {-dq(0,0), dq(1,0), dq(2,0), joint4_actual_velocity, NAN};
+        const double target_dq_values[5] = {-expect_dq(0,0), expect_dq(1,0), expect_dq(2,0), expect_q4_velocity, 0.0};
+        const double command_torque_values[5] = {-tol(0,0), tol(1,0), tol(2,0), NAN, NAN};
+        for (std::size_t index = 0; index < 5; ++index)
+        {
+            recording_state.actual_q_rad[index] = actual_q_values[index];
+            recording_state.target_q_rad[index] = target_q_values[index];
+            recording_state.actual_dq_rad_s[index] = actual_dq_values[index];
+            recording_state.target_dq_rad_s[index] = target_dq_values[index];
+            const bool current_fresh = actual_current_feedback_enabled && joint_current_valid[index] &&
+                !joint_current_received_at[index].isZero() &&
+                (ros::WallTime::now() - joint_current_received_at[index]).toSec() <= 0.1;
+            recording_state.actual_current_ma[index] = current_fresh ? joint_actual_current_ma[index] : NAN;
+            recording_state.commanded_torque_nm[index] = command_torque_values[index];
+            if (current_fresh) recording_state.current_valid_mask |= static_cast<std::uint8_t>(1U << index);
+            if (std::isfinite(actual_dq_values[index])) recording_state.velocity_valid_mask |= static_cast<std::uint8_t>(1U << index);
+        }
+        recording_state_pub.publish(recording_state);
         
 
         // 发布给主端Matlab角度、角速度、虚拟力反馈
@@ -1391,9 +1449,32 @@ void MainpulatorCallback(const can_msgs::Frame &receive_message)
             joint4_actual_velocity = joint4.get_current_velocity();
             break;
         case 0x285:
-            joint5.ActualCurrent(receive_message);
-            joint5_actual_current = joint5.get_ActualCurrent();
+            if (actual_current_feedback_enabled)
+            {
+                joint5.current_velocity(receive_message);
+            }
+            else
+            {
+                joint5.ActualCurrent(receive_message);
+                joint5_actual_current = joint5.get_ActualCurrent();
+            }
             break;
+        case 0x381:
+        case 0x382:
+        case 0x383:
+        case 0x384:
+        case 0x385:
+        {
+            if (!actual_current_feedback_enabled) break;
+            const std::size_t index = static_cast<std::size_t>(receive_message.id - 0x381);
+            control::mainpulator* joints[5] = {&joint1, &joint2, &joint3, &joint4, &joint5};
+            joints[index]->ActualCurrent(receive_message);
+            joint_actual_current_ma[index] = joints[index]->get_ActualCurrent();
+            joint_current_valid[index] = true;
+            joint_current_received_at[index] = ros::WallTime::now();
+            if (index == 4) joint5_actual_current = joint_actual_current_ma[index];
+            break;
+        }
 
         default:
             break;

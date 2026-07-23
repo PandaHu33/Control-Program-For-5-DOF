@@ -101,6 +101,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "stale_timeout_sec": 0.4,
         "deadman_button_label": "Left X",
     },
+    "sensor_alignment_telemetry": {
+        "enabled": True,
+        "host": "127.0.0.1",
+        "controller_port": 25006,
+    },
     "camera": {
         "index": "auto",
         "min_detection_confidence": 0.7,
@@ -1365,6 +1370,11 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
     controller = VRWristAxisController(config, settings)
     controller_delta = ControllerDeltaAxisController(config)
     interval = 1.0 / max(float(cfg_get(config, ("service", "event_hz"), 20.0)), 1.0)
+    alignment_enabled = bool(cfg_get(config, ("sensor_alignment_telemetry", "enabled"), True))
+    alignment_host = str(cfg_get(config, ("sensor_alignment_telemetry", "host"), "127.0.0.1"))
+    alignment_port = int(cfg_get(config, ("sensor_alignment_telemetry", "controller_port"), 25006))
+    alignment_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if alignment_enabled else None
+    last_alignment_seq: Optional[int] = None
     receiver.start()
     gesture_receiver.start()
     try:
@@ -1379,6 +1389,32 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
             status = controller.update(pose, receiver.status())
             controller_pose = receiver.latest(controller_delta.hand, "right_controller")
             controller_delta_status = controller_delta.update(controller_pose, receiver.status())
+            if alignment_socket is not None and controller_pose is not None:
+                alignment_seq = int(controller_pose.get("seq", -1))
+                if alignment_seq != last_alignment_seq:
+                    position = np.asarray(controller_pose.get("position"), dtype=float).reshape(-1)
+                    rotation = np.asarray(controller_pose.get("rotation"), dtype=float).reshape(-1)
+                    if position.size >= 3 and rotation.size >= 4:
+                        alignment_payload = {
+                            "type": "controller_pose_frame",
+                            "schema_version": 1,
+                            "seq": alignment_seq,
+                            "device_time": float(controller_pose.get("device_time", 0.0)),
+                            "source": "right_controller",
+                            "tracked": bool(controller_pose.get("tracked", False)),
+                            "position_m": [float(value) for value in position[:3]],
+                            "rotation_xyzw": [float(value) for value in rotation[:4]],
+                            "receiver_wall_time_ns": int(float(controller_pose.get("wall_time", time.time())) * 1e9),
+                            "publish_wall_time_ns": time.time_ns(),
+                        }
+                        try:
+                            alignment_socket.sendto(
+                                json.dumps(alignment_payload, separators=(",", ":")).encode("utf-8"),
+                                (alignment_host, alignment_port),
+                            )
+                            last_alignment_seq = alignment_seq
+                        except OSError:
+                            pass
             shared.update_status(status)
             shared.update_controller_delta_status(controller_delta_status)
             frame = draw_vr_frame(status)
@@ -1417,6 +1453,8 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
         while not stopped.is_set():
             time.sleep(0.5)
     finally:
+        if alignment_socket is not None:
+            alignment_socket.close()
         gesture_receiver.close()
         receiver.close()
 

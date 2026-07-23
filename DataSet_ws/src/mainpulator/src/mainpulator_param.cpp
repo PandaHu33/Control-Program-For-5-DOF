@@ -981,4 +981,75 @@ namespace param
 
 
 
+    bool ConfigureActualCurrentFeedback(control::mainpulator& joint,const int sock_fd){
+        // TPDO3 (0x380 + node id) carries CANopen 0x6078:00 Actual Current.
+        // Keep this opt-in until every motor revision has passed the bench test.
+        auto write_sdo = [&](const unsigned char bytes[8]) -> bool {
+            struct can_frame request, response;
+            memset(&request, 0, sizeof(request));
+            memset(&response, 0, sizeof(response));
+            request.can_id = 0x600 + joint.getid();
+            request.can_dlc = 8;
+            memcpy(request.data, bytes, 8);
+            SocketWrite(request, sock_fd);
+            SocketRead(response, sock_fd);
+            return response.can_dlc >= 1 && response.data[0] == 0x60;
+        };
+
+        const unsigned char node = static_cast<unsigned char>(joint.getid());
+        unsigned char disable[8] = {0x23,0x02,0x18,0x01,static_cast<unsigned char>(0x80+node),0x03,0x00,0x80};
+        const unsigned char transmission[8] = {0x2F,0x02,0x18,0x02,0x01,0x00,0x00,0x00};
+        const unsigned char inhibit[8] = {0x2B,0x02,0x18,0x03,0x64,0x00,0x00,0x00};
+        const unsigned char clear_map[8] = {0x2F,0x02,0x1A,0x00,0x00,0x00,0x00,0x00};
+        const unsigned char map_current[8] = {0x23,0x02,0x1A,0x01,0x10,0x00,0x78,0x60};
+        const unsigned char map_count[8] = {0x2F,0x02,0x1A,0x00,0x01,0x00,0x00,0x00};
+        unsigned char enable_tpdo[8] = {0x23,0x02,0x18,0x01,static_cast<unsigned char>(0x80+node),0x03,0x00,0x00};
+        const bool current_tpdo_ok = write_sdo(disable) && write_sdo(transmission) && write_sdo(inhibit) &&
+            write_sdo(clear_map) && write_sdo(map_current) && write_sdo(map_count) && write_sdo(enable_tpdo);
+        if (!current_tpdo_ok || joint.getid() != 5) return current_tpdo_ok;
+
+        // J5's legacy TPDO2 packed 0x6078 before velocity. Once TPDO3 owns
+        // current, make TPDO2 match its intended role and carry velocity only.
+        unsigned char disable_velocity[8] = {0x23,0x01,0x18,0x01,static_cast<unsigned char>(0x80+node),0x02,0x00,0x80};
+        const unsigned char clear_velocity_map[8] = {0x2F,0x01,0x1A,0x00,0x00,0x00,0x00,0x00};
+        const unsigned char map_velocity[8] = {0x23,0x01,0x1A,0x01,0x20,0x00,0x6C,0x60};
+        const unsigned char velocity_count[8] = {0x2F,0x01,0x1A,0x00,0x01,0x00,0x00,0x00};
+        unsigned char enable_velocity[8] = {0x23,0x01,0x18,0x01,static_cast<unsigned char>(0x80+node),0x02,0x00,0x00};
+        return write_sdo(disable_velocity) && write_sdo(clear_velocity_map) &&
+            write_sdo(map_velocity) && write_sdo(velocity_count) && write_sdo(enable_velocity);
+    }
+
+    bool DisableActualCurrentFeedback(control::mainpulator& joint,const int sock_fd){
+        auto write_sdo = [&](const unsigned char bytes[8]) -> bool {
+            struct can_frame request, response;
+            memset(&request, 0, sizeof(request));
+            memset(&response, 0, sizeof(response));
+            request.can_id = 0x600 + joint.getid();
+            request.can_dlc = 8;
+            memcpy(request.data, bytes, 8);
+            SocketWrite(request, sock_fd);
+            SocketRead(response, sock_fd);
+            return response.can_dlc >= 1 && response.data[0] == 0x60;
+        };
+        const unsigned char node = static_cast<unsigned char>(joint.getid());
+        unsigned char disable_current[8] = {0x23,0x02,0x18,0x01,static_cast<unsigned char>(0x80+node),0x03,0x00,0x80};
+        bool ok = write_sdo(disable_current);
+        if (joint.getid() != 5) return ok;
+
+        // Restore the original J5 TPDO2 current+velocity layout for legacy mode.
+        unsigned char disable_legacy[8] = {0x23,0x01,0x18,0x01,static_cast<unsigned char>(0x80+node),0x02,0x00,0x80};
+        const unsigned char clear_map[8] = {0x2F,0x01,0x1A,0x00,0x00,0x00,0x00,0x00};
+        const unsigned char map_current[8] = {0x23,0x01,0x1A,0x01,0x10,0x00,0x78,0x60};
+        const unsigned char map_velocity[8] = {0x23,0x01,0x1A,0x02,0x20,0x00,0x6C,0x60};
+        const unsigned char map_count[8] = {0x2F,0x01,0x1A,0x00,0x02,0x00,0x00,0x00};
+        unsigned char enable_legacy[8] = {0x23,0x01,0x18,0x01,static_cast<unsigned char>(0x80+node),0x02,0x00,0x00};
+        ok = write_sdo(disable_legacy) && ok;
+        ok = write_sdo(clear_map) && ok;
+        ok = write_sdo(map_current) && ok;
+        ok = write_sdo(map_velocity) && ok;
+        ok = write_sdo(map_count) && ok;
+        ok = write_sdo(enable_legacy) && ok;
+        return ok;
+    }
+
 } // namespace param

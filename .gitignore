@@ -5,6 +5,8 @@
 *.log
 control_ui/logs/
 Hand_Tracker/logs/
+control_ui/calibration/
+control_ui/recordings/
 
 # Editor-local settings
 .vscode/

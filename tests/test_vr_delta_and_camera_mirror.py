@@ -296,6 +296,8 @@ class XrHandGestureTests(unittest.TestCase):
         gesture = [item for item, target in sock.sent if target[1] == 25002][0]
         self.assertTrue(gesture["left_fist"])
         self.assertEqual(gesture["deadman"], 1)
+        self.assertIn("right_operator_intent_closure_prior", gesture)
+        self.assertFalse(gesture["right_prior_is_robot_actual_closure"])
 
     def test_stale_gesture_state_fails_closed(self):
         stopped = threading.Event()

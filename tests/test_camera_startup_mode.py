@@ -89,9 +89,9 @@ class CameraStartupModeTests(unittest.TestCase):
                 self.bridge.CAMERA_STARTUP_SETTINGS_PATH = original_path
                 self.bridge.CAMERA_ACTIVE_MODE = original_active
 
-    def test_start_script_selects_stream_only_for_stream_mode(self):
+    def test_start_script_always_starts_unified_camera_service(self):
         self.assertIn('$env:UEM_CAMERA_ACTIVE_MODE = $cameraStartupMode', START_SCRIPT)
-        self.assertIn('if ($cameraStartupMode -eq "stream")', START_SCRIPT)
+        self.assertNotIn('if ($cameraStartupMode -eq "stream")', START_SCRIPT)
         self.assertIn('$rtspCameraReady = Start-RtspCameraStream', START_SCRIPT)
         self.assertIn('Stop-RtspCameraStream', START_SCRIPT)
 
@@ -103,9 +103,10 @@ class CameraStartupModeTests(unittest.TestCase):
         self.assertIn('[cameraStreamPreview, cameraStreamHlsPlayer]', UI)
         self.assertNotIn('\n    applyVideoSource(DEFAULT_VIDEO_URL);', UI)
 
-    def test_browser_display_is_unmirrored_while_stream_config_stays_mirrored(self):
-        self.assertIn('video.style.transform = "none";', UI)
-        self.assertNotIn('video.style.transform = config.mirror', UI)
+    def test_display_uses_service_without_competing_for_usb_cameras(self):
+        self.assertNotIn("getUserMedia", UI)
+        self.assertIn("left_preview_url", UI)
+        self.assertIn("right_preview_url", UI)
         self.assertIn("left_mirror: true", CONFIG)
         self.assertIn("right_mirror: true", CONFIG)
 

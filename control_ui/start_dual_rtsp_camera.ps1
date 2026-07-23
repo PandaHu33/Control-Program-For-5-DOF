@@ -226,6 +226,7 @@ function Split-VideoSize($Size) {
 }
 
 $dualCfg = Get-ConfigSection $ConfigPath "rtsp_dual_camera"
+$recordingCfg = Get-ConfigSection $ConfigPath "recording"
 $enabled = (Get-ConfigValue $dualCfg "enabled" "true").ToString().ToLowerInvariant()
 if ($enabled -in @("0", "false", "no", "off")) {
     Write-Warn "Dual RTSP camera stream is disabled in config.yaml."
@@ -255,6 +256,8 @@ if ($RightCameraIndex -lt 0) { $RightCameraIndex = [int](Get-ConfigValue $dualCf
 if (-not $InputFourcc) { $InputFourcc = Get-ConfigValue $dualCfg "input_fourcc" "MJPG" }
 if ($StreamCrf -le 0) { $StreamCrf = [int](Get-ConfigValue $dualCfg "stream_crf" "26") }
 if (-not $PythonExe) { $PythonExe = Get-ConfigValue $dualCfg "python_exe" "" }
+$cameraServicePort = [int](Get-ConfigValue $recordingCfg "camera_service_port" "8092")
+$recordingRoot = Join-Path $Root (Get-ConfigValue $recordingCfg "root_dir" "recordings")
 
 $size = Split-VideoSize $VideoSize
 $filterFps = [Math]::Max($Framerate, 1)
@@ -397,6 +400,10 @@ if ($backend -in @("latest_frame", "latest", "opencv")) {
     $captureArgs.Add($LatestFrameFfmpegLog)
     $captureArgs.Add("--crf")
     $captureArgs.Add("$StreamCrf")
+    $captureArgs.Add("--service-port")
+    $captureArgs.Add("$cameraServicePort")
+    $captureArgs.Add("--recording-root")
+    $captureArgs.Add($recordingRoot)
 
     $captureCommandLine = Join-Args @($captureArgs.ToArray())
     $captureCommandLine | Set-Content -Path (Join-Path $LogDir "latest_frame_stream_command.txt") -Encoding UTF8
@@ -421,8 +428,16 @@ if ($backend -in @("latest_frame", "latest", "opencv")) {
                 $status = Get-Content -Path $LatestFrameStatus -Raw | ConvertFrom-Json
                 $encoderProc = if ($status.ffmpegPid) { Get-Process -Id $status.ffmpegPid -ErrorAction SilentlyContinue } else { $null }
                 if ($encoderProc -and $status.writtenFrames -and [int]$status.writtenFrames -gt 0) {
-                    $ready = $true
-                    break
+                    try {
+                        $cameraHealth = Invoke-RestMethod `
+                            -Uri "http://127.0.0.1:$cameraServicePort/health" `
+                            -Method Get `
+                            -TimeoutSec 1
+                        if ($cameraHealth.ok -and $cameraHealth.left.fresh -and $cameraHealth.right.fresh) {
+                            $ready = $true
+                            break
+                        }
+                    } catch {}
                 }
             } catch {}
         }
@@ -446,6 +461,7 @@ if ($backend -in @("latest_frame", "latest", "opencv")) {
         ffmpegPid = $captureProc.Id
         capturePid = $captureProc.Id
         encoderPid = $status.ffmpegPid
+        cameraServicePort = $cameraServicePort
         rtspUrl = $rtspViewUrl
         hlsUrl = $hlsViewUrl
         leftCameraName = $LeftCameraName
@@ -464,6 +480,7 @@ if ($backend -in @("latest_frame", "latest", "opencv")) {
 
     Write-Ok "Latest-frame dual RTSP camera stream is ready: $rtspViewUrl"
     Write-Ok "Browser/VR HLS camera stream is ready: $hlsViewUrl"
+    Write-Ok "Dual-camera recording health is fresh: http://127.0.0.1:$cameraServicePort/health"
     Write-Ok ("Output size: {0}, capture fps: {1}, frame age: {2:N0}/{3:N0} ms" -f $status.size, $status.writeFps, $status.leftAgeMs, $status.rightAgeMs)
     exit 0
 }

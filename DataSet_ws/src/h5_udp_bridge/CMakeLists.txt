@@ -4,9 +4,11 @@ project(h5_udp_bridge)
 find_package(catkin REQUIRED COMPONENTS
   rospy
   std_msgs
+  sensor_msgs
+  mainpulator
 )
 
-catkin_package()
+catkin_package(CATKIN_DEPENDS rospy std_msgs sensor_msgs mainpulator)
 
 catkin_install_python(PROGRAMS
   scripts/h5_udp_bridge_node.py

@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "perception_assist_state.schema.json",
+  "title": "Monitor-only WA100 morphology/load consistency state",
+  "type": "object",
+  "required": [
+    "timestamp", "decision_seq", "frame_id", "state", "closure_score",
+    "current_residual", "loaded_fingers", "valid", "invalid_reason", "reason"
+  ],
+  "properties": {
+    "type": {"const": "perception_assist_state"},
+    "schema_version": {"const": 1},
+    "timestamp": {"type": "number"},
+    "timestamp_ns": {"type": "integer"},
+    "timestamp_source": {"enum": ["wa100_source_time_ns", "bridge_receive_utc_ns"]},
+    "receive_utc_ns": {"type": "integer"},
+    "decision_seq": {"type": "integer", "minimum": 1},
+    "frame_id": {"type": "integer", "minimum": 0},
+    "state": {"enum": ["FREE", "EARLY_CONTACT", "GRASP_CANDIDATE", "GRASP_SUPPORTED", "OVERLOAD"]},
+    "closure_score": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "current_residual": {
+      "type": "array",
+      "items": {"type": ["number", "null"]}
+    },
+    "filtered_current_ma": {
+      "type": ["array", "null"],
+      "items": {"type": ["number", "null"]}
+    },
+    "degraded_reason": {"type": "string"},
+    "signal_validity": {
+      "type": "object",
+      "properties": {
+        "feedback_frame": {"type": "boolean"},
+        "current": {"type": "boolean"},
+        "position_current_frame": {"type": "boolean"},
+        "position_effective": {"type": "boolean"},
+        "position_fallback_channels": {"type": "array", "items": {"type": "string"}},
+        "position_zero_wrap_corrected_channels": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "loaded_fingers": {"type": "array", "items": {"type": "string"}},
+    "valid": {"enum": [0, 1]},
+    "invalid_reason": {"type": "string"},
+    "reason": {"type": "string"},
+    "events": {"type": "array", "items": {"type": "string"}},
+    "prompt_event": {"type": ["string", "null"]},
+    "prompt_message": {"type": "string"},
+    "monitor_only": {"const": true},
+    "grasp_success_confirmed": {"const": false},
+    "ablation": {
+      "type": "object",
+      "required": ["current_only", "closure_only", "joint"],
+      "properties": {
+        "current_only": {"type": "boolean"},
+        "closure_only": {"type": "boolean"},
+        "joint": {"type": "boolean"}
+      }
+    }
+  },
+  "additionalProperties": true
+}

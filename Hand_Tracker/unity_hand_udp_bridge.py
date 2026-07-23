@@ -4,7 +4,7 @@
 Typical setup:
   adb reverse tcp:5006 tcp:5006
   python Hand_Tracker/unity_hand_udp_bridge.py
-  wa100-sdk-publish/examples/udp_receiver_unity.exe right
+  wa100-sdk-publish/build/bin/udp_receiver_unity.exe right
 
 Unity connects to 127.0.0.1:5006 on the headset. adb reverse delivers that
 TCP stream to this script on the PC. Valid packets are forwarded to
@@ -95,6 +95,19 @@ def classify_left_fist(
     score = min(curls) if curls else 0.0
     threshold = off_threshold if previous else on_threshold
     return score >= threshold, score, curls
+
+
+def right_operator_closure_prior(payload: Dict[str, Any]) -> Tuple[Optional[float], list]:
+    """Return a human-intent prior, never a WA100 actual-closure measurement."""
+    positions = payload.get("rightPositions")
+    tracked = bool(payload.get("rightTracked", positions is not None))
+    if not tracked or not isinstance(positions, list) or len(positions) != EXPECTED_FLOAT_COUNT:
+        return None, []
+    curls = [
+        _finger_curl_ratio(positions, mcp, pip, tip, open_deg, close_deg)
+        for mcp, pip, tip, open_deg, close_deg in FINGER_CURL_CALIBRATION
+    ]
+    return (sum(curls) / len(curls) if curls else None), curls
 
 
 class UnityHandBridge:
@@ -237,6 +250,7 @@ class UnityHandBridge:
             on_threshold=self.fist_on_threshold,
             off_threshold=self.fist_off_threshold,
         )
+        right_intent_closure, right_intent_curls = right_operator_closure_prior(payload)
         gesture_state = {
             "type": "xr_hand_gesture_state",
             "source": "h5:xr-hands",
@@ -247,6 +261,11 @@ class UnityHandBridge:
             "left_fist_score": float(fist_score),
             "left_finger_curls": [float(value) for value in finger_curls],
             "deadman": 1 if self.left_fist else 0,
+            # Auxiliary intent only.  PerceptionAssistMonitor deliberately does
+            # not use this as robot closure or grasp evidence.
+            "right_operator_intent_closure_prior": right_intent_closure,
+            "right_operator_intent_finger_curls": [float(value) for value in right_intent_curls],
+            "right_prior_is_robot_actual_closure": False,
         }
         udp_sock.sendto(
             json.dumps(gesture_state, separators=(",", ":")).encode("utf-8"),

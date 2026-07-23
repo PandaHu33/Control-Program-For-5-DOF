@@ -210,7 +210,7 @@
       background: #0b1221;
       border: 1px solid rgba(255,255,255,0.06);
     }
-    .camera-slot video {
+    .camera-slot video, .camera-slot img {
       position: absolute;
       inset: 0;
       width: 100%;
@@ -536,40 +536,33 @@
     </div>
 
     <div class="card console-wide">
-      <h2>实验记录</h2>
-      <div class="experiment-form">
-        <label>Task
-          <select id="experimentTask">
-            <option value="T1_reach">T1_reach</option>
-            <option value="T2_precision_align">T2_precision_align</option>
-          </select>
-        </label>
-        <label>Method
-          <select id="experimentMethod">
-            <option value="VR_wrist_hand">VR_wrist_hand</option>
-            <option value="glove_controller">glove_controller</option>
-            <option value="keyboard_or_gamepad">keyboard_or_gamepad</option>
-          </select>
-        </label>
-        <label>Trial
-          <input id="experimentTrialNo" type="number" min="1" value="1" />
-        </label>
-        <label>Success
-          <select id="experimentSuccess">
-            <option value="yes">yes</option>
-            <option value="no">no</option>
-          </select>
-        </label>
-        <button id="experimentStart">Start Trial</button>
-        <button id="experimentEnd" disabled>End Trial</button>
+      <h2>多模态同步记录</h2>
+      <div class="flex">
+        <button id="recordingStart">开始记录</button>
+        <button id="recordingStop" disabled>停止记录</button>
       </div>
       <div class="experiment-readout">
-        <div>Status<strong id="experimentStatus">idle</strong></div>
-        <div>Desired XYZ<strong id="experimentDesired">-</strong></div>
-        <div>Actual XYZ<strong id="experimentActual">-</strong></div>
-        <div>Error<strong id="experimentError">-</strong></div>
-        <div>Samples<strong id="experimentSamples">0</strong></div>
+        <div>状态<strong id="recordingStatus">idle</strong></div>
+        <div>会话<strong id="recordingSession">-</strong></div>
+        <div>时长<strong id="recordingElapsed">0.0 s</strong></div>
+        <div>机械臂样本<strong id="recordingArmSamples">0</strong></div>
+        <div>灵巧手样本<strong id="recordingHandSamples">0</strong></div>
+        <div>左相机帧<strong id="recordingLeftFrames">0</strong></div>
+        <div>右相机帧<strong id="recordingRightFrames">0</strong></div>
       </div>
+      <p class="status-line" id="recordingHint">开始前将检查机械臂、灵巧手、左右相机和磁盘空间。</p>
+    </div>
+
+    <div class="card console-wide" id="perceptionAssistCard">
+      <h2>形态—负载一致性辅助（monitor-only）</h2>
+      <div class="experiment-readout">
+        <div>状态<strong id="perceptionAssistState">FREE</strong></div>
+        <div>判别有效<strong id="perceptionAssistValid">否</strong></div>
+        <div>WA100 实际闭合度<strong id="perceptionAssistClosure">-</strong></div>
+        <div>受载通道<strong id="perceptionAssistLoaded">-</strong></div>
+        <div>电流残差 (mA)<strong id="perceptionAssistResidual">-</strong></div>
+      </div>
+      <p class="status-line warning" id="perceptionAssistHint">等待 WA100 遥测及实测开/闭边界、无接触电流基线。此模块不会发送任何控制命令。</p>
     </div>
 
     <div class="card">
@@ -658,14 +651,14 @@
         <div>
           <div class="camera-slot">
             <span class="camera-slot-label" id="leftCameraLabel">左摄像头</span>
-            <video id="leftCameraPreview" autoplay muted playsinline></video>
+            <img id="leftCameraPreview" alt="left camera preview" />
           </div>
           <p class="status-line camera-slot-status" id="leftCameraStatus">等待左摄像头...</p>
         </div>
         <div>
           <div class="camera-slot">
             <span class="camera-slot-label" id="rightCameraLabel">右摄像头</span>
-            <video id="rightCameraPreview" autoplay muted playsinline></video>
+            <img id="rightCameraPreview" alt="right camera preview" />
           </div>
           <p class="status-line camera-slot-status" id="rightCameraStatus">等待右摄像头...</p>
         </div>
@@ -900,12 +893,6 @@
           <button id="toggleAuto" class="active">Auto-send: ON</button>
         </div>
         <p class="status-line" id="lastPacket">Last packet: -</p>
-        <div class="flex" style="margin-top: 8px;">
-          <button id="toggleDataLog">Start Log</button>
-          <button id="downloadDataLog">Download CSV</button>
-          <button id="clearDataLog">Clear Log</button>
-        </div>
-        <p class="status-line" id="dataLogStatus">Data log: stopped, 0 rows</p>
         <p class="status-line">Frame: JSON schema + CRC32 (fixed-length)</p>
       </div>
 
@@ -1023,6 +1010,23 @@
     const downloadDataLogBtn = document.getElementById("downloadDataLog");
     const clearDataLogBtn = document.getElementById("clearDataLog");
     const dataLogStatus = document.getElementById("dataLogStatus");
+    const recordingStartBtn = document.getElementById("recordingStart");
+    const recordingStopBtn = document.getElementById("recordingStop");
+    const recordingStatusEl = document.getElementById("recordingStatus");
+    const recordingSessionEl = document.getElementById("recordingSession");
+    const recordingElapsedEl = document.getElementById("recordingElapsed");
+    const recordingArmSamplesEl = document.getElementById("recordingArmSamples");
+    const recordingHandSamplesEl = document.getElementById("recordingHandSamples");
+    const recordingLeftFramesEl = document.getElementById("recordingLeftFrames");
+    const recordingRightFramesEl = document.getElementById("recordingRightFrames");
+    const recordingHintEl = document.getElementById("recordingHint");
+    const perceptionAssistCard = document.getElementById("perceptionAssistCard");
+    const perceptionAssistState = document.getElementById("perceptionAssistState");
+    const perceptionAssistValid = document.getElementById("perceptionAssistValid");
+    const perceptionAssistClosure = document.getElementById("perceptionAssistClosure");
+    const perceptionAssistLoaded = document.getElementById("perceptionAssistLoaded");
+    const perceptionAssistResidual = document.getElementById("perceptionAssistResidual");
+    const perceptionAssistHint = document.getElementById("perceptionAssistHint");
     const experimentTask = document.getElementById("experimentTask");
     const experimentMethod = document.getElementById("experimentMethod");
     const experimentTrialNo = document.getElementById("experimentTrialNo");
@@ -1248,6 +1252,7 @@
       if (systemStateEl) systemStateEl.textContent = data.state || "UNKNOWN";
       if (data.hand_mode) setHandModeUi(data.hand_mode);
       if (data.arm_control) setArmAuthorityUi(data.arm_control);
+      if (data.perception_assist) renderPerceptionAssist(data.perception_assist);
       updateButtonAvailability(data.state || "OFFLINE");
       if (moduleGrid) {
         const modules = { ...(data.modules || {}) };
@@ -1504,6 +1509,37 @@
       }
     }
 
+    function renderPerceptionAssist(decision) {
+      if (!decision) return;
+      const valid = Number(decision.valid) === 1;
+      const state = String(decision.state || "FREE");
+      if (perceptionAssistState) perceptionAssistState.textContent = state;
+      if (perceptionAssistValid) perceptionAssistValid.textContent = valid ? "是" : "否";
+      if (perceptionAssistClosure) {
+        const closure = decision.closure_score === null || decision.closure_score === undefined
+          ? NaN : Number(decision.closure_score);
+        perceptionAssistClosure.textContent = Number.isFinite(closure) ? closure.toFixed(3) : "-";
+      }
+      if (perceptionAssistLoaded) perceptionAssistLoaded.textContent = (decision.loaded_fingers || []).join(", ") || "-";
+      if (perceptionAssistResidual) {
+        perceptionAssistResidual.textContent = (decision.current_residual || [])
+          .map((value) => value !== null && value !== undefined && Number.isFinite(Number(value)) ? Number(value).toFixed(1) : "-")
+          .join(" / ") || "-";
+      }
+      const degradedReason = String(decision.degraded_reason || "");
+      const currentStillValid = !!(decision.signal_validity && decision.signal_validity.current);
+      const fallback = valid
+        ? (degradedReason
+          ? `位置短时回退，电流仍有效：${degradedReason}`
+          : "仅为负载代理与实际闭合构型的联合证据，不能表述为已成功抓住。")
+        : `${currentStillValid ? "电流遥测仍有效；" : ""}判别无效：${decision.invalid_reason || "未校准或数据缺失"}`;
+      if (perceptionAssistHint) {
+        perceptionAssistHint.textContent = decision.prompt_message || fallback;
+        perceptionAssistHint.classList.toggle("warning", !valid || ["EARLY_CONTACT", "OVERLOAD"].includes(state));
+      }
+      if (perceptionAssistCard) perceptionAssistCard.dataset.state = state;
+    }
+
     async function loadCameraModeSettings() {
       try {
         const res = await fetch(`${API_BASE}/api/camera/startup-mode`, { cache: "no-store" });
@@ -1522,7 +1558,7 @@
             { slot: "left", name: "左摄像头", index: 0, mirror: true },
             { slot: "right", name: "右摄像头", index: 1, mirror: true },
           ],
-          video: { width: 640, height: 480, framerate: 30, layout: "vstack" },
+          video: { width: 640, height: 480, framerate: 20, layout: "vstack" },
           hls_url: DEFAULT_VIDEO_URL,
         };
         updateCameraModeUi(cameraModeSettings);
@@ -1546,7 +1582,10 @@
       cameraStreams[slot] = null;
       cameraDeviceIds[slot] = null;
       const { video } = cameraElements(slot);
-      if (video) video.srcObject = null;
+      if (video) {
+        if ("srcObject" in video) video.srcObject = null;
+        if (video.tagName === "IMG") video.removeAttribute("src");
+      }
     }
 
     function stopLocalCameraPreviews() {
@@ -1574,75 +1613,6 @@
         if (indexed && !usedIds.has(indexed.deviceId)) selected = indexed;
       }
       return selected || devices.find((device) => !usedIds.has(device.deviceId)) || null;
-    }
-
-    async function enumerateLabeledCameras() {
-      let devices = (await navigator.mediaDevices.enumerateDevices()).filter((item) => item.kind === "videoinput");
-      if (devices.length && !devices.some((item) => item.label)) {
-        const permissionStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-        permissionStream.getTracks().forEach((track) => track.stop());
-        devices = (await navigator.mediaDevices.enumerateDevices()).filter((item) => item.kind === "videoinput");
-      }
-      return devices;
-    }
-
-    async function openCameraSlot(config, device) {
-      const slot = config.slot;
-      const { video, label, status } = cameraElements(slot);
-      if (!video || !status) return false;
-      if (!device) {
-        stopCameraSlot(slot);
-        status.textContent = `${slot === "left" ? "左" : "右"}摄像头未找到`;
-        status.classList.add("warning");
-        return false;
-      }
-
-      const currentStream = cameraStreams[slot];
-      const currentTrack = currentStream?.getVideoTracks?.()[0];
-      if (currentTrack?.readyState === "live" && cameraDeviceIds[slot] === device.deviceId) {
-        return true;
-      }
-
-      stopCameraSlot(slot);
-      const videoConfig = cameraModeSettings?.video || {};
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            deviceId: { exact: device.deviceId },
-            width: { ideal: Number(videoConfig.width) || 640 },
-            height: { ideal: Number(videoConfig.height) || 480 },
-            frameRate: { ideal: Number(videoConfig.framerate) || 30 },
-          },
-        });
-        cameraStreams[slot] = stream;
-        cameraDeviceIds[slot] = device.deviceId;
-        video.srcObject = stream;
-        // Browser display shows the camera's physical orientation. The configured
-        // mirror flags belong to the RTSP/HLS streaming pipeline only.
-        video.style.transform = "none";
-        video.play().catch(() => {});
-        const track = stream.getVideoTracks()[0];
-        const shownName = track?.label || device.label || config.name || `${slot} camera`;
-        if (label) label.textContent = `${slot === "left" ? "左" : "右"}：${shownName}`;
-        status.textContent = `在线 · ${shownName}`;
-        status.classList.remove("warning");
-        if (track) {
-          track.addEventListener("ended", () => {
-            if (cameraStreams[slot] !== stream) return;
-            cameraStreams[slot] = null;
-            cameraDeviceIds[slot] = null;
-            video.srcObject = null;
-            status.textContent = "摄像头连接已断开，等待重试";
-            status.classList.add("warning");
-          }, { once: true });
-        }
-        return true;
-      } catch (err) {
-        status.textContent = `打开失败: ${err?.message || err || "未知错误"}`;
-        status.classList.add("warning");
-        return false;
-      }
     }
 
     function clearVideoPair(video, player) {
@@ -1696,40 +1666,25 @@
         stopCameraStreamPlayback();
         if (cameraStreamFrame) cameraStreamFrame.style.display = "none";
         if (usbCameraFrame) usbCameraFrame.style.display = "grid";
-        if (!navigator.mediaDevices?.enumerateDevices || !navigator.mediaDevices?.getUserMedia) {
-          stopLocalCameraPreviews();
-          cameraLocalStatus = { status: "WARNING", message: "浏览器不支持双摄像头预览" };
-          if (usbCameraHint) usbCameraHint.textContent = cameraLocalStatus.message;
-          return;
-        }
-
-        let devices = [];
+        let health = null;
         try {
-          devices = await enumerateLabeledCameras();
-        } catch (err) {
-          stopLocalCameraPreviews();
-          cameraLocalStatus = { status: "WARNING", message: `摄像头权限或检测失败: ${err?.message || err}` };
-          if (leftCameraStatus) leftCameraStatus.textContent = cameraLocalStatus.message;
-          if (rightCameraStatus) rightCameraStatus.textContent = cameraLocalStatus.message;
-          if (usbCameraHint) usbCameraHint.textContent = cameraLocalStatus.message;
-          return;
-        }
-
-        const configs = Array.isArray(settings.cameras) ? settings.cameras : [];
-        const usedIds = new Set();
-        const selections = configs.map((config) => {
-          const device = selectConfiguredCamera(devices, config, usedIds);
-          if (device) usedIds.add(device.deviceId);
-          return { config, device };
-        });
-        const results = [];
-        for (const selection of selections) results.push(await openCameraSlot(selection.config, selection.device));
-        const onlineCount = results.filter(Boolean).length;
+          const response = await fetch(`${settings.camera_service_url || "http://127.0.0.1:8092"}/health`, { cache: "no-store" });
+          health = await response.json();
+        } catch (_err) {}
+        const leftOnline = !!health?.left?.fresh;
+        const rightOnline = !!health?.right?.fresh;
+        if (leftCameraPreview && leftOnline && !leftCameraPreview.hasAttribute("src")) leftCameraPreview.src = settings.left_preview_url;
+        if (rightCameraPreview && rightOnline && !rightCameraPreview.hasAttribute("src")) rightCameraPreview.src = settings.right_preview_url;
+        if (leftCameraPreview && !leftOnline) leftCameraPreview.removeAttribute("src");
+        if (rightCameraPreview && !rightOnline) rightCameraPreview.removeAttribute("src");
+        if (leftCameraStatus) leftCameraStatus.textContent = leftOnline ? "在线 · 统一采集服务" : "左摄像头离线";
+        if (rightCameraStatus) rightCameraStatus.textContent = rightOnline ? "在线 · 统一采集服务" : "右摄像头离线";
+        const onlineCount = Number(leftOnline) + Number(rightOnline);
         cameraLocalStatus = onlineCount === 2
-          ? { status: "ONLINE", message: "双摄像头正在显控网页中显示" }
+          ? { status: "ONLINE", message: "双摄像头由统一采集服务显示并可同步记录" }
           : onlineCount === 1
             ? { status: "WARNING", message: "仅一路摄像头可用" }
-            : { status: "OFFLINE", message: "两路摄像头均不可用" };
+            : { status: "OFFLINE", message: "双摄像头采集服务不可用" };
         if (usbCameraHint) usbCameraHint.textContent = cameraLocalStatus.message;
       } finally {
         if (lastStatus) renderSupervisorStatus(lastStatus);
@@ -2122,6 +2077,63 @@
         appendConsoleLog("ERROR", "实验 trial 创建失败", err.message);
         experimentBusy = false;
         setExperimentUiState("start failed");
+      }
+    }
+
+    function renderRecordingStatus(data) {
+      if (!data) return;
+      const state = data.recording_state || "idle";
+      const active = ["arming", "recording", "stopping"].includes(state);
+      if (recordingStatusEl) recordingStatusEl.textContent = state;
+      if (recordingSessionEl) recordingSessionEl.textContent = data.session_id || "-";
+      if (recordingElapsedEl) recordingElapsedEl.textContent = `${Number(data.elapsed_sec || 0).toFixed(1)} s`;
+      if (recordingArmSamplesEl) recordingArmSamplesEl.textContent = String(data.counts?.arm || 0);
+      if (recordingHandSamplesEl) recordingHandSamplesEl.textContent = String(data.counts?.hand || 0);
+      if (recordingLeftFramesEl) recordingLeftFramesEl.textContent = String(data.counts?.left_frames || 0);
+      if (recordingRightFramesEl) recordingRightFramesEl.textContent = String(data.counts?.right_frames || 0);
+      const recordingReady = !!data.readiness?.ok;
+      if (recordingStartBtn) recordingStartBtn.disabled = active || !recordingReady;
+      if (recordingStopBtn) recordingStopBtn.disabled = !active || state === "arming";
+      if (recordingHintEl) {
+        if (data.error) recordingHintEl.textContent = data.error;
+        else if (state === "recording") recordingHintEl.textContent = "机械臂、灵巧手和双相机数据正在服务端持续落盘。";
+        else if (data.readiness && !data.readiness.ok) {
+          const cameraHealth = data.readiness.camera_health || {};
+          const cameraReason = (side, label) => {
+            const detail = cameraHealth[side] || {};
+            const age = Number(detail.age_sec);
+            if (detail.error) return `${label}(${detail.error})`;
+            if (Number.isFinite(age)) return `${label}(帧龄 ${(age * 1000).toFixed(0)} ms)`;
+            return `${label}(无新帧)`;
+          };
+          const missing = [];
+          if (!data.readiness.arm) missing.push("机械臂遥测");
+          if (!data.readiness.hand) missing.push("灵巧手遥测");
+          if (!data.readiness.left_camera) missing.push(cameraReason("left", "左相机"));
+          if (!data.readiness.right_camera) missing.push(cameraReason("right", "右相机"));
+          if (!data.readiness.disk) missing.push("磁盘空间");
+          if (data.readiness.camera_error) missing.push(`相机服务(${data.readiness.camera_error})`);
+          recordingHintEl.textContent = `未就绪: ${missing.join(", ")}`;
+        } else recordingHintEl.textContent = "开始前将检查机械臂、灵巧手、左右相机和磁盘空间。";
+        recordingHintEl.classList.toggle("warning", !!data.error || (!!data.readiness && !data.readiness.ok));
+      }
+    }
+
+    async function recordingRequest(path) {
+      try {
+        const response = await fetch(`${API_BASE}${path}`, {
+          method: path.endsWith("/status") ? "GET" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: path.endsWith("/status") ? undefined : "{}",
+          cache: "no-store",
+        });
+        const data = await response.json();
+        renderRecordingStatus(data);
+        if (!data.ok && path !== "/api/recording/status") appendConsoleLog("ERROR", data.message || "记录操作失败");
+        return data;
+      } catch (err) {
+        renderRecordingStatus({ recording_state: "error", error: `记录服务不可用: ${err.message || err}` });
+        return null;
       }
     }
 
@@ -3474,6 +3486,10 @@
     if (experimentEndBtn) {
       experimentEndBtn.addEventListener("click", finishExperimentTrial);
     }
+    if (recordingStartBtn) recordingStartBtn.addEventListener("click", () => recordingRequest("/api/recording/start"));
+    if (recordingStopBtn) recordingStopBtn.addEventListener("click", () => recordingRequest("/api/recording/stop"));
+    recordingRequest("/api/recording/status");
+    setInterval(() => recordingRequest("/api/recording/status"), 1000);
     updateDataLogStatus();
     setExperimentUiState("idle");
 

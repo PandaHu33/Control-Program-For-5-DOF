@@ -23,7 +23,8 @@ export ARM_RUNTIME_MOTION_DURATION="${ARM_RUNTIME_MOTION_DURATION:-5.0}"
 export ARM_TRAJECTORY_PLANNER_ENABLE="${ARM_TRAJECTORY_PLANNER_ENABLE:-0}"
 export ARM_MOTION_DATA_LOG_ENABLE="${ARM_MOTION_DATA_LOG_ENABLE:-1}"
 export ARM_MOTION_DATA_LOG_PATH="${ARM_MOTION_DATA_LOG_PATH:-${ROBOT_LOG_DIR}/arm_motion_unplanned.csv}"
-export ARM_CMD="${ARM_CMD:-roslaunch mainpulator mainpulatorlaunch.launch control_type:=${ARM_CONTROL_TYPE} runtime_motion_duration:=${ARM_RUNTIME_MOTION_DURATION} trajectory_planner_enabled:=${ARM_TRAJECTORY_PLANNER_ENABLE} motion_data_log_enabled:=${ARM_MOTION_DATA_LOG_ENABLE} motion_data_log_path:=${ARM_MOTION_DATA_LOG_PATH}}"
+export ARM_ACTUAL_CURRENT_FEEDBACK_ENABLE="${ARM_ACTUAL_CURRENT_FEEDBACK_ENABLE:-1}"
+export ARM_CMD="${ARM_CMD:-roslaunch mainpulator mainpulatorlaunch.launch control_type:=${ARM_CONTROL_TYPE} runtime_motion_duration:=${ARM_RUNTIME_MOTION_DURATION} trajectory_planner_enabled:=${ARM_TRAJECTORY_PLANNER_ENABLE} motion_data_log_enabled:=${ARM_MOTION_DATA_LOG_ENABLE} motion_data_log_path:=${ARM_MOTION_DATA_LOG_PATH} actual_current_feedback_enabled:=${ARM_ACTUAL_CURRENT_FEEDBACK_ENABLE}}"
 
 # Optional: only enable if your arm control node does not directly receive H5 UDP frames.
 export UDP_BRIDGE_ENABLE="${UDP_BRIDGE_ENABLE:-1}"

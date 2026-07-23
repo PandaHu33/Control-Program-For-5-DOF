@@ -1,0 +1,11 @@
+std_msgs/Header header
+uint32 schema_version
+string control_mode
+float64[5] actual_q_rad
+float64[5] target_q_rad
+float64[5] actual_dq_rad_s
+float64[5] target_dq_rad_s
+float64[5] actual_current_ma
+float64[5] commanded_torque_nm
+uint8 current_valid_mask
+uint8 velocity_valid_mask
