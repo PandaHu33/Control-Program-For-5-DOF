@@ -32,6 +32,12 @@ def load_h5_bridge(path, module_name):
     sys.modules.setdefault("sensor_msgs", sensor_msgs)
     sys.modules.setdefault("sensor_msgs.msg", sensor_msgs_msg)
 
+    mainpulator = types.ModuleType("mainpulator")
+    mainpulator_msg = types.ModuleType("mainpulator.msg")
+    mainpulator_msg.ArmRecordingState = _Message
+    sys.modules.setdefault("mainpulator", mainpulator)
+    sys.modules.setdefault("mainpulator.msg", mainpulator_msg)
+
     spec = importlib.util.spec_from_file_location(module_name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -63,7 +69,6 @@ class H5SourceHelperTests(unittest.TestCase):
                 ]
 
             self.assertEqual(len(active_source_assignments(methods["__init__"])), 1, path)
-            self.assertEqual(len(active_source_assignments(methods["write_latency_trace"])), 0, path)
 
     def test_workspace_and_deployment_helpers_match(self):
         paths = [
@@ -78,6 +83,41 @@ class H5SourceHelperTests(unittest.TestCase):
             self.assertEqual(module.source_from_note("bridge:preset:test"), "preset")
             self.assertIsNone(module.source_from_note("ui:vision"))
             self.assertIsNone(module.source_switch_from_note("bridge:source:unknown"))
+
+    def test_versioned_recording_message_serializes_validity_and_nan(self):
+        module = load_h5_bridge(
+            ROOT / "DataSet_ws/src/h5_udp_bridge/scripts/h5_udp_bridge_node.py",
+            "h5_bridge_recording_test",
+        )
+        bridge = object.__new__(module.H5UdpBridge)
+        bridge.tx_queue = module.queue.Queue()
+
+        class Stamp:
+            def to_sec(self):
+                return 1.25
+
+            def to_nsec(self):
+                return 1_250_000_000
+
+        message = _Message(
+            schema_version=1,
+            header=_Message(seq=9, stamp=Stamp()),
+            control_mode="torque",
+            current_valid_mask=0b00111,
+            velocity_valid_mask=0b01111,
+            actual_q_rad=[1.0] * 5,
+            target_q_rad=[2.0] * 5,
+            actual_dq_rad_s=[3.0, 3.0, 3.0, 3.0, float("nan")],
+            target_dq_rad_s=[4.0] * 5,
+            actual_current_ma=[100.0, 200.0, 300.0, float("nan"), float("nan")],
+            commanded_torque_nm=[5.0, 5.0, 5.0, float("nan"), float("nan")],
+        )
+        bridge.on_recording_state(message)
+        payload = bridge.tx_queue.get_nowait()["_recording"]
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["source_time_ns"], 1_250_000_000)
+        self.assertEqual(payload["current_valid_mask"], 0b00111)
+        self.assertIsNone(payload["actual_current_ma"][4])
 
 
 if __name__ == "__main__":

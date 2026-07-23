@@ -284,6 +284,8 @@ namespace param{
 	void Enable(const int sock_fd,int length,control::mainpulator& joint);
 
 	void MomentInit(control::mainpulator& joint,const int sock_fd);
+	bool ConfigureActualCurrentFeedback(control::mainpulator& joint,const int sock_fd);
+	bool DisableActualCurrentFeedback(control::mainpulator& joint,const int sock_fd);
 
 	//void MomentEnable(const int sock_fd,int length,control::mainpulator& joint);
 	

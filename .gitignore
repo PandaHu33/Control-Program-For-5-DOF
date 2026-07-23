@@ -5,12 +5,15 @@
 *.log
 control_ui/logs/
 Hand_Tracker/logs/
+control_ui/calibration/
+control_ui/recordings/
 
 # Editor-local settings
 .vscode/
 
 # Local packaged/runtime artifacts
 build/
+analysis_outputs/
 control_ui/bridge.exe
 
 # Python caches and local conda environments

@@ -1,4 +1,14 @@
+[submodule "DataSet_ws/src/ROS-TCP-Endpoint"]
+	path = DataSet_ws/src/ROS-TCP-Endpoint
+	url = git@github.com:PandaHu33/ROS-TCP-Endpoint.git
+	branch = codex/control-program-customizations
+
+[submodule "DataSet_ws/src/usb_cam"]
+	path = DataSet_ws/src/usb_cam
+	url = git@github.com:PandaHu33/usb_cam.git
+	branch = codex/control-program-customizations
+
 [submodule "wa100-sdk-publish"]
 	path = wa100-sdk-publish
 	url = git@github.com:PandaHu33/wa100-sdk-publish.git
-	branch = test
+	branch = main

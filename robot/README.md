@@ -229,3 +229,20 @@ Meaning:
 
 - Windows backend sends H5 command frames to Jetson UDP `14551`.
 - Jetson sends arm telemetry back to Windows backend UDP `14550`.
+
+## Actual-current recording rollout
+
+The recorder uses the versioned `/robot/recording_state`
+(`mainpulator/ArmRecordingState`) topic and does not interpret the legacy H5
+`current[]` field as motor current. J1-J5 actual current is carried by TPDO3
+(`0x381`-`0x385`) mapped to CANopen `0x6078`; TPDO2 remains velocity.
+
+Actual-current feedback is enabled by default after the SDO and 100 Hz TPDO3
+bench checks completed successfully:
+
+```bash
+export ARM_ACTUAL_CURRENT_FEEDBACK_ENABLE=1
+```
+
+Set the variable to `0` to disable the feature. When disabled, current validity
+bits remain clear and the recorder never substitutes zero.

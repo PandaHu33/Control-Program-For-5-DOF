@@ -8,9 +8,6 @@ service:
   mjpeg_hz: 15
   jpeg_quality: 80
 
-logging:
-  wrist_latency_csv: "logs/wrist_latency.csv"
-
 teleop:
   phase: "approach"
 
@@ -90,3 +87,10 @@ controller_delta:
   gain_xyz: [0.5, 0.5, 0.5]
   stale_timeout_sec: 0.40
   deadman_button_label: "Left X"
+
+# Read-only raw controller pose side channel for glove/controller calibration.
+# It does not send arm or hand commands.
+sensor_alignment_telemetry:
+  enabled: true
+  host: "127.0.0.1"
+  controller_port: 25006

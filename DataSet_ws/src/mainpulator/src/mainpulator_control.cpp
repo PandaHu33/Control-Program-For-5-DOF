@@ -1,4 +1,5 @@
 #include "mainpulator/mainpulator_control.h"
+#include <cstdint>
 using namespace std;
 namespace control{
     mainpulator::mainpulator(int id)
@@ -242,18 +243,17 @@ namespace control{
 
     }
     void mainpulator:: ActualCurrent(const can_msgs::Frame& electric){
-        short val = 0;
+        if (electric.dlc < 2) return;
+        const std::int16_t val = static_cast<std::int16_t>(
+            static_cast<std::uint16_t>(electric.data[0]) |
+            (static_cast<std::uint16_t>(electric.data[1]) << 8));
         string str ;
        /* for(int i=0;i<electric.dlc;i++)
         {
         //    std::cout << std::hex << (electric.data[i] & 0xff) << " ";
         }*/
         //cout<<endl;
-        for (int i = electric.dlc-4; i >=0; i--)
-        {
-            val = (val<<8)+electric.data[i];
-        }
-        this->electric = val*this->electricinit/1000;
+        this->electric = static_cast<double>(val) * static_cast<double>(this->electricinit) / 1000.0;
       // ROS_INFO("joint_%d  val =  %d   current electric = %f",this->id,  val,this->electric);
     }
 

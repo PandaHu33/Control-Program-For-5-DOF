@@ -9,6 +9,8 @@
 
   <buildtool_depend>catkin</buildtool_depend>
 
-  <exec_depend>rospy</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>mainpulator</depend>
 </package>

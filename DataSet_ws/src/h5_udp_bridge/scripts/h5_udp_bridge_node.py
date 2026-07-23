@@ -3,9 +3,7 @@
 from __future__ import print_function
 
 import binascii
-import csv
 import json
-import os
 import select
 import socket
 import struct
@@ -19,6 +17,7 @@ except ImportError:
 import rospy
 from std_msgs.msg import String
 from sensor_msgs.msg import Imu, JointState
+from mainpulator.msg import ArmRecordingState
 
 
 FRAME_SIZE = 293
@@ -102,6 +101,16 @@ def stamp_ms(msg):
     return int(time.time() * 1000)
 
 
+def stamp_ns(msg):
+    stamp = getattr(getattr(msg, "header", None), "stamp", None)
+    try:
+        if stamp and stamp.to_sec() > 0:
+            return int(stamp.to_nsec())
+    except Exception:
+        pass
+    return int(time.time() * 1000000000)
+
+
 def normalize_arm_source(value):
     source = to_text(value).strip().lower()
     return source if source in ARM_SOURCES else None
@@ -149,7 +158,6 @@ def parse_command_frame(data, source):
         "crc_actual": actual_crc,
         "crc_ok": expected_crc == actual_crc,
         "recv_time": time.time(),
-        "recv_time_ns": int(time.time() * 1000000000),
     }
 
 
@@ -189,8 +197,6 @@ class H5UdpBridge(object):
         self.send_heartbeat = bool(rospy.get_param("~send_heartbeat", True))
         self.heartbeat_hz = float(rospy.get_param("~heartbeat_hz", 2.0))
         self.learn_telemetry_target = bool(rospy.get_param("~learn_telemetry_target", True))
-        self.latency_trace_enabled = bool(rospy.get_param("~latency_trace_enabled", False))
-        self.latency_trace_path = rospy.get_param("~latency_trace_path", "/tmp/h5_latency_trace.csv")
 
         command_topic = rospy.get_param("~command_topic", "/h5/arm_command")
         status_topic = rospy.get_param("~status_topic", "/h5/udp_status")
@@ -201,6 +207,7 @@ class H5UdpBridge(object):
         imitation_state_topic = rospy.get_param("~imitation_state_topic", "/robot/imitation_state")
         joint_states_topic = rospy.get_param("~joint_states_topic", "/joint_states")
         motion_status_topic = rospy.get_param("~motion_status_topic", "/arm/motion_status")
+        recording_state_topic = rospy.get_param("~recording_state_topic", "/robot/recording_state")
 
         self.command_pub = rospy.Publisher(command_topic, String, queue_size=20)
         self.status_pub = rospy.Publisher(status_topic, String, queue_size=20)
@@ -219,6 +226,9 @@ class H5UdpBridge(object):
         self.motion_status_sub = rospy.Subscriber(
             motion_status_topic, String, self.on_motion_status, queue_size=20
         )
+        self.recording_state_sub = rospy.Subscriber(
+            recording_state_topic, ArmRecordingState, self.on_recording_state, queue_size=50
+        )
         self.tx_queue = queue.Queue()
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -236,23 +246,6 @@ class H5UdpBridge(object):
         self.recent_command_keys = {}
         self.active_source = "idle"
         self.active_source_pub.publish(String(data=self.active_source))
-
-    def write_latency_trace(self, command):
-        if not self.latency_trace_enabled:
-            return
-        path = self.latency_trace_path
-        needs_header = not os.path.exists(path) or os.path.getsize(path) == 0
-        try:
-            with open(path, "a") as handle:
-                writer = csv.writer(handle)
-                if needs_header:
-                    writer.writerow(["ind", "source", "source_time_ms", "udp_rx_ns", "ros_publish_ns"])
-                writer.writerow([
-                    command["ind"], source_from_note(command["note"]) or "unknown",
-                    command["time"], command["recv_time_ns"], command["ros_publish_time_ns"],
-                ])
-        except Exception as exc:
-            self.publish_status("ERROR", "LATENCY_TRACE_WRITE_FAILED", str(exc))
 
     def set_active_source(self, source, event="SOURCE_SWITCH"):
         source = normalize_arm_source(source)
@@ -412,8 +405,34 @@ class H5UdpBridge(object):
         }
         self.tx_queue.put(payload)
 
+    def on_recording_state(self, msg):
+        if int(getattr(msg, "schema_version", 0)) != 1:
+            return
+        def finite_values(values):
+            return [value if value == value and abs(value) != float("inf") else None for value in values]
+        payload = {
+            "type": "arm_recording_state",
+            "schema_version": 1,
+            "seq": int(getattr(msg.header, "seq", 0)),
+            "source_time_ns": stamp_ns(msg),
+            "control_mode": to_text(msg.control_mode) or "unknown",
+            "current_valid_mask": int(msg.current_valid_mask),
+            "velocity_valid_mask": int(msg.velocity_valid_mask),
+            "actual_q_rad": finite_values(msg.actual_q_rad),
+            "target_q_rad": finite_values(msg.target_q_rad),
+            "actual_dq_rad_s": finite_values(msg.actual_dq_rad_s),
+            "target_dq_rad_s": finite_values(msg.target_dq_rad_s),
+            "actual_current_ma": finite_values(msg.actual_current_ma),
+            "commanded_torque_nm": finite_values(msg.commanded_torque_nm),
+        }
+        self.tx_queue.put({"_recording": payload})
+
     def send_telemetry(self, payload):
         if not self.target_ip:
+            return
+        if "_recording" in payload:
+            data = json.dumps(payload["_recording"], separators=(",", ":"), allow_nan=False).encode("utf-8")
+            self.sock.sendto(data, (self.target_ip, self.target_port))
             return
         frame = pack_telemetry_frame(payload, self.last_selector)
         self.sock.sendto(frame, (self.target_ip, self.target_port))
@@ -478,8 +497,6 @@ class H5UdpBridge(object):
         if command_key in self.recent_command_keys:
             return
         self.recent_command_keys[command_key] = now
-        command["ros_publish_time_ns"] = int(time.time() * 1000000000)
-        self.write_latency_trace(command)
         self.publish_json(self.command_pub, command)
 
         # 转发为期望关节角到 /pub_joint_state
@@ -512,7 +529,9 @@ class H5UdpBridge(object):
         next_heartbeat = 0.0
         timeout = 1.0 / max(1.0, self.heartbeat_hz)
         while not rospy.is_shutdown():
-            readable, _, _ = select.select([self.sock], [], [], 0.05)
+            # Drain recorder telemetry at 100 Hz without batching tens of source
+            # timestamps behind a 50 ms socket wait.
+            readable, _, _ = select.select([self.sock], [], [], 0.005)
             if readable:
                 try:
                     data, source = self.sock.recvfrom(4096)

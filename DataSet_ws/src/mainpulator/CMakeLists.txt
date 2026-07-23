@@ -18,6 +18,7 @@ find_package(catkin REQUIRED COMPONENTS
   joy
   sensor_msgs
   geometry_msgs
+  message_generation
 )
 #uncomment the following 4 lines to use the Eigen library
 find_package(cmake_modules REQUIRED)
@@ -72,11 +73,10 @@ add_definitions(${EIGEN_DEFINITIONS})
 ##   * add every package in MSG_DEP_SET to generate_messages(DEPENDENCIES ...)
 
 ## Generate messages in the 'msg' folder
-# add_message_files(
-#   FILES
-#   Message1.msg
-#   Message2.msg
-# )
+add_message_files(
+  FILES
+  ArmRecordingState.msg
+)
 
 
 
@@ -97,10 +97,10 @@ add_definitions(${EIGEN_DEFINITIONS})
 # )
 
 ## Generate added messages and services with any dependencies listed here
-# generate_messages(
-#   DEPENDENCIES
-#   std_msgs
-# )
+generate_messages(
+  DEPENDENCIES
+  std_msgs
+)
 
 
 ################################################
@@ -137,9 +137,10 @@ catkin_package(
   INCLUDE_DIRS 
     include
   LIBRARIES 
-    control
-    param
-    trajectory
+    mainpulator_library
+  CATKIN_DEPENDS
+    message_runtime
+    std_msgs
     
 )
 
@@ -236,6 +237,7 @@ add_dependencies(mainpulator_library ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catki
 # )
 
 add_executable(test_node src/test_node.cpp)
+add_dependencies(test_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 # add_executable(Z_demo01_pub src/Z_demo01_pub.cpp)
 # add_executable(Z_demo02_sub src/Z_demo02_sub.cpp)
 
@@ -386,6 +388,11 @@ if(CATKIN_ENABLE_TESTING)
   catkin_add_gtest(test_motion_csv_logger test/test_motion_csv_logger.cpp)
   if(TARGET test_motion_csv_logger)
     target_link_libraries(test_motion_csv_logger mainpulator_library)
+  endif()
+
+  catkin_add_gtest(test_actual_current test/test_actual_current.cpp)
+  if(TARGET test_actual_current)
+    target_link_libraries(test_actual_current mainpulator_library ${catkin_LIBRARIES})
   endif()
 endif()
 

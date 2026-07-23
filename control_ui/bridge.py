@@ -50,6 +50,16 @@ except ImportError:
         safe_slug,
     )
 
+try:
+    from recording_service import RecordingManager
+except ImportError:
+    from control_ui.recording_service import RecordingManager
+
+try:
+    from perception_assist_monitor import PerceptionAssistMonitor, load_monitor_config
+except ImportError:
+    from control_ui.perception_assist_monitor import PerceptionAssistMonitor, load_monitor_config
+
 
 def unique_paths(paths):
     seen = set()
@@ -159,7 +169,9 @@ program_cfg = cfg.get("programs", {})
 local_check_cfg = cfg.get("local_checks", {})
 hand_control_cfg = cfg.get("hand_control", {})
 experiment_cfg = cfg.get("experiment", {})
+recording_cfg = cfg.get("recording", {})
 arm_control_cfg = cfg.get("arm_control", {})
+rtsp_camera_cfg = cfg.get("rtsp_dual_camera", {})
 
 SSH_COMMON_OPTIONS = [
     "-o", "BatchMode=yes",
@@ -193,10 +205,34 @@ HAND_CONTROL_REPEAT_INTERVAL_SEC = max(0.0, float(local_check_cfg.get("hand_cont
 LOOP_FILTER = str(udp_cfg.get("loop_filter", 1)).lower() not in ["0", "false", "no"]
 LOOP_FILTER_WINDOW = float(udp_cfg.get("loop_filter_window", 0.5))
 EXPERIMENT_LOG_DIR = BASE_DIR / str(experiment_cfg.get("log_dir", "experiment_logs"))
+RECORDING_ROOT = BASE_DIR / str(recording_cfg.get("root_dir", "recordings"))
+CAMERA_SERVICE_HOST = str(recording_cfg.get("camera_service_host", "127.0.0.1"))
+CAMERA_SERVICE_PORT = int(recording_cfg.get("camera_service_port", 8092))
+HAND_TELEMETRY_HOST = str(recording_cfg.get("hand_telemetry_host", "127.0.0.1"))
+HAND_TELEMETRY_PORT = int(recording_cfg.get("hand_telemetry_port", 25003))
+RECORDING_MIN_FREE_BYTES = int(float(recording_cfg.get("min_free_gib", 2.0)) * 1024 ** 3)
+RECORDING_MAX_DURATION_SEC = float(recording_cfg.get("max_duration_minutes", 10.0)) * 60.0
+RECORDING_ALIGNMENT_HZ = float(recording_cfg.get("alignment_hz", 20.0))
+RECORDING = RecordingManager(
+    RECORDING_ROOT,
+    f"http://{CAMERA_SERVICE_HOST}:{CAMERA_SERVICE_PORT}",
+    RECORDING_MIN_FREE_BYTES,
+    RECORDING_MAX_DURATION_SEC,
+    alignment_hz=RECORDING_ALIGNMENT_HZ,
+)
+PERCEPTION_CONFIG_PATH = BASE_DIR / "perception_assist_config.json"
+PERCEPTION_CONFIG = load_monitor_config(PERCEPTION_CONFIG_PATH)
+PERCEPTION_MONITOR = PerceptionAssistMonitor(PERCEPTION_CONFIG)
+PERCEPTION_UNITY_TARGET = (
+    str(PERCEPTION_CONFIG.get("unity_udp_host", "127.0.0.1")),
+    int(PERCEPTION_CONFIG.get("unity_udp_port", 25004)),
+)
+PERCEPTION_UNITY_SOCKET = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+PERCEPTION_LAST_PAYLOAD = None
+PERCEPTION_LAST_RECEIVE_MONOTONIC_NS = 0
+PERCEPTION_LAST_STATUS_PUSH = 0.0
 RUNTIME_MOTION_DURATION_SEC = max(0.001, float(arm_control_cfg.get("runtime_motion_duration_sec", 5.0)))
 ARM_LEGACY_HOME_FALLBACK = str(arm_control_cfg.get("legacy_home_fallback", False)).strip().lower() in {"1", "true", "yes", "on"}
-LATENCY_TRACE_ENABLED = str(arm_control_cfg.get("latency_trace_enabled", False)).strip().lower() in {"1", "true", "yes", "on"}
-LATENCY_TRACE_LOG_DIR = BASE_DIR / str(arm_control_cfg.get("latency_trace_log_dir", "latency_logs"))
 
 
 def config_bool(value, default=False):
@@ -205,6 +241,110 @@ def config_bool(value, default=False):
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+CAMERA_STARTUP_MODES = {"display", "stream"}
+CAMERA_STARTUP_SETTINGS_PATH = BASE_DIR / "logs" / "camera_startup_mode.json"
+
+
+def normalize_camera_startup_mode(value, default="display"):
+    mode = str(value or "").strip().lower()
+    if mode in CAMERA_STARTUP_MODES:
+        return mode
+    return default
+
+
+def read_camera_startup_override(path=None):
+    settings_path = Path(path or CAMERA_STARTUP_SETTINGS_PATH)
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8-sig"))
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return None
+    return normalize_camera_startup_mode(data.get("mode"), None) if isinstance(data, dict) else None
+
+
+def save_camera_startup_override(mode, path=None):
+    normalized = normalize_camera_startup_mode(mode, None)
+    if normalized is None:
+        raise ValueError("mode must be 'display' or 'stream'")
+
+    settings_path = Path(path or CAMERA_STARTUP_SETTINGS_PATH)
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = settings_path.with_name(
+        f"{settings_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    payload = {
+        "mode": normalized,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime()),
+    }
+    try:
+        temp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temp_path, settings_path)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+    return normalized
+
+
+CAMERA_DEFAULT_STARTUP_MODE = normalize_camera_startup_mode(
+    rtsp_camera_cfg.get("startup_mode"), "display"
+)
+CAMERA_ACTIVE_MODE = normalize_camera_startup_mode(
+    os.environ.get("UEM_CAMERA_ACTIVE_MODE"),
+    read_camera_startup_override() or CAMERA_DEFAULT_STARTUP_MODE,
+)
+
+
+def camera_video_size():
+    raw = str(rtsp_camera_cfg.get("video_size", "640x480")).lower().split("x", 1)
+    try:
+        width, height = int(raw[0]), int(raw[1])
+    except (ValueError, IndexError):
+        return 640, 480
+    return max(1, width), max(1, height)
+
+
+def camera_startup_settings():
+    next_mode = read_camera_startup_override() or CAMERA_DEFAULT_STARTUP_MODE
+    width, height = camera_video_size()
+    hls_port = int(rtsp_camera_cfg.get("hls_port", 8081))
+    stream_path = str(rtsp_camera_cfg.get("stream_path", "usb_camera")).strip("/") or "usb_camera"
+    cameras = [
+        {
+            "slot": "left",
+            "name": str(rtsp_camera_cfg.get("left_video_device", "") or ""),
+            "index": int(rtsp_camera_cfg.get("left_camera_index", 0)),
+            "mirror": config_bool(rtsp_camera_cfg.get("left_mirror"), True),
+        },
+        {
+            "slot": "right",
+            "name": str(rtsp_camera_cfg.get("right_video_device", "") or ""),
+            "index": int(rtsp_camera_cfg.get("right_camera_index", 1)),
+            "mirror": config_bool(rtsp_camera_cfg.get("right_mirror"), True),
+        },
+    ]
+    return {
+        "active_mode": CAMERA_ACTIVE_MODE,
+        "next_mode": next_mode,
+        "default_mode": CAMERA_DEFAULT_STARTUP_MODE,
+        "restart_required": next_mode != CAMERA_ACTIVE_MODE,
+        "cameras": cameras,
+        "video": {
+            "width": width,
+            "height": height,
+            "framerate": max(1, int(rtsp_camera_cfg.get("framerate", 30))),
+            "layout": str(rtsp_camera_cfg.get("layout", "vstack") or "vstack"),
+        },
+        "hls_url": f"http://localhost:{hls_port}/{stream_path}/index.m3u8",
+        "left_preview_url": f"http://localhost:{CAMERA_SERVICE_PORT}/left.mjpg",
+        "right_preview_url": f"http://localhost:{CAMERA_SERVICE_PORT}/right.mjpg",
+        "camera_service_url": f"http://localhost:{CAMERA_SERVICE_PORT}",
+    }
 
 
 def normalize_hand_mode(mode):
@@ -239,7 +379,6 @@ STATE_LOCK = threading.RLock()
 CAMERA_FRAME_LOCK = threading.RLock()
 EXPERIMENT_LOCK = threading.RLock()
 ARM_COMMAND_LOCK = threading.RLock()
-LATENCY_TRACE_LOCK = threading.RLock()
 LOGS = deque(maxlen=300)
 PENDING_ARM_COMMANDS = {}
 PROCESSES = {}
@@ -413,29 +552,6 @@ ARM_PRESET_REPEAT_COUNT = 8
 ARM_PRESET_REPEAT_INTERVAL_SEC = 0.035
 ARM_TELEMETRY_TIMEOUT_SEC = 1.0
 ARM_FRAME_COUNTER = 0
-LATENCY_TRACE_COLUMNS = [
-    "date", "ind", "source", "source_time_ms", "ws_rx_ns", "udp_tx_ns", "bridge_us"
-]
-
-
-def record_latency_trace(frame, ws_rx_ns, udp_tx_ns):
-    if not LATENCY_TRACE_ENABLED or frame is None:
-        return
-    day = time.strftime("%Y%m%d", time.localtime())
-    path = LATENCY_TRACE_LOG_DIR / f"bridge_{day}.csv"
-    row = {
-        "date": day,
-        "ind": int(frame.ind),
-        "source": frame.source or "unknown",
-        "source_time_ms": int(frame.time_ms),
-        "ws_rx_ns": int(ws_rx_ns),
-        "udp_tx_ns": int(udp_tx_ns),
-        "bridge_us": (int(udp_tx_ns) - int(ws_rx_ns)) / 1000.0,
-    }
-    with LATENCY_TRACE_LOCK:
-        append_csv_rows(path, LATENCY_TRACE_COLUMNS, [row])
-
-
 def acknowledge_arm_command(ind):
     with ARM_COMMAND_LOCK:
         PENDING_ARM_COMMANDS.pop(int(ind) & 0xFFFFFFFF, None)
@@ -496,6 +612,18 @@ SYSTEM = {
         "rejected_frames": 0,
         "last_reject_reason": "",
     },
+    "perception_assist": {
+        "type": "perception_assist_state",
+        "schema_version": 1,
+        "state": "FREE",
+        "valid": 0,
+        "invalid_reason": "awaiting_wa100_telemetry_and_commissioned_baseline",
+        "reason": "monitor_invalid_no_grasp_inference",
+        "monitor_only": True,
+        "grasp_success_confirmed": False,
+        "loaded_fingers": [],
+        "current_residual": [None] * 6,
+    },
     "modules": {
         "backend": {"status": "ONLINE", "last_seen": time.time(), "message": "后端服务运行中"},
         "jetson": {"status": "OFFLINE", "last_seen": 0, "message": "未检查"},
@@ -537,6 +665,7 @@ def snapshot():
             "state": SYSTEM["state"],
             "hand_mode": SYSTEM.get("hand_mode", DEFAULT_HAND_MODE),
             "arm_control": arm_control,
+            "perception_assist": json.loads(json.dumps(SYSTEM.get("perception_assist", {}), ensure_ascii=False)),
             "modules": json.loads(json.dumps(SYSTEM["modules"], ensure_ascii=False)),
             "faults": list(SYSTEM["faults"])[-20:],
             "logs": list(LOGS)[:80],
@@ -871,10 +1000,16 @@ def refresh_program_status(name):
             if endpoint_matches_host(item, HAND_UDP_LISTEN_HOST) and item.get("pid") == proc.pid
         ]
         if endpoints:
-            msg = f"已监听 UDP {describe_endpoints(endpoints)}"
-            set_module(name, "ONLINE", msg)
+            endpoint_text = describe_endpoints(endpoints)
+            if RECORDING.hand_telemetry_fresh():
+                msg = f"已监听 UDP {endpoint_text}，WA100 记录遥测正常"
+                set_module(name, "ONLINE", msg)
+                refresh_hand_link_status()
+                return True, msg
+            msg = f"控制端口已监听 {endpoint_text}，等待 WA100 UDP 25003 记录遥测"
+            set_module(name, "WARNING", msg)
             refresh_hand_link_status()
-            return True, msg
+            return False, msg
         msg = f"进程运行中，但未监听 UDP {HAND_UDP_LISTEN_HOST}:{HAND_UDP_LISTEN_PORT}"
         set_module(name, "WARNING", msg)
         refresh_hand_link_status()
@@ -1237,8 +1372,37 @@ def latest_camera_frame():
 
 def do_command(method, path, body=None):
     log_event("ACTION", f"{method} {path}")
+    if path == "/api/recording/status" and method == "GET":
+        readiness = RECORDING.readiness()
+        return {"ok": True, **RECORDING.status(), "readiness": readiness}
+    if path == "/api/recording/start" and method == "POST":
+        with STATE_LOCK:
+            arm_mode = SYSTEM.get("arm_control", {}).get("mode", "unknown")
+            hand_mode = SYSTEM.get("hand_mode", "unknown")
+        return RECORDING.start(f"{arm_mode}+{hand_mode}")
+    if path == "/api/recording/stop" and method == "POST":
+        return RECORDING.stop()
+    if path == "/api/perception-assist/status" and method == "GET":
+        with STATE_LOCK:
+            status = json.loads(json.dumps(SYSTEM.get("perception_assist", {}), ensure_ascii=False))
+        return {"ok": True, **status}
     if path == "/api/status":
         return command_result(True, "状态已返回")
+    if path == "/api/camera/startup-mode" and method == "GET":
+        return command_result(True, "摄像头启动模式已返回", camera_startup_settings())
+    if path == "/api/camera/startup-mode" and method == "POST":
+        requested_mode = (body or {}).get("mode") if isinstance(body, dict) else None
+        try:
+            saved_mode = save_camera_startup_override(requested_mode)
+        except ValueError as exc:
+            return command_result(False, str(exc), camera_startup_settings())
+        except OSError as exc:
+            return command_result(False, f"摄像头启动模式保存失败: {exc}", camera_startup_settings())
+        return command_result(
+            True,
+            "摄像头模式已保存，将在下次一键启动时生效",
+            {**camera_startup_settings(), "next_mode": saved_mode},
+        )
     if path == "/api/experiment/trial/start" and method == "POST":
         return start_experiment_trial(body)
     if path == "/api/experiment/trial/samples" and method == "POST":
@@ -1656,7 +1820,6 @@ def websocket_client_loop(client):
             if opcode == 0x8:
                 break
             if client.path == UDP_PATH and opcode == 0x2:
-                ws_rx_ns = time.time_ns()
                 active_mode, active_owner = current_arm_authority()
                 decision = arbitrate_ws_frame(
                     payload,
@@ -1672,8 +1835,6 @@ def websocket_client_loop(client):
                 if LOOP_FILTER:
                     recent_ws_crc.append((binascii.crc32(payload) & 0xFFFFFFFF, time.time(), len(payload)))
                 udp.sendto(payload, (UDP_HOST, UDP_SEND_PORT))
-                udp_tx_ns = time.time_ns()
-                record_latency_trace(decision.frame, ws_rx_ns, udp_tx_ns)
                 # Per-frame output is intentionally disabled to avoid control-path jitter.
     except Exception as exc:
         print(f"[WS] client closed: {exc}")
@@ -1738,6 +1899,14 @@ def udp_broadcast_loop():
                     log_event("WARNING", "UDP 远端端口暂不可达，遥测监听继续保持", exc)
                 continue
             raise
+        if data[:1] == b"{":
+            try:
+                payload = json.loads(data.decode("utf-8"))
+                if payload.get("type") == "arm_recording_state" and int(payload.get("schema_version", 0)) == 1:
+                    RECORDING.observe_arm(payload, time.time_ns(), time.monotonic_ns())
+                    continue
+            except (UnicodeDecodeError, ValueError, TypeError):
+                pass
         if LOOP_FILTER:
             crc = binascii.crc32(data) & 0xFFFFFFFF
             now = time.time()
@@ -1757,7 +1926,45 @@ def udp_broadcast_loop():
                 client.close()
 
 
+def hand_telemetry_loop():
+    global PERCEPTION_LAST_PAYLOAD, PERCEPTION_LAST_RECEIVE_MONOTONIC_NS, PERCEPTION_LAST_STATUS_PUSH
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((HAND_TELEMETRY_HOST, HAND_TELEMETRY_PORT))
+    print(f"[UDP] hand recording telemetry on {HAND_TELEMETRY_HOST}:{HAND_TELEMETRY_PORT}")
+    while True:
+        data, _source = sock.recvfrom(65535)
+        try:
+            payload = json.loads(data.decode("utf-8"))
+            if payload.get("type") != "wa100_recording_state" or int(payload.get("schema_version", 0)) not in {1, 2}:
+                continue
+            receive_utc_ns, receive_monotonic_ns = time.time_ns(), time.monotonic_ns()
+            decision = PERCEPTION_MONITOR.update(payload, receive_utc_ns, receive_monotonic_ns)
+            PERCEPTION_LAST_PAYLOAD = payload
+            PERCEPTION_LAST_RECEIVE_MONOTONIC_NS = receive_monotonic_ns
+            RECORDING.observe_hand(payload, receive_utc_ns, receive_monotonic_ns)
+            RECORDING.observe_episode(decision, receive_utc_ns, receive_monotonic_ns)
+            with STATE_LOCK:
+                old = SYSTEM.get("perception_assist", {})
+                changed = old.get("state") != decision["state"] or old.get("valid") != decision["valid"]
+                SYSTEM["perception_assist"] = decision
+            encoded = json.dumps(decision, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            try:
+                PERCEPTION_UNITY_SOCKET.sendto(encoded, PERCEPTION_UNITY_TARGET)
+            except OSError:
+                pass
+            if decision.get("events"):
+                level = "WARNING" if decision["state"] in {"EARLY_CONTACT", "OVERLOAD"} else "ASSIST"
+                log_event(level, decision.get("prompt_message") or decision["state"], decision.get("reason"))
+            elif changed or time.monotonic() - PERCEPTION_LAST_STATUS_PUSH >= 0.20:
+                PERCEPTION_LAST_STATUS_PUSH = time.monotonic()
+                push_status()
+        except (UnicodeDecodeError, ValueError, TypeError):
+            continue
+
+
 def heartbeat_loop():
+    global PERCEPTION_LAST_STATUS_PUSH
     heartbeat_modules = {"network", "udp_bridge", "camera"}
     while True:
         now = time.time()
@@ -1794,6 +2001,31 @@ def heartbeat_loop():
             log_event("CONTROL", f"arm authority {expired_authority[0]} -> idle", "stale telemetry")
         if changed:
             push_status()
+        if PERCEPTION_LAST_PAYLOAD and PERCEPTION_LAST_RECEIVE_MONOTONIC_NS:
+            stale_after_ns = int(float(PERCEPTION_CONFIG.get("stale_timeout_sec", 0.25)) * 1e9)
+            if time.monotonic_ns() - PERCEPTION_LAST_RECEIVE_MONOTONIC_NS > stale_after_ns:
+                with STATE_LOCK:
+                    was_valid = bool(SYSTEM.get("perception_assist", {}).get("valid"))
+                if was_valid:
+                    receive_utc_ns, receive_monotonic_ns = time.time_ns(), time.monotonic_ns()
+                    decision = PERCEPTION_MONITOR.update(PERCEPTION_LAST_PAYLOAD, receive_utc_ns, receive_monotonic_ns)
+                    RECORDING.observe_episode(decision, receive_utc_ns, receive_monotonic_ns)
+                    with STATE_LOCK:
+                        SYSTEM["perception_assist"] = decision
+                    try:
+                        PERCEPTION_UNITY_SOCKET.sendto(
+                            json.dumps(decision, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+                            PERCEPTION_UNITY_TARGET,
+                        )
+                    except OSError:
+                        pass
+                    log_event("WARNING", decision.get("prompt_message") or "抓持辅助判别数据过期", decision.get("invalid_reason"))
+        try:
+            watchdog_result = RECORDING.watchdog()
+            if watchdog_result:
+                log_event("ERROR", "recording stopped after modality loss", watchdog_result.get("error"))
+        except Exception as exc:
+            log_event("ERROR", "recording watchdog failed", exc)
         time.sleep(1)
 
 
@@ -1818,6 +2050,7 @@ def main():
     threading.Thread(target=start_http_api, daemon=True).start()
     threading.Thread(target=websocket_server, daemon=True).start()
     threading.Thread(target=udp_broadcast_loop, daemon=True).start()
+    threading.Thread(target=hand_telemetry_loop, daemon=True).start()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
     threading.Thread(target=local_program_monitor_loop, daemon=True).start()
     acquire_arm_authority("idle")
