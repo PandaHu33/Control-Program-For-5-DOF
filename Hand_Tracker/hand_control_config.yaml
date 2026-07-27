@@ -94,3 +94,24 @@ sensor_alignment_telemetry:
   enabled: true
   host: "127.0.0.1"
   controller_port: 25006
+
+# Right-controller translation/authority + Hi5 Hand=1 wrist orientation fusion.
+# m1: controller-only wrist; m2: complementary fusion; m3: m2 plus
+# calibration-ID, age and cross-modal innovation gates.
+master_fusion:
+  enabled: true
+  mode: "m3"
+  host: "127.0.0.1"
+  glove_port: 25008
+  state_port: 25007
+  alignment_calibration_path: "../wa100-sdk-publish/build/bin/glove_controller_alignment.json"
+  glove_euler_order: "zyx"
+  glove_stale_timeout_sec: 0.15
+  controller_stale_timeout_sec: 0.40
+  controller_correction_tau_sec: 0.20
+  weight_ramp_tau_sec: 0.15
+  innovation_soft_deg: 10.0
+  innovation_reject_deg: 25.0
+  glove_calibration_path: "../wa100-sdk-publish/build/bin/thumb_glove_calibration.json"
+  # Optional override. Empty reads calibration_id from glove_calibration_path.
+  glove_calibration_id: ""

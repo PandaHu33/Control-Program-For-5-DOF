@@ -158,6 +158,9 @@ class RecordingManager:
         self._arm_fh = self._hand_fh = self._episode_fh = None
         self._arm_writer = self._hand_writer = self._episode_writer = None
         self._arm_rows, self._hand_rows, self._episode_rows = [], [], []
+        self._fusion_fh = self._controller_input_fh = self._glove_input_fh = None
+        self._fusion_rows = []
+        self._last_master_controller_seq = self._last_master_glove_seq = None
         self._camera_counts = {"left": 0, "right": 0}
         self._last_arm_receive_ns = 0
         self._last_hand_receive_ns = 0
@@ -268,6 +271,39 @@ class RecordingManager:
             self._episode_writer.writerow(row)
             self._episode_rows.append(row)
 
+    def observe_master_fusion(self, payload, receive_utc_ns=None, receive_monotonic_ns=None):
+        """Record the fused state and de-duplicate its embedded raw inputs."""
+        receive_utc_ns = int(receive_utc_ns or time.time_ns())
+        receive_monotonic_ns = int(receive_monotonic_ns or time.monotonic_ns())
+        if payload.get("type") != "master_fusion_state":
+            return
+        with self.lock:
+            if self.state != "recording":
+                return
+            record = dict(payload)
+            record["record_receive_utc_ns"] = receive_utc_ns
+            record["record_receive_monotonic_ns"] = receive_monotonic_ns
+            self._fusion_fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+            self._fusion_rows.append(record)
+
+            controller = dict(payload.get("controller") or {})
+            controller_seq = int(controller.get("seq", -1))
+            if controller_seq >= 0 and controller_seq != self._last_master_controller_seq:
+                controller["record_receive_utc_ns"] = receive_utc_ns
+                self._controller_input_fh.write(
+                    json.dumps(controller, ensure_ascii=False, separators=(",", ":")) + "\n"
+                )
+                self._last_master_controller_seq = controller_seq
+
+            glove = dict(payload.get("glove") or {})
+            glove_seq = int(glove.get("frame_id", -1))
+            if glove_seq >= 0 and glove_seq != self._last_master_glove_seq:
+                glove["record_receive_utc_ns"] = receive_utc_ns
+                self._glove_input_fh.write(
+                    json.dumps(glove, ensure_ascii=False, separators=(",", ":")) + "\n"
+                )
+                self._last_master_glove_seq = glove_seq
+
     def hand_telemetry_fresh(self, timeout_ns=500_000_000):
         now = time.time_ns()
         return bool(self._last_hand_receive_ns and now - self._last_hand_receive_ns <= int(timeout_ns))
@@ -339,7 +375,7 @@ class RecordingManager:
         directory.mkdir(parents=True)
         started_ns = time.time_ns()
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "session_id": session_id,
             "date": day,
             "task": "general_recording",
@@ -355,7 +391,7 @@ class RecordingManager:
             "readiness": ready,
         }
         _json_write(directory / "manifest.inprogress.json", manifest)
-        arm_fh = hand_fh = episode_fh = None
+        arm_fh = hand_fh = episode_fh = fusion_fh = controller_input_fh = glove_input_fh = None
         try:
             camera = _http_json(
                 self.camera_base_url + "/record/start", "POST",
@@ -366,11 +402,18 @@ class RecordingManager:
             arm_fh = (directory / "arm.csv").open("w", newline="", encoding="utf-8", buffering=1)
             hand_fh = (directory / "hand.csv").open("w", newline="", encoding="utf-8", buffering=1)
             episode_fh = (directory / "episode_records.csv").open("w", newline="", encoding="utf-8", buffering=1)
+            fusion_fh = (directory / "master_fusion.jsonl").open("w", encoding="utf-8", buffering=1)
+            controller_input_fh = (directory / "master_controller_input.jsonl").open(
+                "w", encoding="utf-8", buffering=1
+            )
+            glove_input_fh = (directory / "master_glove_input.jsonl").open(
+                "w", encoding="utf-8", buffering=1
+            )
             arm_writer, hand_writer = csv.DictWriter(arm_fh, self.ARM_COLUMNS), csv.DictWriter(hand_fh, self.HAND_COLUMNS)
             episode_writer = csv.DictWriter(episode_fh, self.EPISODE_RECORD_COLUMNS)
             arm_writer.writeheader(); hand_writer.writeheader(); episode_writer.writeheader()
         except Exception as exc:
-            for fh in (arm_fh, hand_fh, episode_fh):
+            for fh in (arm_fh, hand_fh, episode_fh, fusion_fh, controller_input_fh, glove_input_fh):
                 if fh:
                     fh.close()
             try:
@@ -389,6 +432,11 @@ class RecordingManager:
             self._arm_fh, self._hand_fh, self._episode_fh = arm_fh, hand_fh, episode_fh
             self._arm_writer, self._hand_writer, self._episode_writer = arm_writer, hand_writer, episode_writer
             self._arm_rows, self._hand_rows, self._episode_rows = [], [], []
+            self._fusion_fh = fusion_fh
+            self._controller_input_fh = controller_input_fh
+            self._glove_input_fh = glove_input_fh
+            self._fusion_rows = []
+            self._last_master_controller_seq = self._last_master_glove_seq = None
             self._camera_counts = {"left": 0, "right": 0}
             self._clock = ClockMapper()
             self.state = "recording"
@@ -415,11 +463,15 @@ class RecordingManager:
         except Exception as exc:
             errors.append(f"camera stop failed: {exc}")
         with self.lock:
-            for fh in (self._arm_fh, self._hand_fh, self._episode_fh):
+            for fh in (
+                self._arm_fh, self._hand_fh, self._episode_fh,
+                self._fusion_fh, self._controller_input_fh, self._glove_input_fh,
+            ):
                 if fh:
                     fh.flush(); fh.close()
             self._arm_fh = self._hand_fh = self._episode_fh = None
             self._arm_writer = self._hand_writer = self._episode_writer = None
+            self._fusion_fh = self._controller_input_fh = self._glove_input_fh = None
         try:
             alignment = self._write_alignment(session, stopped_ns)
         except Exception as exc:
@@ -437,6 +489,7 @@ class RecordingManager:
                     errors.append(f"missing or empty {side}.mp4")
         manifest = dict(session["manifest"])
         duration_sec = (stopped_ns - session["started_at_ns"]) / 1e9
+        fusion_summary = self._master_fusion_summary()
         manifest.update({
             "state": "incomplete" if incomplete_reason or errors else "complete",
             "complete": not bool(incomplete_reason or errors),
@@ -444,14 +497,30 @@ class RecordingManager:
             "duration_sec": duration_sec,
             "incomplete_reason": incomplete_reason or "",
             "errors": errors,
-            "counts": {"arm": len(self._arm_rows), "hand": len(self._hand_rows), "episode_records": len(self._episode_rows), **alignment.get("counts", {})},
+            "counts": {
+                "arm": len(self._arm_rows),
+                "hand": len(self._hand_rows),
+                "episode_records": len(self._episode_rows),
+                **fusion_summary["counts"],
+                **alignment.get("counts", {}),
+            },
             "rates_hz": {
                 "arm": len(self._arm_rows) / duration_sec if duration_sec > 0 else 0.0,
                 "hand": len(self._hand_rows) / duration_sec if duration_sec > 0 else 0.0,
+                "master_fusion": len(self._fusion_rows) / duration_sec if duration_sec > 0 else 0.0,
+                "master_controller_input": (
+                    fusion_summary["counts"]["master_controller_input"] / duration_sec
+                    if duration_sec > 0 else 0.0
+                ),
+                "master_glove_input": (
+                    fusion_summary["counts"]["master_glove_input"] / duration_sec
+                    if duration_sec > 0 else 0.0
+                ),
             },
             "clock_model": self._clock.model(),
             "camera": camera,
             "alignment": alignment,
+            "master_fusion": fusion_summary,
         })
         _json_write(session["dir"] / "manifest.json", manifest)
         (session["dir"] / "manifest.inprogress.json").unlink(missing_ok=True)
@@ -460,7 +529,79 @@ class RecordingManager:
             self.state = "idle" if manifest["complete"] else "error"
             self.error = "; ".join(errors) or (incomplete_reason or "")
             self._arm_rows, self._hand_rows, self._episode_rows = [], [], []
+            self._fusion_rows = []
         return {"ok": manifest["complete"], "message": manifest["state"], "manifest": manifest, **self.status()}
+
+    def _master_fusion_summary(self):
+        rows = list(self._fusion_rows)
+        controller_seqs, glove_seqs = [], []
+        controller_ages, glove_ages = [], []
+        calibration_ids = {"time_and_extrinsic": set(), "glove_mapping": set()}
+        degradation_counts = {}
+        mode_counts = {}
+        last_mode = None
+        degradation_events = 0
+        for row in rows:
+            controller = row.get("controller") or {}
+            glove = row.get("glove") or {}
+            calibrations = row.get("calibrations") or {}
+            controller_seq, glove_seq = int(controller.get("seq", -1)), int(glove.get("frame_id", -1))
+            if controller_seq >= 0 and (not controller_seqs or controller_seq != controller_seqs[-1]):
+                controller_seqs.append(controller_seq)
+            if glove_seq >= 0 and (not glove_seqs or glove_seq != glove_seqs[-1]):
+                glove_seqs.append(glove_seq)
+            if _finite(controller.get("age_sec")):
+                controller_ages.append(float(controller["age_sec"]) * 1000.0)
+            if _finite(glove.get("age_sec")):
+                glove_ages.append(float(glove["age_sec"]) * 1000.0)
+            for key in calibration_ids:
+                value = str(calibrations.get(key) or "")
+                if value:
+                    calibration_ids[key].add(value)
+            mode = str(row.get("mode") or "invalid")
+            mode_counts[mode] = mode_counts.get(mode, 0) + 1
+            if mode != last_mode and last_mode is not None and mode != "fused":
+                degradation_events += 1
+            last_mode = mode
+            for reason in row.get("degradation_reasons") or []:
+                degradation_counts[str(reason)] = degradation_counts.get(str(reason), 0) + 1
+
+        def p95(values):
+            ordered = sorted(values)
+            return ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))] if ordered else None
+
+        return {
+            "files": {
+                "fusion": "master_fusion.jsonl",
+                "controller_input": "master_controller_input.jsonl",
+                "glove_input": "master_glove_input.jsonl",
+            },
+            "counts": {
+                "master_fusion": len(rows),
+                "master_controller_input": len(controller_seqs),
+                "master_glove_input": len(glove_seqs),
+            },
+            "drops": {
+                "controller_sequence": sum(
+                    max(0, current - previous - 1)
+                    for previous, current in zip(controller_seqs, controller_seqs[1:])
+                ),
+                "glove_sequence": sum(
+                    max(0, current - previous - 1)
+                    for previous, current in zip(glove_seqs, glove_seqs[1:])
+                ),
+            },
+            "data_age_p95_ms": {
+                "controller": p95(controller_ages),
+                "glove": p95(glove_ages),
+            },
+            "degradation_events": degradation_events,
+            "degradation_reason_samples": degradation_counts,
+            "mode_samples": mode_counts,
+            "calibration_ids": {
+                key: sorted(values) for key, values in calibration_ids.items()
+            },
+        }
 
     @staticmethod
     def _load_frames(path):
@@ -654,6 +795,7 @@ class RecordingManager:
                 "counts": {
                     "arm": len(self._arm_rows), "hand": len(self._hand_rows),
                     "episode_records": len(self._episode_rows),
+                    "master_fusion": len(self._fusion_rows),
                     "left_frames": self._camera_counts["left"],
                     "right_frames": self._camera_counts["right"],
                 },

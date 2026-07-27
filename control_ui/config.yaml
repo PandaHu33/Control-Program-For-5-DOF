@@ -30,6 +30,8 @@ recording:
   camera_service_port: 8092
   hand_telemetry_host: "127.0.0.1"
   hand_telemetry_port: 25003
+  master_fusion_host: "127.0.0.1"
+  master_fusion_port: 25007
   min_free_gib: 2.0
   max_duration_minutes: 10.0
 

@@ -56,6 +56,11 @@ except Exception as exc:
     _CAMERA_INPUT_AVAILABLE = False
     _CAMERA_IMPORT_ERROR = exc
 
+try:
+    from master_fusion import GloveFrameReceiver, MasterWristFusion
+except ImportError:
+    from Hand_Tracker.master_fusion import GloveFrameReceiver, MasterWristFusion
+
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "service": {
@@ -105,6 +110,23 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "enabled": True,
         "host": "127.0.0.1",
         "controller_port": 25006,
+    },
+    "master_fusion": {
+        "enabled": True,
+        "mode": "m3",
+        "host": "127.0.0.1",
+        "glove_port": 25008,
+        "state_port": 25007,
+        "alignment_calibration_path": "../wa100-sdk-publish/build/bin/glove_controller_alignment.json",
+        "glove_euler_order": "zyx",
+        "glove_stale_timeout_sec": 0.15,
+        "controller_stale_timeout_sec": 0.40,
+        "controller_correction_tau_sec": 0.20,
+        "weight_ramp_tau_sec": 0.15,
+        "innovation_soft_deg": 10.0,
+        "innovation_reject_deg": 25.0,
+        "glove_calibration_path": "../wa100-sdk-publish/build/bin/thumb_glove_calibration.json",
+        "glove_calibration_id": "",
     },
     "camera": {
         "index": "auto",
@@ -1374,9 +1396,26 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
     alignment_host = str(cfg_get(config, ("sensor_alignment_telemetry", "host"), "127.0.0.1"))
     alignment_port = int(cfg_get(config, ("sensor_alignment_telemetry", "controller_port"), 25006))
     alignment_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if alignment_enabled else None
+    fusion_settings = dict(cfg_get(config, ("master_fusion",), {}) or {})
+    fusion_enabled = bool(fusion_settings.get("enabled", True))
+    if not fusion_enabled:
+        fusion_settings["mode"] = "m1"
+    fusion_host = str(fusion_settings.get("host", "127.0.0.1"))
+    fusion_state_port = int(fusion_settings.get("state_port", 25007))
+    fusion_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if fusion_enabled else None
+    glove_receiver = GloveFrameReceiver(
+        fusion_host, int(fusion_settings.get("glove_port", 25008)), stopped
+    )
+    wrist_fusion = MasterWristFusion(
+        fusion_settings,
+        Path(str(cfg_get(config, ("_config_path",), Path(__file__).with_name("hand_control_config.yaml"))))
+        .resolve()
+        .parent,
+    )
     last_alignment_seq: Optional[int] = None
     receiver.start()
     gesture_receiver.start()
+    glove_receiver.start()
     try:
         while not stopped.is_set():
             controller.set_pose_source(shared.get_pose_source())
@@ -1388,7 +1427,28 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
                 pose["gesture_state_age_sec"] = None
             status = controller.update(pose, receiver.status())
             controller_pose = receiver.latest(controller_delta.hand, "right_controller")
-            controller_delta_status = controller_delta.update(controller_pose, receiver.status())
+            glove_frame, glove_age_sec = glove_receiver.snapshot()
+            fused_controller_pose, fusion_state = wrist_fusion.update(
+                controller_pose, glove_frame, glove_age_sec
+            )
+            controller_delta_status = controller_delta.update(fused_controller_pose, receiver.status())
+            controller_delta_status["master_fusion"] = {
+                "mode": fusion_state["mode"],
+                "mode_requested": fusion_state["mode_requested"],
+                "degradation_reasons": fusion_state["degradation_reasons"],
+                "innovation_deg": fusion_state["orientation"]["innovation_deg"],
+                "glove_weight": fusion_state["orientation"]["glove_weight"],
+                "validity": fusion_state["validity"],
+                "calibrations": fusion_state["calibrations"],
+            }
+            if fusion_socket is not None:
+                try:
+                    fusion_socket.sendto(
+                        json.dumps(fusion_state, separators=(",", ":")).encode("utf-8"),
+                        (fusion_host, fusion_state_port),
+                    )
+                except OSError:
+                    pass
             if alignment_socket is not None and controller_pose is not None:
                 alignment_seq = int(controller_pose.get("seq", -1))
                 if alignment_seq != last_alignment_seq:
@@ -1397,15 +1457,18 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
                     if position.size >= 3 and rotation.size >= 4:
                         alignment_payload = {
                             "type": "controller_pose_frame",
-                            "schema_version": 1,
+                            "schema_version": 2,
                             "seq": alignment_seq,
                             "device_time": float(controller_pose.get("device_time", 0.0)),
                             "source": "right_controller",
                             "tracked": bool(controller_pose.get("tracked", False)),
+                            "deadman_active": bool(controller_pose.get("deadman_active", False)),
                             "position_m": [float(value) for value in position[:3]],
                             "rotation_xyzw": [float(value) for value in rotation[:4]],
                             "receiver_wall_time_ns": int(float(controller_pose.get("wall_time", time.time())) * 1e9),
                             "publish_wall_time_ns": time.time_ns(),
+                            "controller_calibration_id": wrist_fusion.calibration_id,
+                            "extrinsic_calibration_id": wrist_fusion.calibration_id,
                         }
                         try:
                             alignment_socket.sendto(
@@ -1455,6 +1518,9 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
     finally:
         if alignment_socket is not None:
             alignment_socket.close()
+        if fusion_socket is not None:
+            fusion_socket.close()
+        glove_receiver.close()
         gesture_receiver.close()
         receiver.close()
 
@@ -1505,6 +1571,7 @@ def apply_cli_overrides(config: Dict[str, Any], args: argparse.Namespace) -> Dic
 def main() -> int:
     args = parse_args()
     config = apply_cli_overrides(load_config(args.config), args)
+    config["_config_path"] = str(args.config.resolve())
     settings = build_settings(config)
     controller = HandAxisController(settings)
 

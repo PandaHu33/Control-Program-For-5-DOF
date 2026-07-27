@@ -210,6 +210,8 @@ CAMERA_SERVICE_HOST = str(recording_cfg.get("camera_service_host", "127.0.0.1"))
 CAMERA_SERVICE_PORT = int(recording_cfg.get("camera_service_port", 8092))
 HAND_TELEMETRY_HOST = str(recording_cfg.get("hand_telemetry_host", "127.0.0.1"))
 HAND_TELEMETRY_PORT = int(recording_cfg.get("hand_telemetry_port", 25003))
+MASTER_FUSION_HOST = str(recording_cfg.get("master_fusion_host", "127.0.0.1"))
+MASTER_FUSION_PORT = int(recording_cfg.get("master_fusion_port", 25007))
 RECORDING_MIN_FREE_BYTES = int(float(recording_cfg.get("min_free_gib", 2.0)) * 1024 ** 3)
 RECORDING_MAX_DURATION_SEC = float(recording_cfg.get("max_duration_minutes", 10.0)) * 60.0
 RECORDING_ALIGNMENT_HZ = float(recording_cfg.get("alignment_hz", 20.0))
@@ -1963,6 +1965,22 @@ def hand_telemetry_loop():
             continue
 
 
+def master_fusion_telemetry_loop():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((MASTER_FUSION_HOST, MASTER_FUSION_PORT))
+    print(f"[UDP] master fusion telemetry on {MASTER_FUSION_HOST}:{MASTER_FUSION_PORT}")
+    while True:
+        data, _source = sock.recvfrom(65535)
+        try:
+            payload = json.loads(data.decode("utf-8"))
+            if payload.get("type") != "master_fusion_state" or int(payload.get("schema_version", 0)) != 1:
+                continue
+            RECORDING.observe_master_fusion(payload, time.time_ns(), time.monotonic_ns())
+        except (UnicodeDecodeError, ValueError, TypeError):
+            continue
+
+
 def heartbeat_loop():
     global PERCEPTION_LAST_STATUS_PUSH
     heartbeat_modules = {"network", "udp_bridge", "camera"}
@@ -2051,6 +2069,7 @@ def main():
     threading.Thread(target=websocket_server, daemon=True).start()
     threading.Thread(target=udp_broadcast_loop, daemon=True).start()
     threading.Thread(target=hand_telemetry_loop, daemon=True).start()
+    threading.Thread(target=master_fusion_telemetry_loop, daemon=True).start()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
     threading.Thread(target=local_program_monitor_loop, daemon=True).start()
     acquire_arm_authority("idle")

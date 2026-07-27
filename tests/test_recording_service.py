@@ -98,6 +98,30 @@ class RecordingManagerTests(unittest.TestCase):
                     "monitor_only": True, "grasp_success_confirmed": False,
                     "ablation": {"current_only": True, "closure_only": True, "joint": True},
                 }, receive_utc_ns=stamp, receive_monotonic_ns=stamp)
+                manager.observe_master_fusion({
+                    "type": "master_fusion_state",
+                    "schema_version": 1,
+                    "seq": index + 1,
+                    "mode": "fused" if index < 5 else "controller_only",
+                    "degradation_reasons": [] if index < 5 else ["glove_stale_or_invalid"],
+                    "controller": {
+                        "seq": index,
+                        "age_sec": 0.01,
+                        "position_m": [0.1, 0.2, 0.3],
+                        "rotation_xyzw": [0, 0, 0, 1],
+                    },
+                    "glove": {
+                        "frame_id": index,
+                        "age_sec": 0.02,
+                        "hand_index": 1,
+                        "local_finger_rotations_deg": [0.0] * 57,
+                        "mapped_target_units": [1000] * 6,
+                    },
+                    "calibrations": {
+                        "time_and_extrinsic": "alignment-test",
+                        "glove_mapping": "glove-test",
+                    },
+                }, receive_utc_ns=stamp, receive_monotonic_ns=stamp)
             for side in ("left", "right"):
                 (session_dir / f"{side}.mp4").write_bytes(b"synthetic-video")
                 with (session_dir / f"{side}_frames.csv").open("w", newline="", encoding="utf-8") as fh:
@@ -113,6 +137,9 @@ class RecordingManagerTests(unittest.TestCase):
             self.assertEqual(manifest["counts"]["arm"], 12)
             self.assertEqual(manifest["counts"]["hand"], 7)
             self.assertEqual(manifest["counts"]["episode_records"], 7)
+            self.assertEqual(manifest["counts"]["master_fusion"], 7)
+            self.assertEqual(manifest["counts"]["master_controller_input"], 7)
+            self.assertEqual(manifest["counts"]["master_glove_input"], 7)
             self.assertEqual(manifest["alignment_hz"], 20.0)
             self.assertEqual(manifest["alignment_file"], "aligned_20hz.csv")
             self.assertTrue((session_dir / "aligned_20hz.csv").exists())
@@ -132,6 +159,14 @@ class RecordingManagerTests(unittest.TestCase):
                 episode_records = list(csv.DictReader(fh))
             self.assertEqual(episode_records[0]["timestamp_source"], "wa100_source_time_ns")
             self.assertEqual(episode_records[0]["grasp_success_confirmed"], "0")
+            self.assertTrue((session_dir / "master_fusion.jsonl").exists())
+            self.assertTrue((session_dir / "master_controller_input.jsonl").exists())
+            self.assertTrue((session_dir / "master_glove_input.jsonl").exists())
+            self.assertEqual(
+                manifest["master_fusion"]["calibration_ids"]["time_and_extrinsic"],
+                ["alignment-test"],
+            )
+            self.assertEqual(manifest["master_fusion"]["degradation_events"], 1)
 
     @mock.patch("control_ui.recording_service._http_json")
     def test_missing_required_modality_rejects_start(self, camera_api):
