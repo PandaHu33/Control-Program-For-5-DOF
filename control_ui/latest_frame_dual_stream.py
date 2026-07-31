@@ -33,6 +33,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--right-name", default="right")
     parser.add_argument("--left-mirror", action="store_true")
     parser.add_argument("--right-mirror", action="store_true")
+    parser.add_argument("--left-vertical-flip", action="store_true")
+    parser.add_argument("--right-vertical-flip", action="store_true")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=float, default=20.0)
@@ -61,6 +63,10 @@ def fourcc_to_text(value: float) -> str:
     return "".join(chr((code >> (8 * i)) & 0xFF) for i in range(4))
 
 
+def apply_vertical_flip(frame: np.ndarray, enabled: bool) -> np.ndarray:
+    return cv2.flip(frame, 0) if enabled else frame
+
+
 @dataclass
 class CameraState:
     label: str
@@ -69,6 +75,7 @@ class CameraState:
     height: int
     fps: float
     fourcc: str
+    vertical_flip: bool
     lock: threading.Lock
     latest_frame: Optional[np.ndarray] = None
     latest_time: float = 0.0
@@ -125,6 +132,7 @@ class CameraReader:
                 if not ok or frame is None:
                     time.sleep(0.002)
                     continue
+                frame = apply_vertical_flip(frame, self.state.vertical_flip)
                 with self.state.lock:
                     self.state.latest_frame = frame
                     self.state.latest_time = now
@@ -470,6 +478,7 @@ def main() -> int:
         height=args.height,
         fps=args.fps,
         fourcc=args.fourcc,
+        vertical_flip=args.left_vertical_flip,
         lock=threading.Lock(),
     )
     right = CameraState(
@@ -479,6 +488,7 @@ def main() -> int:
         height=args.height,
         fps=args.fps,
         fourcc=args.fourcc,
+        vertical_flip=args.right_vertical_flip,
         lock=threading.Lock(),
     )
 
@@ -519,6 +529,8 @@ def main() -> int:
             "layout": args.layout,
             "leftMirror": bool(args.left_mirror),
             "rightMirror": bool(args.right_mirror),
+            "leftVerticalFlip": bool(args.left_vertical_flip),
+            "rightVerticalFlip": bool(args.right_vertical_flip),
             "size": f"{out_w}x{out_h}",
             "fps": args.fps,
             "startedAt": time.time(),
@@ -589,6 +601,8 @@ def main() -> int:
                         "layout": args.layout,
                         "leftMirror": bool(args.left_mirror),
                         "rightMirror": bool(args.right_mirror),
+                        "leftVerticalFlip": bool(args.left_vertical_flip),
+                        "rightVerticalFlip": bool(args.right_vertical_flip),
                         "size": f"{out_w}x{out_h}",
                         "fps": args.fps,
                         "writtenFrames": written,

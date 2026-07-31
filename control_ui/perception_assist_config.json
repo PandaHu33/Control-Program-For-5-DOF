@@ -1,7 +1,7 @@
 {
   "enabled": true,
   "monitor_only": true,
-  "channel_names": ["thumb_yaw", "thumb_pitch", "index", "middle", "ring", "pinky"],
+  "channel_names": ["thumb_pitch", "thumb_yaw", "index", "middle", "ring", "pinky"],
   "finger_names": ["thumb", "thumb", "index", "middle", "ring", "pinky"],
   "closure_open_units": [2000, 2000, 2000, 2000, 2000, 2000],
   "closure_close_units": [0, 0, 0, 0, 0, 0],

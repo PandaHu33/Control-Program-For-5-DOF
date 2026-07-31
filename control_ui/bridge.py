@@ -322,12 +322,14 @@ def camera_startup_settings():
             "name": str(rtsp_camera_cfg.get("left_video_device", "") or ""),
             "index": int(rtsp_camera_cfg.get("left_camera_index", 0)),
             "mirror": config_bool(rtsp_camera_cfg.get("left_mirror"), True),
+            "vertical_flip": config_bool(rtsp_camera_cfg.get("left_vertical_flip"), False),
         },
         {
             "slot": "right",
             "name": str(rtsp_camera_cfg.get("right_video_device", "") or ""),
             "index": int(rtsp_camera_cfg.get("right_camera_index", 1)),
             "mirror": config_bool(rtsp_camera_cfg.get("right_mirror"), True),
+            "vertical_flip": config_bool(rtsp_camera_cfg.get("right_vertical_flip"), False),
         },
     ]
     return {
@@ -1273,12 +1275,15 @@ def send_arm_preset_frame(degrees, name="preset"):
     return send_h5_arm_frame_async(frame)
 
 
+HAND_CHANNEL_NAMES = ["thumb_pitch", "thumb_yaw", "index", "middle", "ring", "pinky"]
+
 HAND_PRESETS = {
     "reset": [2000, 2000, 2000, 2000, 2000, 2000],
     "open": [2000, 2000, 2000, 2000, 2000, 2000],
     "half": [1000, 1000, 1000, 1000, 1000, 1000],
     "close": [200, 200, 200, 200, 200, 200],
-    "pinch": [1600, 1200, 250, 2000, 2000, 2000],
+    # Physical order: ID1 thumb pitch, ID2 thumb yaw, ID3-ID6 index-pinky.
+    "pinch": [1200, 1600, 250, 2000, 2000, 2000],
     "hook": [2000, 2000, 250, 250, 250, 250],
 }
 
@@ -1299,9 +1304,11 @@ def sanitize_hand_positions(values):
 def send_hand_control(mode, positions=None, name=None):
     payload = {
         "type": "h5_hand_control",
+        "schema_version": 2,
         "source": "control_ui",
         "mode": mode,
         "time": time.time(),
+        "channel_names": HAND_CHANNEL_NAMES,
     }
     if name:
         payload["name"] = name
@@ -1938,7 +1945,7 @@ def hand_telemetry_loop():
         data, _source = sock.recvfrom(65535)
         try:
             payload = json.loads(data.decode("utf-8"))
-            if payload.get("type") != "wa100_recording_state" or int(payload.get("schema_version", 0)) not in {1, 2}:
+            if payload.get("type") != "wa100_recording_state" or int(payload.get("schema_version", 0)) not in {1, 2, 3}:
                 continue
             receive_utc_ns, receive_monotonic_ns = time.time_ns(), time.monotonic_ns()
             decision = PERCEPTION_MONITOR.update(payload, receive_utc_ns, receive_monotonic_ns)

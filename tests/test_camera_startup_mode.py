@@ -107,8 +107,10 @@ class CameraStartupModeTests(unittest.TestCase):
         self.assertNotIn("getUserMedia", UI)
         self.assertIn("left_preview_url", UI)
         self.assertIn("right_preview_url", UI)
-        self.assertIn("left_mirror: true", CONFIG)
+        self.assertIn("left_mirror: false", CONFIG)
         self.assertIn("right_mirror: true", CONFIG)
+        self.assertIn("left_vertical_flip: true", CONFIG)
+        self.assertIn("right_vertical_flip: false", CONFIG)
 
 
 if __name__ == "__main__":

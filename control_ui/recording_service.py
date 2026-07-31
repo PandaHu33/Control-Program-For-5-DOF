@@ -160,6 +160,7 @@ class RecordingManager:
         self._arm_rows, self._hand_rows, self._episode_rows = [], [], []
         self._fusion_fh = self._controller_input_fh = self._glove_input_fh = None
         self._fusion_rows = []
+        self._hand_channel_names = []
         self._last_master_controller_seq = self._last_master_glove_seq = None
         self._camera_counts = {"left": 0, "right": 0}
         self._last_arm_receive_ns = 0
@@ -212,6 +213,9 @@ class RecordingManager:
         with self.lock:
             if self.state != "recording":
                 return
+            channel_names = payload.get("channel_names")
+            if isinstance(channel_names, list) and len(channel_names) == 6:
+                self._hand_channel_names = [str(name) for name in channel_names]
             row = {
                 "seq": int(payload.get("seq") or 0),
                 "source_time_ns": source_ns,
@@ -436,6 +440,7 @@ class RecordingManager:
             self._controller_input_fh = controller_input_fh
             self._glove_input_fh = glove_input_fh
             self._fusion_rows = []
+            self._hand_channel_names = []
             self._last_master_controller_seq = self._last_master_glove_seq = None
             self._camera_counts = {"left": 0, "right": 0}
             self._clock = ClockMapper()
@@ -518,6 +523,7 @@ class RecordingManager:
                 ),
             },
             "clock_model": self._clock.model(),
+            "hand_channel_names": list(self._hand_channel_names),
             "camera": camera,
             "alignment": alignment,
             "master_fusion": fusion_summary,
@@ -530,6 +536,7 @@ class RecordingManager:
             self.error = "; ".join(errors) or (incomplete_reason or "")
             self._arm_rows, self._hand_rows, self._episode_rows = [], [], []
             self._fusion_rows = []
+            self._hand_channel_names = []
         return {"ok": manifest["complete"], "message": manifest["state"], "manifest": manifest, **self.status()}
 
     def _master_fusion_summary(self):
