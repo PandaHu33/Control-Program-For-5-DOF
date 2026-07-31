@@ -3,6 +3,8 @@ param(
     [string]$RightCameraName = "",
     [string]$LeftMirror = "",
     [string]$RightMirror = "",
+    [string]$LeftVerticalFlip = "",
+    [string]$RightVerticalFlip = "",
     [string]$StreamHost = "",
     [int]$RtspPort = 0,
     [int]$HlsPort = 0,
@@ -237,8 +239,12 @@ if (-not $LeftCameraName) { $LeftCameraName = Get-ConfigValue $dualCfg "left_vid
 if (-not $RightCameraName) { $RightCameraName = Get-ConfigValue $dualCfg "right_video_device" "USB Camera" }
 if (-not $LeftMirror) { $LeftMirror = Get-ConfigValue $dualCfg "left_mirror" "true" }
 if (-not $RightMirror) { $RightMirror = Get-ConfigValue $dualCfg "right_mirror" "true" }
+if (-not $LeftVerticalFlip) { $LeftVerticalFlip = Get-ConfigValue $dualCfg "left_vertical_flip" "false" }
+if (-not $RightVerticalFlip) { $RightVerticalFlip = Get-ConfigValue $dualCfg "right_vertical_flip" "false" }
 $leftMirrorEnabled = ConvertTo-ConfigBool $LeftMirror $true
 $rightMirrorEnabled = ConvertTo-ConfigBool $RightMirror $true
+$leftVerticalFlipEnabled = ConvertTo-ConfigBool $LeftVerticalFlip $false
+$rightVerticalFlipEnabled = ConvertTo-ConfigBool $RightVerticalFlip $false
 if (-not $StreamHost) { $StreamHost = Get-ConfigValue $dualCfg "stream_host" "127.0.0.1" }
 if (-not $RtspPort) { $RtspPort = [int](Get-ConfigValue $dualCfg "rtsp_port" "8554") }
 if (-not $HlsPort) { $HlsPort = [int](Get-ConfigValue $dualCfg "hls_port" "8081") }
@@ -263,8 +269,10 @@ $size = Split-VideoSize $VideoSize
 $filterFps = [Math]::Max($Framerate, 1)
 $leftFlipFilter = if ($leftMirrorEnabled) { ",hflip" } else { "" }
 $rightFlipFilter = if ($rightMirrorEnabled) { ",hflip" } else { "" }
-$leftChain = "[0:v]fps=fps=$filterFps,scale=$($size.Width):$($size.Height)$leftFlipFilter,setsar=1,setpts=N/($filterFps*TB)[left]"
-$rightChain = "[1:v]fps=fps=$filterFps,scale=$($size.Width):$($size.Height)$rightFlipFilter,setsar=1,setpts=N/($filterFps*TB)[right]"
+$leftVerticalFlipFilter = if ($leftVerticalFlipEnabled) { ",vflip" } else { "" }
+$rightVerticalFlipFilter = if ($rightVerticalFlipEnabled) { ",vflip" } else { "" }
+$leftChain = "[0:v]fps=fps=$filterFps,scale=$($size.Width):$($size.Height)$leftFlipFilter$leftVerticalFlipFilter,setsar=1,setpts=N/($filterFps*TB)[left]"
+$rightChain = "[1:v]fps=fps=$filterFps,scale=$($size.Width):$($size.Height)$rightFlipFilter$rightVerticalFlipFilter,setsar=1,setpts=N/($filterFps*TB)[right]"
 if ($Layout -eq "vstack") {
     $stackChain = "[left][right]vstack=inputs=2,format=yuv420p[out]"
 } else {
@@ -380,6 +388,8 @@ if ($backend -in @("latest_frame", "latest", "opencv")) {
     $captureArgs.Add($RightCameraName)
     if ($leftMirrorEnabled) { $captureArgs.Add("--left-mirror") }
     if ($rightMirrorEnabled) { $captureArgs.Add("--right-mirror") }
+    if ($leftVerticalFlipEnabled) { $captureArgs.Add("--left-vertical-flip") }
+    if ($rightVerticalFlipEnabled) { $captureArgs.Add("--right-vertical-flip") }
     $captureArgs.Add("--width")
     $captureArgs.Add("$($size.Width)")
     $captureArgs.Add("--height")
@@ -470,6 +480,8 @@ if ($backend -in @("latest_frame", "latest", "opencv")) {
         rightCameraIndex = $RightCameraIndex
         leftMirror = $leftMirrorEnabled
         rightMirror = $rightMirrorEnabled
+        leftVerticalFlip = $leftVerticalFlipEnabled
+        rightVerticalFlip = $rightVerticalFlipEnabled
         videoSize = $VideoSize
         outputSize = $status.size
         framerate = $Framerate
@@ -552,6 +564,8 @@ if ($ffmpegProc.HasExited) {
     rightCameraName = $RightCameraName
     leftMirror = $leftMirrorEnabled
     rightMirror = $rightMirrorEnabled
+    leftVerticalFlip = $leftVerticalFlipEnabled
+    rightVerticalFlip = $rightVerticalFlipEnabled
     videoSize = $VideoSize
     framerate = $Framerate
     layout = $Layout

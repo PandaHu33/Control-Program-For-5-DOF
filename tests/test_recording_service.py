@@ -82,6 +82,7 @@ class RecordingManagerTests(unittest.TestCase):
                 stamp = start_ns + index * 20_000_000
                 manager.observe_hand({
                     "seq": index, "source_time_ns": stamp, "feedback_valid": True, "control_mode": "vr",
+                    "channel_names": ["thumb_pitch", "thumb_yaw", "index", "middle", "ring", "pinky"],
                     "position_valid": [True] * 6, "current_valid": [True] * 6,
                     "position_zero_wrap_corrected": [True] + [False] * 5,
                     "actual_position_units": [1000] * 6, "target_position_units": [1100] * 6,
@@ -140,6 +141,10 @@ class RecordingManagerTests(unittest.TestCase):
             self.assertEqual(manifest["counts"]["master_fusion"], 7)
             self.assertEqual(manifest["counts"]["master_controller_input"], 7)
             self.assertEqual(manifest["counts"]["master_glove_input"], 7)
+            self.assertEqual(
+                manifest["hand_channel_names"],
+                ["thumb_pitch", "thumb_yaw", "index", "middle", "ring", "pinky"],
+            )
             self.assertEqual(manifest["alignment_hz"], 20.0)
             self.assertEqual(manifest["alignment_file"], "aligned_20hz.csv")
             self.assertTrue((session_dir / "aligned_20hz.csv").exists())

@@ -25,7 +25,7 @@ from urllib.parse import unquote, urlparse
 
 CONTROL_UI_DIR = Path(__file__).resolve().parent
 DEFAULT_RECORDINGS_DIR = CONTROL_UI_DIR / "recordings"
-CHANNEL_NAMES = ["thumb_yaw", "thumb_pitch", "index", "middle", "ring", "pinky"]
+CHANNEL_NAMES = ["thumb_pitch", "thumb_yaw", "index", "middle", "ring", "pinky"]
 
 
 class EpisodeError(RuntimeError):

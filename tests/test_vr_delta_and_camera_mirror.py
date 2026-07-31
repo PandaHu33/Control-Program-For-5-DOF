@@ -180,6 +180,15 @@ class VrWristDeltaTests(unittest.TestCase):
 
 @unittest.skipIf(CAMERA is None, "opencv-python is required for camera mirror tests")
 class CameraMirrorTests(unittest.TestCase):
+    def test_rgb_camera_vertical_flip_reverses_rows(self):
+        np = CAMERA.np
+        frame = np.zeros((3, 1, 3), dtype=np.uint8)
+        frame[:, 0, 0] = [1, 2, 3]
+        flipped = CAMERA.apply_vertical_flip(frame, True)
+        unchanged = CAMERA.apply_vertical_flip(frame, False)
+        self.assertEqual(flipped[:, 0, 0].tolist(), [3, 2, 1])
+        self.assertEqual(unchanged[:, 0, 0].tolist(), [1, 2, 3])
+
     def test_each_camera_is_mirrored_before_vertical_stack(self):
         np = CAMERA.np
         left = np.zeros((1, 3, 3), dtype=np.uint8)
@@ -237,9 +246,13 @@ class UiDeltaContractTests(unittest.TestCase):
         config = (ROOT / "control_ui" / "config.yaml").read_text(encoding="utf-8")
         self.assertIn('$leftFlipFilter = if ($leftMirrorEnabled) { ",hflip" }', script)
         self.assertIn('$rightFlipFilter = if ($rightMirrorEnabled) { ",hflip" }', script)
+        self.assertIn('$leftVerticalFlipFilter = if ($leftVerticalFlipEnabled) { ",vflip" }', script)
+        self.assertIn('$rightVerticalFlipFilter = if ($rightVerticalFlipEnabled) { ",vflip" }', script)
         self.assertIn("[left][right]vstack=inputs=2", script)
-        self.assertIn("left_mirror: true", config)
+        self.assertIn("left_mirror: false", config)
         self.assertIn("right_mirror: true", config)
+        self.assertIn("left_vertical_flip: true", config)
+        self.assertIn("right_vertical_flip: false", config)
 
 
 class XrHandGestureTests(unittest.TestCase):

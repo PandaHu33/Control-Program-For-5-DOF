@@ -3,7 +3,7 @@ import unittest
 from control_ui.perception_assist_monitor import PerceptionAssistMonitor
 
 
-CHANNELS = ["thumb_yaw", "thumb_pitch", "index", "middle", "ring", "pinky"]
+CHANNELS = ["thumb_pitch", "thumb_yaw", "index", "middle", "ring", "pinky"]
 
 
 def commissioned_config():
@@ -185,8 +185,8 @@ class PerceptionAssistMonitorTest(unittest.TestCase):
         )
         self.assertEqual(decision["valid"], 1)
         self.assertTrue(decision["signal_validity"]["position_current_frame"])
-        self.assertEqual(decision["signal_validity"]["position_zero_wrap_corrected_channels"], ["thumb_yaw"])
-        self.assertIn("position_zero_wrap_corrected:thumb_yaw", decision["degraded_reason"])
+        self.assertEqual(decision["signal_validity"]["position_zero_wrap_corrected_channels"], ["thumb_pitch"])
+        self.assertIn("position_zero_wrap_corrected:thumb_pitch", decision["degraded_reason"])
 
     def test_persistent_invalid_position_keeps_current_visible_but_disables_joint_inference(self):
         payload = sample(
