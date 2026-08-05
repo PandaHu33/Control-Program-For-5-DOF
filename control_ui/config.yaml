@@ -54,6 +54,7 @@ rtsp_dual_camera:
   # display: browser shows both cameras; stream: publish RTSP/HLS on startup.
   startup_mode: "display"
   capture_backend: "latest_frame"
+  python_exe: "E:/PICO/Control-Program-For-5-DOF/Hand_Tracker/.conda/hand-tracker-arm/python.exe"
   left_video_device: "RGB Camera"
   left_camera_index: 1
   left_mirror: false
@@ -61,6 +62,9 @@ rtsp_dual_camera:
   left_input_codec: "mjpeg"
   left_video_pin_name: ""
   right_video_device: "USB Camera"
+  # Match the same physical camera across driver/firmware naming variants.
+  # Rules are tried left-to-right: exact match first, then case-insensitive substring match.
+  right_video_device_match: "USB Camera|DSJ-2062-309"
   right_camera_index: 0
   right_mirror: true
   right_vertical_flip: false
@@ -68,12 +72,16 @@ rtsp_dual_camera:
   right_video_pin_name: ""
   input_fourcc: "MJPG"
   stream_crf: 26
-  stream_host: "192.168.3.10"
+  # PICO reaches the PC-side RTSP server through `adb reverse tcp:8554 tcp:8554`.
+  stream_host: "127.0.0.1"
   rtsp_port: 8554
   hls_port: 8081
+  hls_enabled: false
   # Reuse the existing path so Unity/LibVLC can keep the same URL.
   stream_path: "usb_camera"
   video_size: "640x480"
+  # Capture at the supported 30 fps mode and publish only the latest frames at 20 fps.
+  capture_framerate: 30
   framerate: 20
   layout: "vstack"
 
