@@ -1,6 +1,7 @@
 param(
     [string]$LeftCameraName = "",
     [string]$RightCameraName = "",
+    [string]$RightCameraMatch = "",
     [string]$LeftMirror = "",
     [string]$RightMirror = "",
     [string]$LeftVerticalFlip = "",
@@ -11,6 +12,7 @@ param(
     [string]$StreamPath = "",
     [string]$VideoSize = "",
     [int]$Framerate = 0,
+    [int]$CaptureFramerate = 0,
     [string]$LeftInputCodec = "",
     [string]$RightInputCodec = "",
     [string]$LeftVideoPinName = "",
@@ -21,7 +23,8 @@ param(
     [int]$RightCameraIndex = -1,
     [string]$InputFourcc = "",
     [int]$StreamCrf = 0,
-    [string]$PythonExe = ""
+    [string]$PythonExe = "",
+    [string]$HlsEnabled = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -98,6 +101,47 @@ function Find-Executable($Name, [string[]]$ExtraCandidates) {
         if ($candidate -and (Test-Path $candidate)) { return $candidate }
     }
     return $null
+}
+
+function Get-DshowVideoDeviceNames($FfmpegPath) {
+    $output = @(& $FfmpegPath -hide_banner -list_devices true -f dshow -i dummy 2>&1)
+    $names = [System.Collections.Generic.List[string]]::new()
+    foreach ($item in $output) {
+        $line = "$item"
+        if ($line -match '"([^"]+)"\s+\(video\)') {
+            $name = $Matches[1].Trim()
+            if ($name -and -not $names.Contains($name)) {
+                $names.Add($name)
+            }
+        }
+    }
+    return @($names.ToArray())
+}
+
+function Resolve-DshowVideoDeviceName($ConfiguredName, $MatchRule, [string[]]$AvailableNames) {
+    if (-not $AvailableNames -or $AvailableNames.Count -eq 0) {
+        return $ConfiguredName
+    }
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    foreach ($candidate in @($ConfiguredName) + @($MatchRule -split '\|')) {
+        $trimmed = "$candidate".Trim()
+        if ($trimmed -and -not $candidates.Contains($trimmed)) {
+            $candidates.Add($trimmed)
+        }
+    }
+
+    foreach ($candidate in $candidates) {
+        $exact = @($AvailableNames | Where-Object { $_ -ieq $candidate })
+        if ($exact.Count -gt 0) { return $exact[0] }
+    }
+    foreach ($candidate in $candidates) {
+        $partial = @($AvailableNames | Where-Object {
+            $_.IndexOf($candidate, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+        })
+        if ($partial.Count -gt 0) { return $partial[0] }
+    }
+    return $ConfiguredName
 }
 
 function Test-PythonCv2($PythonPath) {
@@ -200,10 +244,14 @@ function Stop-OldRtspProcesses {
 }
 
 function Add-DshowInput([System.Collections.Generic.List[string]]$ArgumentItems, [string]$CameraName, [string]$Codec, [string]$PinName, [string]$Size, [int]$Fps) {
+    $ArgumentItems.Add("-thread_queue_size")
+    $ArgumentItems.Add("2")
     $ArgumentItems.Add("-f")
     $ArgumentItems.Add("dshow")
     $ArgumentItems.Add("-rtbufsize")
-    $ArgumentItems.Add("256M")
+    $ArgumentItems.Add("8M")
+    $ArgumentItems.Add("-use_wallclock_as_timestamps")
+    $ArgumentItems.Add("1")
     $ArgumentItems.Add("-framerate")
     $ArgumentItems.Add("$Fps")
     $ArgumentItems.Add("-video_size")
@@ -237,6 +285,7 @@ if ($enabled -in @("0", "false", "no", "off")) {
 
 if (-not $LeftCameraName) { $LeftCameraName = Get-ConfigValue $dualCfg "left_video_device" "RGB Camera" }
 if (-not $RightCameraName) { $RightCameraName = Get-ConfigValue $dualCfg "right_video_device" "USB Camera" }
+if (-not $RightCameraMatch) { $RightCameraMatch = Get-ConfigValue $dualCfg "right_video_device_match" "USB Camera|DSJ-2062-309" }
 if (-not $LeftMirror) { $LeftMirror = Get-ConfigValue $dualCfg "left_mirror" "true" }
 if (-not $RightMirror) { $RightMirror = Get-ConfigValue $dualCfg "right_mirror" "true" }
 if (-not $LeftVerticalFlip) { $LeftVerticalFlip = Get-ConfigValue $dualCfg "left_vertical_flip" "false" }
@@ -251,6 +300,7 @@ if (-not $HlsPort) { $HlsPort = [int](Get-ConfigValue $dualCfg "hls_port" "8081"
 if (-not $StreamPath) { $StreamPath = Get-ConfigValue $dualCfg "stream_path" "usb_camera" }
 if (-not $VideoSize) { $VideoSize = Get-ConfigValue $dualCfg "video_size" "640x960" }
 if (-not $Framerate) { $Framerate = [int](Get-ConfigValue $dualCfg "framerate" "15") }
+if (-not $CaptureFramerate) { $CaptureFramerate = [int](Get-ConfigValue $dualCfg "capture_framerate" "30") }
 if (-not $LeftInputCodec) { $LeftInputCodec = Get-ConfigValue $dualCfg "left_input_codec" "mjpeg" }
 if (-not $RightInputCodec) { $RightInputCodec = Get-ConfigValue $dualCfg "right_input_codec" "h264" }
 if (-not $LeftVideoPinName) { $LeftVideoPinName = Get-ConfigValueAllowEmpty $dualCfg "left_video_pin_name" "" }
@@ -262,6 +312,8 @@ if ($RightCameraIndex -lt 0) { $RightCameraIndex = [int](Get-ConfigValue $dualCf
 if (-not $InputFourcc) { $InputFourcc = Get-ConfigValue $dualCfg "input_fourcc" "MJPG" }
 if ($StreamCrf -le 0) { $StreamCrf = [int](Get-ConfigValue $dualCfg "stream_crf" "26") }
 if (-not $PythonExe) { $PythonExe = Get-ConfigValue $dualCfg "python_exe" "" }
+if (-not $HlsEnabled) { $HlsEnabled = Get-ConfigValue $dualCfg "hls_enabled" "false" }
+$hlsEnabledValue = ConvertTo-ConfigBool $HlsEnabled $false
 $cameraServicePort = [int](Get-ConfigValue $recordingCfg "camera_service_port" "8092")
 $recordingRoot = Join-Path $Root (Get-ConfigValue $recordingCfg "root_dir" "recordings")
 
@@ -271,8 +323,8 @@ $leftFlipFilter = if ($leftMirrorEnabled) { ",hflip" } else { "" }
 $rightFlipFilter = if ($rightMirrorEnabled) { ",hflip" } else { "" }
 $leftVerticalFlipFilter = if ($leftVerticalFlipEnabled) { ",vflip" } else { "" }
 $rightVerticalFlipFilter = if ($rightVerticalFlipEnabled) { ",vflip" } else { "" }
-$leftChain = "[0:v]fps=fps=$filterFps,scale=$($size.Width):$($size.Height)$leftFlipFilter$leftVerticalFlipFilter,setsar=1,setpts=N/($filterFps*TB)[left]"
-$rightChain = "[1:v]fps=fps=$filterFps,scale=$($size.Width):$($size.Height)$rightFlipFilter$rightVerticalFlipFilter,setsar=1,setpts=N/($filterFps*TB)[right]"
+$leftChain = "[0:v]fps=fps=$filterFps,scale=$($size.Width):$($size.Height)$leftFlipFilter$leftVerticalFlipFilter,setsar=1,setpts=PTS-STARTPTS[left]"
+$rightChain = "[1:v]fps=fps=$filterFps,scale=$($size.Width):$($size.Height)$rightFlipFilter$rightVerticalFlipFilter,setsar=1,setpts=PTS-STARTPTS[right]"
 if ($Layout -eq "vstack") {
     $stackChain = "[left][right]vstack=inputs=2,format=yuv420p[out]"
 } else {
@@ -301,11 +353,45 @@ if (-not $mediaMtx) {
     exit 2
 }
 
+$availableVideoDevices = @(Get-DshowVideoDeviceNames $ffmpeg)
+if ($availableVideoDevices.Count -gt 0) {
+    Write-Info ("DirectShow video devices: {0}" -f ($availableVideoDevices -join ", "))
+    $resolvedLeftCameraName = Resolve-DshowVideoDeviceName $LeftCameraName $LeftCameraName $availableVideoDevices
+    $resolvedRightCameraName = Resolve-DshowVideoDeviceName $RightCameraName $RightCameraMatch $availableVideoDevices
+    if ($resolvedLeftCameraName -ne $LeftCameraName) {
+        Write-Info ("Resolved left camera '{0}' -> '{1}'" -f $LeftCameraName, $resolvedLeftCameraName)
+    }
+    if ($resolvedRightCameraName -ne $RightCameraName) {
+        Write-Info ("Resolved right camera '{0}' using rule '{1}' -> '{2}'" -f $RightCameraName, $RightCameraMatch, $resolvedRightCameraName)
+    }
+    $LeftCameraName = $resolvedLeftCameraName
+    $RightCameraName = $resolvedRightCameraName
+    if ($availableVideoDevices -notcontains $LeftCameraName) {
+        Write-Warn ("Configured left camera '{0}' did not match an attached DirectShow video device." -f $LeftCameraName)
+    }
+    if ($availableVideoDevices -notcontains $RightCameraName) {
+        Write-Warn ("Configured right camera '{0}' did not match an attached DirectShow video device (rule: {1})." -f $RightCameraName, $RightCameraMatch)
+    }
+} else {
+    Write-Warn "No DirectShow video devices were enumerated; using configured camera names and indexes."
+}
+
 Stop-OldRtspProcesses
 
 $rtspPublishUrl = "rtsp://127.0.0.1:$RtspPort/$StreamPath"
 $rtspViewUrl = "rtsp://$StreamHost`:$RtspPort/$StreamPath"
-$hlsViewUrl = "http://127.0.0.1:$HlsPort/$StreamPath/index.m3u8"
+$hlsViewUrl = if ($hlsEnabledValue) { "http://127.0.0.1:$HlsPort/$StreamPath/index.m3u8" } else { "" }
+$hlsConfigText = if ($hlsEnabledValue) {
+@"
+hls: true
+hlsAddress: :$HlsPort
+hlsAllowOrigins: ['*']
+hlsAlwaysRemux: false
+hlsVariant: lowLatency
+"@
+} else {
+    "hls: false"
+}
 
 Remove-Item -LiteralPath $MediaMtxOut, $MediaMtxErr, $FfmpegOut, $FfmpegErr, $LatestFrameOut, $LatestFrameErr, $LatestFrameStatus, $LatestFrameFfmpegLog -Force -ErrorAction SilentlyContinue
 $mediaMtxConfigText = @"
@@ -314,11 +400,7 @@ rtsp: true
 rtspAddress: :$RtspPort
 rtspTransports: [tcp]
 rtmp: false
-hls: true
-hlsAddress: :$HlsPort
-hlsAllowOrigins: ['*']
-hlsAlwaysRemux: true
-hlsVariant: lowLatency
+$hlsConfigText
 webrtc: false
 srt: false
 moq: false
@@ -350,7 +432,7 @@ if (-not (Wait-TcpPort "127.0.0.1" $RtspPort 8)) {
     Stop-Process -Id $mediaMtxProc.Id -Force -ErrorAction SilentlyContinue
     exit 2
 }
-if (-not (Wait-TcpPort "127.0.0.1" $HlsPort 8)) {
+if ($hlsEnabledValue -and -not (Wait-TcpPort "127.0.0.1" $HlsPort 8)) {
     Write-Warn "MediaMTX did not begin listening on HLS port $HlsPort."
     if (Test-Path $MediaMtxErr) { Get-Content -Path $MediaMtxErr }
     Stop-Process -Id $mediaMtxProc.Id -Force -ErrorAction SilentlyContinue
@@ -396,6 +478,8 @@ if ($backend -in @("latest_frame", "latest", "opencv")) {
     $captureArgs.Add("$($size.Height)")
     $captureArgs.Add("--fps")
     $captureArgs.Add("$Framerate")
+    $captureArgs.Add("--capture-fps")
+    $captureArgs.Add("$CaptureFramerate")
     $captureArgs.Add("--layout")
     $captureArgs.Add($Layout)
     $captureArgs.Add("--fourcc")
@@ -491,7 +575,7 @@ if ($backend -in @("latest_frame", "latest", "opencv")) {
     } | ConvertTo-Json | Set-Content -Path $PidFile -Encoding UTF8
 
     Write-Ok "Latest-frame dual RTSP camera stream is ready: $rtspViewUrl"
-    Write-Ok "Browser/VR HLS camera stream is ready: $hlsViewUrl"
+    if ($hlsEnabledValue) { Write-Ok "Browser/VR HLS camera stream is ready: $hlsViewUrl" }
     Write-Ok "Dual-camera recording health is fresh: http://127.0.0.1:$cameraServicePort/health"
     Write-Ok ("Output size: {0}, capture fps: {1}, frame age: {2:N0}/{3:N0} ms" -f $status.size, $status.writeFps, $status.leftAgeMs, $status.rightAgeMs)
     exit 0
@@ -504,8 +588,8 @@ $ffmpegArgs.Add("-loglevel")
 $ffmpegArgs.Add("warning")
 $ffmpegArgs.Add("-fflags")
 $ffmpegArgs.Add("+genpts+nobuffer")
-Add-DshowInput $ffmpegArgs $LeftCameraName $LeftInputCodec $LeftVideoPinName $VideoSize $Framerate
-Add-DshowInput $ffmpegArgs $RightCameraName $RightInputCodec $RightVideoPinName $VideoSize $Framerate
+Add-DshowInput $ffmpegArgs $LeftCameraName $LeftInputCodec $LeftVideoPinName $VideoSize $CaptureFramerate
+Add-DshowInput $ffmpegArgs $RightCameraName $RightInputCodec $RightVideoPinName $VideoSize $CaptureFramerate
 $ffmpegArgs.Add("-filter_complex")
 $ffmpegArgs.Add($filterComplex)
 $ffmpegArgs.Add("-map")
@@ -521,9 +605,18 @@ $ffmpegArgs.Add("-pix_fmt")
 $ffmpegArgs.Add("yuv420p")
 $ffmpegArgs.Add("-r")
 $ffmpegArgs.Add("$Framerate")
+$gopFrames = [Math]::Max(1, [int][Math]::Round($Framerate / 2.0))
 $ffmpegArgs.Add("-g")
-$ffmpegArgs.Add("$Framerate")
+$ffmpegArgs.Add("$gopFrames")
+$ffmpegArgs.Add("-keyint_min")
+$ffmpegArgs.Add("$gopFrames")
+$ffmpegArgs.Add("-sc_threshold")
+$ffmpegArgs.Add("0")
 $ffmpegArgs.Add("-bf")
+$ffmpegArgs.Add("0")
+$ffmpegArgs.Add("-flush_packets")
+$ffmpegArgs.Add("1")
+$ffmpegArgs.Add("-max_delay")
 $ffmpegArgs.Add("0")
 $ffmpegArgs.Add("-muxdelay")
 $ffmpegArgs.Add("0")
@@ -573,5 +666,5 @@ if ($ffmpegProc.HasExited) {
 } | ConvertTo-Json | Set-Content -Path $PidFile -Encoding UTF8
 
 Write-Ok "Dual RTSP camera stream is ready: $rtspViewUrl"
-Write-Ok "Browser/VR HLS camera stream is ready: $hlsViewUrl"
+if ($hlsEnabledValue) { Write-Ok "Browser/VR HLS camera stream is ready: $hlsViewUrl" }
 exit 0

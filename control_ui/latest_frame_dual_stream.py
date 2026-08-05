@@ -38,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=float, default=20.0)
+    parser.add_argument("--capture-fps", type=float, default=30.0)
     parser.add_argument("--layout", choices=("vstack", "hstack"), default="vstack")
     parser.add_argument("--fourcc", default="MJPG")
     parser.add_argument("--ffmpeg", required=True)
@@ -170,9 +171,9 @@ def prepare_frame(frame: np.ndarray, width: int, height: int, mirror: bool) -> n
 
 
 def build_ffmpeg_command(args: argparse.Namespace, out_w: int, out_h: int) -> list[str]:
-    fps_int = max(1, int(round(args.fps)))
+    keyint = max(1, int(round(args.fps / 2.0)))
     x264_params = (
-        f"keyint={fps_int}:min-keyint={fps_int}:scenecut=0:"
+        f"keyint={keyint}:min-keyint={keyint}:scenecut=0:"
         "sync-lookahead=0:rc-lookahead=0:sliced-threads=1:repeat-headers=1"
     )
     return [
@@ -180,6 +181,8 @@ def build_ffmpeg_command(args: argparse.Namespace, out_w: int, out_h: int) -> li
         "-hide_banner",
         "-loglevel",
         "warning",
+        "-fflags",
+        "nobuffer",
         "-f",
         "rawvideo",
         "-pix_fmt",
@@ -206,8 +209,12 @@ def build_ffmpeg_command(args: argparse.Namespace, out_w: int, out_h: int) -> li
         "-r",
         str(args.fps),
         "-g",
-        str(fps_int),
+        str(keyint),
         "-bf",
+        "0",
+        "-flush_packets",
+        "1",
+        "-max_delay",
         "0",
         "-muxdelay",
         "0",
@@ -476,7 +483,7 @@ def main() -> int:
         index=args.left_index,
         width=args.width,
         height=args.height,
-        fps=args.fps,
+        fps=args.capture_fps,
         fourcc=args.fourcc,
         vertical_flip=args.left_vertical_flip,
         lock=threading.Lock(),
@@ -486,7 +493,7 @@ def main() -> int:
         index=args.right_index,
         width=args.width,
         height=args.height,
-        fps=args.fps,
+        fps=args.capture_fps,
         fourcc=args.fourcc,
         vertical_flip=args.right_vertical_flip,
         lock=threading.Lock(),
@@ -533,6 +540,7 @@ def main() -> int:
             "rightVerticalFlip": bool(args.right_vertical_flip),
             "size": f"{out_w}x{out_h}",
             "fps": args.fps,
+            "captureFps": args.capture_fps,
             "startedAt": time.time(),
         },
     )
@@ -605,6 +613,7 @@ def main() -> int:
                         "rightVerticalFlip": bool(args.right_vertical_flip),
                         "size": f"{out_w}x{out_h}",
                         "fps": args.fps,
+                        "captureFps": args.capture_fps,
                         "writtenFrames": written,
                         "leftReadFps": left_read_fps,
                         "rightReadFps": right_read_fps,
