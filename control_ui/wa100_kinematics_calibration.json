@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "calibration_id": "wa100_provisional_deadzone_v4",
+  "status": "provisional",
+  "channel_deadzones": {
+    "thumb_pitch": {"open": 0.04, "close": 0.06},
+    "thumb_yaw": {"open": 0.04, "close": 0.06},
+    "index": {"open": 0.06, "close": 0.12},
+    "middle": {"open": 0.06, "close": 0.12},
+    "ring": {"open": 0.06, "close": 0.12},
+    "pinky": {"open": 0.06, "close": 0.12}
+  },
+  "thumb_motion_model": {
+    "feature_point_count": 4,
+    "yaw_joint": "Thumb_J1",
+    "pitch_joints": ["Thumb_J2", "Thumb_J3"],
+    "pitch_angle_signs": [1.0, -1.0],
+    "skeleton_angle_scales": {
+      "Thumb_J1": 1.0005072145190423,
+      "Thumb_J2": 1.0005072145190423,
+      "Thumb_J3": 1.0005072145190423
+    },
+    "yaw_scope": "all_three_links",
+    "pitch_scope": "distal_two_links",
+    "axis_relationship": "orthogonal",
+    "base_xyz_m": [0.031, -0.0134, 0.05325],
+    "segment_lengths_m": [0.017838791999460053, 0.03, 0.036],
+    "zero_yaw_direction": [1.0, 0.0, 0.0],
+    "yaw_axis": [0.0, 0.0, 1.0],
+    "pitch_axis_at_zero_yaw": [0.0, -1.0, 0.0],
+    "dorsum_plane_normal": [0.0, 1.0, 0.0],
+    "encoder_zero_direction": [0.0, -1.0, 0.0]
+  },
+  "channel_names": [
+    "thumb_pitch",
+    "thumb_yaw",
+    "index",
+    "middle",
+    "ring",
+    "pinky"
+  ],
+  "finger_chains": {
+    "thumb": ["Thumb_J1", "Thumb_J2", "Thumb_J3"],
+    "index": ["Index Finger_J1", "Index Finger_J2"],
+    "middle": ["Middle Finger_J1", "Middle Finger_J2"],
+    "ring": ["Ring Finger_J1", "Ring Finger_J2"],
+    "little": ["Little Finger_J1", "Little Finger_J2"]
+  },
+  "tip_frames": {
+    "thumb": {"parent_link": "Thumb_L3", "xyz_m": [0.0, -0.036, 0.0], "rpy_rad": [0.0, 0.0, 0.0]},
+    "index": {"parent_link": "Index Finger_L2", "xyz_m": [0.0, 0.05342, 0.0], "rpy_rad": [0.0, 0.0, 0.0]},
+    "middle": {"parent_link": "Middle Finger_L2", "xyz_m": [0.0, 0.05342, 0.0], "rpy_rad": [0.0, 0.0, 0.0]},
+    "ring": {"parent_link": "Ring Finger_L2", "xyz_m": [0.0, 0.05342, 0.0], "rpy_rad": [0.0, 0.0, 0.0]},
+    "little": {"parent_link": "Little Finger_L2", "xyz_m": [0.0, 0.05342, 0.0], "rpy_rad": [0.0, 0.0, 0.0]}
+  },
+  "joint_mappings": {
+    "Thumb_J1": {"channel": "thumb_yaw", "samples_units_rad": [[0.0, -1.57], [2000.0, 0.0]]},
+    "Thumb_J2": {"channel": "thumb_pitch", "samples_units_rad": [[0.0, 1.57], [2000.0, 0.0]]},
+    "Thumb_J3": {"channel": "thumb_pitch", "samples_units_rad": [[0.0, -1.57], [2000.0, 0.0]]},
+    "Index Finger_J1": {"channel": "index", "samples_units_rad": [[0.0, 1.57], [2000.0, 0.0]]},
+    "Index Finger_J2": {"channel": "index", "samples_units_rad": [[0.0, 1.57], [2000.0, 0.0]]},
+    "Middle Finger_J1": {"channel": "middle", "samples_units_rad": [[0.0, 1.57], [2000.0, 0.0]]},
+    "Middle Finger_J2": {"channel": "middle", "samples_units_rad": [[0.0, 1.57], [2000.0, 0.0]]},
+    "Ring Finger_J1": {"channel": "ring", "samples_units_rad": [[0.0, 1.57], [2000.0, 0.0]]},
+    "Ring Finger_J2": {"channel": "ring", "samples_units_rad": [[0.0, 1.57], [2000.0, 0.0]]},
+    "Little Finger_J1": {"channel": "pinky", "samples_units_rad": [[0.0, 1.57], [2000.0, 0.0]]},
+    "Little Finger_J2": {"channel": "pinky", "samples_units_rad": [[0.0, 1.57], [2000.0, 0.0]]}
+  },
+  "notes": [
+    "The URDF defines geometry but no mimic/transmission elements.",
+    "Thumb yaw at J1 rotates all three thumb links without flexing the first link.",
+    "Thumb J2 and J3 are coupled to the pitch channel and both participate in flexion.",
+    "Thumb J1 yaw is orthogonal to the J2/J3 flexion axes.",
+    "At zero flexion all three thumb links are collinear; at thumb-yaw encoder value 0 they point along -Y, perpendicular to the XZ dorsum plane.",
+    "The wrist-to-thumb-base segment is a palm-plane connector and is not counted as one of the three thumb links.",
+    "Glove-mode endpoint deadzones and smoothstep are replicated before motor-unit-to-angle interpolation.",
+    "The remaining motor-to-joint mappings are provisional couplings over URDF limits.",
+    "Replace samples_units_rad with measured calibration points for quantitative use."
+  ]
+}

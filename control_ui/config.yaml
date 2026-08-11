@@ -32,6 +32,8 @@ recording:
   hand_telemetry_port: 25003
   master_fusion_host: "127.0.0.1"
   master_fusion_port: 25007
+  raw_master_host: "127.0.0.1"
+  raw_master_port: 25009
   min_free_gib: 2.0
   max_duration_minutes: 10.0
 
@@ -44,6 +46,7 @@ websocket:
   port: 8080
   path: "/udp"
   status_path: "/status"
+  raw_input_path: "/raw-input"
 
 api:
   host: "0.0.0.0"

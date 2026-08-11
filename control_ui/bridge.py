@@ -185,6 +185,7 @@ WS_HOST = ws_cfg.get("host", "0.0.0.0")
 WS_PORT = int(ws_cfg.get("port", 8080))
 UDP_PATH = ws_cfg.get("path", "/udp")
 STATUS_PATH = ws_cfg.get("status_path", "/status")
+RAW_INPUT_PATH = ws_cfg.get("raw_input_path", "/raw-input")
 API_HOST = api_cfg.get("host", "0.0.0.0")
 API_PORT = int(api_cfg.get("port", 8090))
 
@@ -212,6 +213,8 @@ HAND_TELEMETRY_HOST = str(recording_cfg.get("hand_telemetry_host", "127.0.0.1"))
 HAND_TELEMETRY_PORT = int(recording_cfg.get("hand_telemetry_port", 25003))
 MASTER_FUSION_HOST = str(recording_cfg.get("master_fusion_host", "127.0.0.1"))
 MASTER_FUSION_PORT = int(recording_cfg.get("master_fusion_port", 25007))
+RAW_MASTER_HOST = str(recording_cfg.get("raw_master_host", "127.0.0.1"))
+RAW_MASTER_PORT = int(recording_cfg.get("raw_master_port", 25009))
 RECORDING_MIN_FREE_BYTES = int(float(recording_cfg.get("min_free_gib", 2.0)) * 1024 ** 3)
 RECORDING_MAX_DURATION_SEC = float(recording_cfg.get("max_duration_minutes", 10.0)) * 60.0
 RECORDING_ALIGNMENT_HZ = float(recording_cfg.get("alignment_hz", 20.0))
@@ -378,6 +381,7 @@ udp.bind(("0.0.0.0", UDP_RECV_PORT))
 recent_ws_crc = deque(maxlen=256)
 UDP_CLIENTS = set()
 STATUS_CLIENTS = set()
+RAW_INPUT_CLIENTS = set()
 CLIENT_LOCK = threading.RLock()
 STATE_LOCK = threading.RLock()
 CAMERA_FRAME_LOCK = threading.RLock()
@@ -1382,7 +1386,12 @@ def latest_camera_frame():
 def do_command(method, path, body=None):
     log_event("ACTION", f"{method} {path}")
     if path == "/api/recording/status" and method == "GET":
-        readiness = RECORDING.readiness()
+        with STATE_LOCK:
+            recording_method = (
+                f"{SYSTEM.get('arm_control', {}).get('mode', 'unknown')}+"
+                f"{SYSTEM.get('hand_mode', 'unknown')}"
+            )
+        readiness = RECORDING.readiness(method=recording_method)
         return {"ok": True, **RECORDING.status(), "readiness": readiness}
     if path == "/api/recording/start" and method == "POST":
         with STATE_LOCK:
@@ -1787,6 +1796,9 @@ class WsClient:
         with CLIENT_LOCK:
             UDP_CLIENTS.discard(self)
             STATUS_CLIENTS.discard(self)
+            RAW_INPUT_CLIENTS.discard(self)
+            raw_connected = bool(RAW_INPUT_CLIENTS)
+        RECORDING.set_browser_raw_connected(raw_connected)
         try:
             self.sock.close()
         except Exception:
@@ -1820,6 +1832,69 @@ def recv_ws_frame(sock):
     return opcode, bytes(payload)
 
 
+def _numeric_array(value, size):
+    return isinstance(value, list) and len(value) == size and all(
+        isinstance(item, (int, float)) and math.isfinite(float(item)) for item in value
+    )
+
+
+def validate_raw_master_input(payload, browser_only=False):
+    if not isinstance(payload, dict) or payload.get("type") != "raw_master_input":
+        return False, "invalid_type"
+    if int(payload.get("schema_version", 0)) != 1:
+        return False, "invalid_schema"
+    source = str(payload.get("source") or "")
+    signal_form = str(payload.get("signal_form") or "")
+    value = payload.get("value")
+    if signal_form not in {"discrete", "continuous"} or not isinstance(value, dict):
+        return False, "invalid_envelope"
+    if browser_only and source not in {"keyboard", "gamepad"}:
+        return False, "browser_source_not_allowed"
+
+    stream = str(value.get("stream") or "")
+    with STATE_LOCK:
+        arm_mode = str(SYSTEM.get("arm_control", {}).get("mode") or "idle")
+        hand_mode = str(SYSTEM.get("hand_mode") or "preset")
+    if source == "keyboard":
+        if arm_mode != "keyboard": return False, "inactive_source"
+        if value.get("event") not in {"down", "up"} or not isinstance(value.get("pressed_keys"), list):
+            return False, "invalid_keyboard_event"
+    elif source == "gamepad":
+        if arm_mode != "gamepad": return False, "inactive_source"
+        if not isinstance(value.get("axes"), list) or not isinstance(value.get("buttons"), list):
+            return False, "invalid_gamepad_sample"
+    elif source == "pico_hand" and stream == "wrist_pose":
+        if arm_mode != "hand_vision": return False, "inactive_source"
+        if not _numeric_array(value.get("position"), 3) or not _numeric_array(value.get("rotation"), 4):
+            return False, "invalid_pico_wrist_pose"
+    elif source == "pico_hand" and stream == "hand_skeleton":
+        if hand_mode != "vr": return False, "inactive_source"
+        if not _numeric_array(value.get("rightPositions"), 63) or not _numeric_array(value.get("rightRotations"), 63):
+            return False, "invalid_pico_hand_skeleton"
+    elif source == "data_glove" and stream == "hand_skeleton":
+        if hand_mode != "glove": return False, "inactive_source"
+        if not _numeric_array(value.get("rightRotations"), 63):
+            return False, "invalid_data_glove"
+        if value.get("rightPositions") is not None and not _numeric_array(value.get("rightPositions"), 63):
+            return False, "invalid_data_glove_positions"
+    elif source == "vr_controller" and stream == "controller_pose":
+        if arm_mode != "controller_delta": return False, "inactive_source"
+        if not _numeric_array(value.get("position_m"), 3) or not _numeric_array(value.get("rotation_xyzw"), 4):
+            return False, "invalid_vr_controller_pose"
+    else:
+        return False, "unsupported_source"
+    return True, ""
+
+
+def handle_raw_master_input(payload, browser_only=False, receive_utc_ns=None, receive_monotonic_ns=None):
+    source = str(payload.get("source") or "unknown") if isinstance(payload, dict) else "unknown"
+    valid, reason = validate_raw_master_input(payload, browser_only=browser_only)
+    if not valid:
+        RECORDING.reject_raw_input(source, reason)
+        return False
+    return RECORDING.observe_raw_input(payload, receive_utc_ns, receive_monotonic_ns)
+
+
 def websocket_client_loop(client):
     try:
         if client.path == STATUS_PATH:
@@ -1828,6 +1903,13 @@ def websocket_client_loop(client):
             opcode, payload = recv_ws_frame(client.sock)
             if opcode == 0x8:
                 break
+            if client.path == RAW_INPUT_PATH and opcode == 0x1:
+                try:
+                    raw_payload = json.loads(payload.decode("utf-8"))
+                    handle_raw_master_input(raw_payload, browser_only=True)
+                except (UnicodeDecodeError, ValueError, TypeError):
+                    RECORDING.reject_raw_input("browser", "invalid_json")
+                continue
             if client.path == UDP_PATH and opcode == 0x2:
                 active_mode, active_owner = current_arm_authority()
                 decision = arbitrate_ws_frame(
@@ -1856,7 +1938,10 @@ def websocket_server():
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((WS_HOST, WS_PORT))
     srv.listen(20)
-    print(f"[WS] bridge on ws://{WS_HOST}:{WS_PORT}{UDP_PATH}; status ws://{WS_HOST}:{WS_PORT}{STATUS_PATH}")
+    print(
+        f"[WS] bridge on ws://{WS_HOST}:{WS_PORT}{UDP_PATH}; "
+        f"status ws://{WS_HOST}:{WS_PORT}{STATUS_PATH}; raw input ws://{WS_HOST}:{WS_PORT}{RAW_INPUT_PATH}"
+    )
     while True:
         sock, addr = srv.accept()
         try:
@@ -1868,8 +1953,8 @@ def websocket_server():
                 if ":" in line:
                     k, v = line.split(":", 1)
                     headers[k.strip().lower()] = v.strip()
-            if path not in [UDP_PATH, STATUS_PATH] or "sec-websocket-key" not in headers:
-                body = f"Demo Console backend. Use {UDP_PATH} or {STATUS_PATH}\n".encode("utf-8")
+            if path not in [UDP_PATH, STATUS_PATH, RAW_INPUT_PATH] or "sec-websocket-key" not in headers:
+                body = f"Demo Console backend. Use {UDP_PATH}, {STATUS_PATH}, or {RAW_INPUT_PATH}\n".encode("utf-8")
                 sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
                 sock.close()
                 continue
@@ -1883,7 +1968,13 @@ def websocket_server():
             sock.sendall(response.encode("utf-8"))
             client = WsClient(sock, path)
             with CLIENT_LOCK:
-                (STATUS_CLIENTS if path == STATUS_PATH else UDP_CLIENTS).add(client)
+                if path == STATUS_PATH:
+                    STATUS_CLIENTS.add(client)
+                elif path == RAW_INPUT_PATH:
+                    RAW_INPUT_CLIENTS.add(client)
+                    RECORDING.set_browser_raw_connected(True)
+                else:
+                    UDP_CLIENTS.add(client)
             print(f"[WS] client {addr} connected path={path}")
             threading.Thread(target=websocket_client_loop, args=(client,), daemon=True).start()
         except Exception as exc:
@@ -1988,6 +2079,21 @@ def master_fusion_telemetry_loop():
             continue
 
 
+def raw_master_input_loop():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((RAW_MASTER_HOST, RAW_MASTER_PORT))
+    print(f"[UDP] raw master input on {RAW_MASTER_HOST}:{RAW_MASTER_PORT}")
+    while True:
+        data, _source = sock.recvfrom(65535)
+        receive_utc_ns, receive_monotonic_ns = time.time_ns(), time.monotonic_ns()
+        try:
+            payload = json.loads(data.decode("utf-8"))
+            handle_raw_master_input(payload, receive_utc_ns=receive_utc_ns, receive_monotonic_ns=receive_monotonic_ns)
+        except (UnicodeDecodeError, ValueError, TypeError):
+            RECORDING.reject_raw_input("udp", "invalid_json")
+
+
 def heartbeat_loop():
     global PERCEPTION_LAST_STATUS_PUSH
     heartbeat_modules = {"network", "udp_bridge", "camera"}
@@ -2077,6 +2183,7 @@ def main():
     threading.Thread(target=udp_broadcast_loop, daemon=True).start()
     threading.Thread(target=hand_telemetry_loop, daemon=True).start()
     threading.Thread(target=master_fusion_telemetry_loop, daemon=True).start()
+    threading.Thread(target=raw_master_input_loop, daemon=True).start()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
     threading.Thread(target=local_program_monitor_loop, daemon=True).start()
     acquire_arm_authority("idle")

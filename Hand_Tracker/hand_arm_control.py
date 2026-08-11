@@ -111,6 +111,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "host": "127.0.0.1",
         "controller_port": 25006,
     },
+    "raw_master_telemetry": {
+        "enabled": True,
+        "host": "127.0.0.1",
+        "port": 25009,
+    },
     "master_fusion": {
         "enabled": True,
         "mode": "m3",
@@ -1396,6 +1401,11 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
     alignment_host = str(cfg_get(config, ("sensor_alignment_telemetry", "host"), "127.0.0.1"))
     alignment_port = int(cfg_get(config, ("sensor_alignment_telemetry", "controller_port"), 25006))
     alignment_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if alignment_enabled else None
+    raw_master_enabled = bool(cfg_get(config, ("raw_master_telemetry", "enabled"), True))
+    raw_master_host = str(cfg_get(config, ("raw_master_telemetry", "host"), "127.0.0.1"))
+    raw_master_port = int(cfg_get(config, ("raw_master_telemetry", "port"), 25009))
+    raw_master_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if raw_master_enabled else None
+    last_raw_wrist_seq: Optional[int] = None
     fusion_settings = dict(cfg_get(config, ("master_fusion",), {}) or {})
     fusion_enabled = bool(fusion_settings.get("enabled", True))
     if not fusion_enabled:
@@ -1420,6 +1430,36 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
         while not stopped.is_set():
             controller.set_pose_source(shared.get_pose_source())
             pose = receiver.latest(controller.hand, controller.pose_source)
+            if pose is not None and pose.get("source") == "xr_hand_wrist" and raw_master_socket is not None:
+                raw_wrist_seq = int(pose.get("seq", -1))
+                if raw_wrist_seq >= 0 and raw_wrist_seq != last_raw_wrist_seq:
+                    raw_value = {
+                        "stream": "wrist_pose",
+                        "seq": raw_wrist_seq,
+                        "device_time": float(pose.get("device_time", 0.0)),
+                        "hand": str(pose.get("hand") or "right"),
+                        "source": "xr_hand_wrist",
+                        "tracked": bool(pose.get("tracked", False)),
+                        "position": [float(value) for value in np.asarray(pose.get("position"), dtype=float).reshape(-1)[:3]],
+                        "rotation": [float(value) for value in np.asarray(pose.get("rotation"), dtype=float).reshape(-1)[:4]],
+                        "deadman_active": bool(pose.get("deadman_active", False)),
+                        "source_timestamp_ns": int(float(pose.get("wall_time", time.time())) * 1e9),
+                    }
+                    raw_envelope = {
+                        "type": "raw_master_input",
+                        "schema_version": 1,
+                        "source": "pico_hand",
+                        "signal_form": "continuous",
+                        "value": raw_value,
+                    }
+                    try:
+                        raw_master_socket.sendto(
+                            json.dumps(raw_envelope, separators=(",", ":")).encode("utf-8"),
+                            (raw_master_host, raw_master_port),
+                        )
+                        last_raw_wrist_seq = raw_wrist_seq
+                    except OSError:
+                        pass
             if pose is not None and controller.pose_source == "xr_hand_wrist":
                 pose["deadman_source"] = "unity:left_fist"
                 pose["left_fist"] = bool(pose.get("deadman_active", False))
@@ -1520,6 +1560,8 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
             alignment_socket.close()
         if fusion_socket is not None:
             fusion_socket.close()
+        if raw_master_socket is not None:
+            raw_master_socket.close()
         glove_receiver.close()
         gesture_receiver.close()
         receiver.close()

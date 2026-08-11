@@ -238,6 +238,11 @@ class UnityHandBridge:
             return
 
         send_wall = time.time()
+        # This listener is dedicated to PICO/Unity XR Hands.  Stamp provenance
+        # explicitly so the shared WA100 UDP receiver cannot confuse the packet
+        # with the legacy Hi5/data-glove schema that uses the same array names.
+        payload["source"] = "xr-hands"
+        payload.setdefault("jointFormat", "unity-xr-hands-21x3")
         payload["bridgeRecvTime"] = recv_wall
         payload["bridgeSendTime"] = send_wall
         payload["bridgeAgeSec"] = max(0.0, send_wall - recv_wall)

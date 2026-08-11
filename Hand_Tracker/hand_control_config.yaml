@@ -95,6 +95,12 @@ sensor_alignment_telemetry:
   host: "127.0.0.1"
   controller_port: 25006
 
+# Active PICO wrist poses are mirrored to the recording backend as raw input.
+raw_master_telemetry:
+  enabled: true
+  host: "127.0.0.1"
+  port: 25009
+
 # Right-controller translation/authority + Hi5 Hand=1 wrist orientation fusion.
 # m1: controller-only wrist; m2: complementary fusion; m3: m2 plus
 # calibration-ID, age and cross-modal innovation gates.

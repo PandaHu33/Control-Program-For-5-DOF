@@ -573,6 +573,7 @@
           <label><input type="radio" name="inputDeviceMode" value="gamepad" />手柄</label>
           <label><input type="radio" name="inputDeviceMode" value="controller_delta" />VR手柄</label>
           <label><input type="radio" name="inputDeviceMode" value="hand_vision" />VR手部识别</label>
+          <label><input type="radio" name="inputDeviceMode" value="teleop" />主手遥操</label>
         </div>
         <div class="keyboard-mode-selector" id="keyboardControlMode" aria-label="keyboard control mode">
           <label><input type="radio" name="keyboardControlMode" value="position" checked />位置控制</label>
@@ -815,7 +816,7 @@
             <label><input type="radio" name="controlMode" value="gamepad" /> USB 手柄操作</label>
             <label><input type="radio" name="controlMode" value="controller_delta" /> 手套+右手柄</label>
             <label><input type="radio" name="controlMode" value="hand_vision" /> VR</label>
-            <label><input type="radio" name="controlMode" value="teleop" /> 主手遥操(Debug)</label>
+            <label><input type="radio" name="controlMode" value="teleop" /> 主手遥操</label>
             <label><input type="radio" name="controlMode" value="imitation" /> 模仿学习</label>
             <label title="尚未接入最终执行源"><input type="radio" name="controlMode" value="vision" disabled /> 视觉伺服</label>
             <label title="尚未接入最终执行源"><input type="radio" name="controlMode" value="shared" disabled /> 共享控制</label>
@@ -923,6 +924,7 @@
     const DEFAULT_WS_URL = "ws://localhost:8080/udp";
     const API_BASE = "http://localhost:8090";
     const STATUS_WS_URL = "ws://localhost:8080/status";
+    const RAW_INPUT_WS_URL = "ws://localhost:8080/raw-input";
     const HAND_SERVICE_BASE = "http://127.0.0.1:8091";
     // Frame schema (mirrors protocol/frame_config.json). We'll try fetch, fallback to inline.
     const FRAME_SCHEMA_INLINE = {
@@ -980,6 +982,8 @@
     const pressed = new Set();
     let seq = 0;
     let ws = null;
+    let rawInputWs = null;
+    let rawInputWsReconnectTimer = null;
     let autoSend = true;
     let lastPayloadBits = null;
     let dataLogRecording = false;
@@ -1003,6 +1007,72 @@
       "actual_j1_rad", "actual_j2_rad", "actual_j3_rad", "actual_j4_rad", "actual_j5_rad",
       "gripper_cmd", "telemetry_time_ms"
     ];
+
+    function scheduleRawInputWsReconnect() {
+      if (rawInputWsReconnectTimer) clearTimeout(rawInputWsReconnectTimer);
+      rawInputWsReconnectTimer = setTimeout(() => {
+        rawInputWsReconnectTimer = null;
+        connectRawInputWebSocket();
+      }, 3000);
+    }
+
+    function connectRawInputWebSocket() {
+      if (rawInputWs && (rawInputWs.readyState === WebSocket.OPEN || rawInputWs.readyState === WebSocket.CONNECTING)) return;
+      rawInputWs = new WebSocket(RAW_INPUT_WS_URL);
+      rawInputWs.onclose = () => {
+        rawInputWs = null;
+        scheduleRawInputWsReconnect();
+      };
+      rawInputWs.onerror = () => {};
+    }
+
+    function sendRawMasterInput(source, signalForm, value) {
+      if (!rawInputWs || rawInputWs.readyState !== WebSocket.OPEN) return false;
+      rawInputWs.send(JSON.stringify({
+        type: "raw_master_input",
+        schema_version: 1,
+        source,
+        signal_form: signalForm,
+        value,
+      }));
+      return true;
+    }
+
+    function recordRawKeyboardEvent(event, eventName, clientTimeMs) {
+      if (selectedControlMode() !== "keyboard") return;
+      sendRawMasterInput("keyboard", "discrete", {
+        code: event.code,
+        key: event.key,
+        event: eventName,
+        repeat: !!event.repeat,
+        modifiers: {
+          alt: !!event.altKey,
+          ctrl: !!event.ctrlKey,
+          shift: !!event.shiftKey,
+          meta: !!event.metaKey,
+        },
+        pressed_keys: Array.from(pressed).sort(),
+        client_time_ms: Number(clientTimeMs),
+      });
+    }
+
+    function recordRawGamepadSample(gamepad, clientTimeMs) {
+      if (!gamepad) return;
+      sendRawMasterInput("gamepad", "continuous", {
+        id: String(gamepad.id || ""),
+        index: Number(gamepad.index),
+        timestamp: Number(gamepad.timestamp || 0),
+        connected: !!gamepad.connected,
+        mapping: String(gamepad.mapping || ""),
+        axes: Array.from(gamepad.axes || [], (value) => Number(value)),
+        buttons: Array.from(gamepad.buttons || [], (button) => ({
+          value: Number(button?.value || 0),
+          pressed: !!button?.pressed,
+          touched: !!button?.touched,
+        })),
+        client_time_ms: Number(clientTimeMs),
+      });
+    }
 
     const kbdGrid = document.getElementById("kbdGrid");
     const lastPacket = document.getElementById("lastPacket");
@@ -2112,6 +2182,9 @@
           if (!data.readiness.left_camera) missing.push(cameraReason("left", "左相机"));
           if (!data.readiness.right_camera) missing.push(cameraReason("right", "右相机"));
           if (!data.readiness.disk) missing.push("磁盘空间");
+          Object.entries(data.readiness.raw_input?.ready || {}).forEach(([source, ready]) => {
+            if (!ready) missing.push(`原始主端(${source})`);
+          });
           if (data.readiness.camera_error) missing.push(`相机服务(${data.readiness.camera_error})`);
           recordingHintEl.textContent = `未就绪: ${missing.join(", ")}`;
         } else recordingHintEl.textContent = "开始前将检查机械臂、灵巧手、左右相机和磁盘空间。";
@@ -3184,6 +3257,7 @@
       if (keyMap.includes(e.code)) {
         e.preventDefault();
         if (!pressed.has(e.code)) pressed.add(e.code);
+        recordRawKeyboardEvent(e, "down", inputEventTimeMs);
         updateKeyUI();
         updateInputIndicators();
         if (autoSend) sendFrame(inputEventTimeMs);
@@ -3195,6 +3269,7 @@
       if (keyMap.includes(e.code)) {
         e.preventDefault();
         pressed.delete(e.code);
+        recordRawKeyboardEvent(e, "up", inputEventTimeMs);
         updateKeyUI();
         updateInputIndicators();
         if (autoSend) sendFrame(inputEventTimeMs);
@@ -3675,6 +3750,7 @@
       lastPacket.textContent = `Last packet → mode:${modeVal} nibble:${(modeVal&0x0F)} ts:${tsMs}`;
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(frame);
+        if (modeSel === "gamepad") recordRawGamepadSample(getActiveGamepad(), tsMs);
         recordDataSample(tsMs, modeSel, modeVal, orderVec);
         recordExperimentSample(tsMs);
       }
@@ -3682,6 +3758,7 @@
 
     // Auto heartbeat
     connectUdpWebSocket();
+    connectRawInputWebSocket();
     setInterval(() => { if (autoSend) sendFrame(); }, ARM_COMMAND_PERIOD_MS);
   </script>
 </body>

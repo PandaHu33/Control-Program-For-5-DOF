@@ -1,0 +1,618 @@
+{
+  "schema_version": 1,
+  "robot_name": "WA100_R_URDF",
+  "root_link": "base_link",
+  "links": [
+    "base_link",
+    "Thumb_L1",
+    "Thumb_L2",
+    "Thumb_L3",
+    "Index Finger_L1",
+    "Index Finger_L2",
+    "Middle Finger_L1",
+    "Middle Finger_L2",
+    "Ring Finger_L1",
+    "Ring Finger_L2",
+    "Little Finger_L1",
+    "Little Finger_L2"
+  ],
+  "joints": [
+    {
+      "name": "Thumb_J1",
+      "joint_type": "revolute",
+      "parent_link": "base_link",
+      "child_link": "Thumb_L1",
+      "origin_xyz_m": [
+        0.031,
+        -0.0134,
+        0.05325
+      ],
+      "origin_rpy_rad": [
+        0.0,
+        0.0,
+        1.5708
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "lower_rad": -1.57,
+      "upper_rad": 0.0
+    },
+    {
+      "name": "Thumb_J2",
+      "joint_type": "revolute",
+      "parent_link": "Thumb_L1",
+      "child_link": "Thumb_L2",
+      "origin_xyz_m": [
+        -0.00665,
+        -0.015,
+        0.007
+      ],
+      "origin_rpy_rad": [
+        0.0,
+        -1.5708,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "lower_rad": 0.0,
+      "upper_rad": 1.57
+    },
+    {
+      "name": "Thumb_J3",
+      "joint_type": "revolute",
+      "parent_link": "Thumb_L2",
+      "child_link": "Thumb_L3",
+      "origin_xyz_m": [
+        0.0,
+        -0.03,
+        0.0
+      ],
+      "origin_rpy_rad": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "lower_rad": -1.57,
+      "upper_rad": 0.0
+    },
+    {
+      "name": "Index Finger_J1",
+      "joint_type": "revolute",
+      "parent_link": "base_link",
+      "child_link": "Index Finger_L1",
+      "origin_xyz_m": [
+        0.040269,
+        0.0013,
+        0.12364
+      ],
+      "origin_rpy_rad": [
+        1.5184,
+        0.0,
+        -1.5708
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "lower_rad": 0.0,
+      "upper_rad": 1.57
+    },
+    {
+      "name": "Index Finger_J2",
+      "joint_type": "revolute",
+      "parent_link": "Index Finger_L1",
+      "child_link": "Index Finger_L2",
+      "origin_xyz_m": [
+        0.0,
+        0.0300000000000001,
+        0.0
+      ],
+      "origin_rpy_rad": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "lower_rad": 0.0,
+      "upper_rad": 1.57
+    },
+    {
+      "name": "Middle Finger_J1",
+      "joint_type": "revolute",
+      "parent_link": "base_link",
+      "child_link": "Middle Finger_L1",
+      "origin_xyz_m": [
+        0.01765,
+        0.0,
+        0.129
+      ],
+      "origin_rpy_rad": [
+        1.5708,
+        0.0,
+        -1.5708
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "lower_rad": 0.0,
+      "upper_rad": 1.57
+    },
+    {
+      "name": "Middle Finger_J2",
+      "joint_type": "revolute",
+      "parent_link": "Middle Finger_L1",
+      "child_link": "Middle Finger_L2",
+      "origin_xyz_m": [
+        0.0,
+        0.03,
+        0.0
+      ],
+      "origin_rpy_rad": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "lower_rad": 0.0,
+      "upper_rad": 1.57
+    },
+    {
+      "name": "Ring Finger_J1",
+      "joint_type": "revolute",
+      "parent_link": "base_link",
+      "child_link": "Ring Finger_L1",
+      "origin_xyz_m": [
+        -0.0049871,
+        0.0,
+        0.12433
+      ],
+      "origin_rpy_rad": [
+        1.6232,
+        0.0,
+        -1.5708
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "lower_rad": 0.0,
+      "upper_rad": 1.57
+    },
+    {
+      "name": "Ring Finger_J2",
+      "joint_type": "revolute",
+      "parent_link": "Ring Finger_L1",
+      "child_link": "Ring Finger_L2",
+      "origin_xyz_m": [
+        0.0,
+        0.03,
+        0.0
+      ],
+      "origin_rpy_rad": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "lower_rad": 0.0,
+      "upper_rad": 1.57
+    },
+    {
+      "name": "Little Finger_J1",
+      "joint_type": "revolute",
+      "parent_link": "base_link",
+      "child_link": "Little Finger_L1",
+      "origin_xyz_m": [
+        -0.0274211741706633,
+        0.0,
+        0.114533922066373
+      ],
+      "origin_rpy_rad": [
+        1.65806278939462,
+        0.0,
+        -1.5707963267949
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "lower_rad": 0.0,
+      "upper_rad": 1.57
+    },
+    {
+      "name": "Little Finger_J2",
+      "joint_type": "revolute",
+      "parent_link": "Little Finger_L1",
+      "child_link": "Little Finger_L2",
+      "origin_xyz_m": [
+        0.0,
+        0.03,
+        0.0
+      ],
+      "origin_rpy_rad": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "lower_rad": 0.0,
+      "upper_rad": 1.57
+    }
+  ],
+  "source_urdf": "D:\\桌面\\黑漫灵巧手\\WA100_R_URDF\\urdf\\WA100_R_URDF.urdf",
+  "source_urdf_sha256": "0cb3ce5342f1d7647a592a41d1751283ed34b3293abb3f00d9bfcceb67e5ad5b",
+  "calibration": {
+    "schema_version": 1,
+    "calibration_id": "wa100_provisional_deadzone_v4",
+    "status": "provisional",
+    "channel_deadzones": {
+      "thumb_pitch": {
+        "open": 0.04,
+        "close": 0.06
+      },
+      "thumb_yaw": {
+        "open": 0.04,
+        "close": 0.06
+      },
+      "index": {
+        "open": 0.06,
+        "close": 0.12
+      },
+      "middle": {
+        "open": 0.06,
+        "close": 0.12
+      },
+      "ring": {
+        "open": 0.06,
+        "close": 0.12
+      },
+      "pinky": {
+        "open": 0.06,
+        "close": 0.12
+      }
+    },
+    "thumb_motion_model": {
+      "feature_point_count": 4,
+      "yaw_joint": "Thumb_J1",
+      "pitch_joints": [
+        "Thumb_J2",
+        "Thumb_J3"
+      ],
+      "pitch_angle_signs": [
+        1.0,
+        -1.0
+      ],
+      "skeleton_angle_scales": {
+        "Thumb_J1": 1.0005072145190423,
+        "Thumb_J2": 1.0005072145190423,
+        "Thumb_J3": 1.0005072145190423
+      },
+      "yaw_scope": "all_three_links",
+      "pitch_scope": "distal_two_links",
+      "axis_relationship": "orthogonal",
+      "base_xyz_m": [
+        0.031,
+        -0.0134,
+        0.05325
+      ],
+      "segment_lengths_m": [
+        0.017838791999460053,
+        0.03,
+        0.036
+      ],
+      "zero_yaw_direction": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "yaw_axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "pitch_axis_at_zero_yaw": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "dorsum_plane_normal": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "encoder_zero_direction": [
+        0.0,
+        -1.0,
+        0.0
+      ]
+    },
+    "channel_names": [
+      "thumb_pitch",
+      "thumb_yaw",
+      "index",
+      "middle",
+      "ring",
+      "pinky"
+    ],
+    "finger_chains": {
+      "thumb": [
+        "Thumb_J1",
+        "Thumb_J2",
+        "Thumb_J3"
+      ],
+      "index": [
+        "Index Finger_J1",
+        "Index Finger_J2"
+      ],
+      "middle": [
+        "Middle Finger_J1",
+        "Middle Finger_J2"
+      ],
+      "ring": [
+        "Ring Finger_J1",
+        "Ring Finger_J2"
+      ],
+      "little": [
+        "Little Finger_J1",
+        "Little Finger_J2"
+      ]
+    },
+    "tip_frames": {
+      "thumb": {
+        "parent_link": "Thumb_L3",
+        "xyz_m": [
+          0.0,
+          -0.036,
+          0.0
+        ],
+        "rpy_rad": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "index": {
+        "parent_link": "Index Finger_L2",
+        "xyz_m": [
+          0.0,
+          0.05342,
+          0.0
+        ],
+        "rpy_rad": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "middle": {
+        "parent_link": "Middle Finger_L2",
+        "xyz_m": [
+          0.0,
+          0.05342,
+          0.0
+        ],
+        "rpy_rad": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "ring": {
+        "parent_link": "Ring Finger_L2",
+        "xyz_m": [
+          0.0,
+          0.05342,
+          0.0
+        ],
+        "rpy_rad": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "little": {
+        "parent_link": "Little Finger_L2",
+        "xyz_m": [
+          0.0,
+          0.05342,
+          0.0
+        ],
+        "rpy_rad": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "joint_mappings": {
+      "Thumb_J1": {
+        "channel": "thumb_yaw",
+        "samples_units_rad": [
+          [
+            0.0,
+            -1.57
+          ],
+          [
+            2000.0,
+            0.0
+          ]
+        ]
+      },
+      "Thumb_J2": {
+        "channel": "thumb_pitch",
+        "samples_units_rad": [
+          [
+            0.0,
+            1.57
+          ],
+          [
+            2000.0,
+            0.0
+          ]
+        ]
+      },
+      "Thumb_J3": {
+        "channel": "thumb_pitch",
+        "samples_units_rad": [
+          [
+            0.0,
+            -1.57
+          ],
+          [
+            2000.0,
+            0.0
+          ]
+        ]
+      },
+      "Index Finger_J1": {
+        "channel": "index",
+        "samples_units_rad": [
+          [
+            0.0,
+            1.57
+          ],
+          [
+            2000.0,
+            0.0
+          ]
+        ]
+      },
+      "Index Finger_J2": {
+        "channel": "index",
+        "samples_units_rad": [
+          [
+            0.0,
+            1.57
+          ],
+          [
+            2000.0,
+            0.0
+          ]
+        ]
+      },
+      "Middle Finger_J1": {
+        "channel": "middle",
+        "samples_units_rad": [
+          [
+            0.0,
+            1.57
+          ],
+          [
+            2000.0,
+            0.0
+          ]
+        ]
+      },
+      "Middle Finger_J2": {
+        "channel": "middle",
+        "samples_units_rad": [
+          [
+            0.0,
+            1.57
+          ],
+          [
+            2000.0,
+            0.0
+          ]
+        ]
+      },
+      "Ring Finger_J1": {
+        "channel": "ring",
+        "samples_units_rad": [
+          [
+            0.0,
+            1.57
+          ],
+          [
+            2000.0,
+            0.0
+          ]
+        ]
+      },
+      "Ring Finger_J2": {
+        "channel": "ring",
+        "samples_units_rad": [
+          [
+            0.0,
+            1.57
+          ],
+          [
+            2000.0,
+            0.0
+          ]
+        ]
+      },
+      "Little Finger_J1": {
+        "channel": "pinky",
+        "samples_units_rad": [
+          [
+            0.0,
+            1.57
+          ],
+          [
+            2000.0,
+            0.0
+          ]
+        ]
+      },
+      "Little Finger_J2": {
+        "channel": "pinky",
+        "samples_units_rad": [
+          [
+            0.0,
+            1.57
+          ],
+          [
+            2000.0,
+            0.0
+          ]
+        ]
+      }
+    },
+    "notes": [
+      "The URDF defines geometry but no mimic/transmission elements.",
+      "Thumb yaw at J1 rotates all three thumb links without flexing the first link.",
+      "Thumb J2 and J3 are coupled to the pitch channel and both participate in flexion.",
+      "Thumb J1 yaw is orthogonal to the J2/J3 flexion axes.",
+      "At zero flexion all three thumb links are collinear; at thumb-yaw encoder value 0 they point along -Y, perpendicular to the XZ dorsum plane.",
+      "The wrist-to-thumb-base segment is a palm-plane connector and is not counted as one of the three thumb links.",
+      "Glove-mode endpoint deadzones and smoothstep are replicated before motor-unit-to-angle interpolation.",
+      "The remaining motor-to-joint mappings are provisional couplings over URDF limits.",
+      "Replace samples_units_rad with measured calibration points for quantitative use."
+    ]
+  },
+  "source_calibration": "D:\\桌面\\主端程序beta for 5-dof\\control_ui\\wa100_kinematics_calibration.json",
+  "source_calibration_sha256": "d692fe44b375ae149f0106a36c68c5e585322de04e59448f1857f17b387ccf9a"
+}

@@ -159,14 +159,96 @@ class RecordingManager:
         self._arm_writer = self._hand_writer = self._episode_writer = None
         self._arm_rows, self._hand_rows, self._episode_rows = [], [], []
         self._fusion_fh = self._controller_input_fh = self._glove_input_fh = None
+        self._raw_input_fh = None
         self._fusion_rows = []
         self._hand_channel_names = []
         self._last_master_controller_seq = self._last_master_glove_seq = None
+        self._last_raw_controller_seq = None
+        self._raw_input_counts = {}
+        self._raw_input_rejected = {}
+        self._raw_input_last_seen_ns = {}
+        self._raw_input_required = []
+        self._last_raw_timestamp_ns = 0
+        self._browser_raw_connected = False
         self._camera_counts = {"left": 0, "right": 0}
         self._last_arm_receive_ns = 0
         self._last_hand_receive_ns = 0
         self._clock = ClockMapper()
         self._recover_interrupted()
+
+    @staticmethod
+    def _raw_input_key(source, value=None):
+        stream = str((value or {}).get("stream") or "").strip()
+        return f"{source}:{stream}" if stream else str(source)
+
+    @staticmethod
+    def _required_raw_inputs(method):
+        arm_mode, separator, hand_mode = str(method or "").partition("+")
+        if not separator:
+            arm_mode, hand_mode = str(method or ""), ""
+        required = []
+        arm_sources = {
+            "keyboard": "keyboard",
+            "gamepad": "gamepad",
+            "hand_vision": "pico_hand:wrist_pose",
+            "controller_delta": "vr_controller:controller_pose",
+        }
+        hand_sources = {
+            "vr": "pico_hand:hand_skeleton",
+            "glove": "data_glove:hand_skeleton",
+        }
+        if arm_mode in arm_sources:
+            required.append(arm_sources[arm_mode])
+        if hand_mode in hand_sources:
+            required.append(hand_sources[hand_mode])
+        return required
+
+    def set_browser_raw_connected(self, connected):
+        with self.lock:
+            self._browser_raw_connected = bool(connected)
+
+    def reject_raw_input(self, source, reason="rejected"):
+        key = f"{source}:{reason}"
+        with self.lock:
+            if self.state == "recording":
+                self._raw_input_rejected[key] = self._raw_input_rejected.get(key, 0) + 1
+
+    def observe_raw_input(self, payload, receive_utc_ns=None, receive_monotonic_ns=None):
+        """Record one active, pre-mapping master sample in the SOP JSONL envelope."""
+        if not isinstance(payload, dict):
+            return False
+        if payload.get("type") != "raw_master_input" or int(payload.get("schema_version", 0)) != 1:
+            return False
+        source = str(payload.get("source") or "").strip()
+        signal_form = str(payload.get("signal_form") or "").strip()
+        value = payload.get("value")
+        if source not in {"keyboard", "gamepad", "pico_hand", "data_glove", "vr_controller"}:
+            return False
+        if signal_form not in {"discrete", "continuous"} or not isinstance(value, dict):
+            return False
+        receive_utc_ns = int(receive_utc_ns or time.time_ns())
+        receive_monotonic_ns = int(receive_monotonic_ns or time.monotonic_ns())
+        key = self._raw_input_key(source, value)
+        with self.lock:
+            self._raw_input_last_seen_ns[key] = receive_utc_ns
+            if self.state != "recording" or not self.session or not self._raw_input_fh:
+                return False
+            if key not in self._raw_input_required:
+                reject_key = f"{key}:inactive_source"
+                self._raw_input_rejected[reject_key] = self._raw_input_rejected.get(reject_key, 0) + 1
+                return False
+            timestamp_ns = max(receive_utc_ns, self._last_raw_timestamp_ns + 1)
+            self._last_raw_timestamp_ns = timestamp_ns
+            record = {
+                "trial_id": self.session["id"],
+                "timestamp_ns": timestamp_ns,
+                "source": source,
+                "signal_form": signal_form,
+                "value": value,
+            }
+            self._raw_input_fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+            self._raw_input_counts[key] = self._raw_input_counts.get(key, 0) + 1
+            return True
 
     def _recover_interrupted(self):
         if not self.root.exists():
@@ -281,6 +363,28 @@ class RecordingManager:
         receive_monotonic_ns = int(receive_monotonic_ns or time.monotonic_ns())
         if payload.get("type") != "master_fusion_state":
             return
+        controller = dict(payload.get("controller") or {})
+        controller_seq = int(controller.get("seq", -1))
+        with self.lock:
+            is_new_raw_controller = controller_seq >= 0 and controller_seq != self._last_raw_controller_seq
+            if is_new_raw_controller:
+                # Track new device samples even while idle so a repeatedly
+                # published fusion state cannot masquerade as fresh raw input.
+                self._last_raw_controller_seq = controller_seq
+        if is_new_raw_controller:
+            controller["stream"] = "controller_pose"
+            controller["record_receive_utc_ns"] = receive_utc_ns
+            self.observe_raw_input(
+                {
+                    "type": "raw_master_input",
+                    "schema_version": 1,
+                    "source": "vr_controller",
+                    "signal_form": "continuous",
+                    "value": controller,
+                },
+                receive_utc_ns,
+                receive_monotonic_ns,
+            )
         with self.lock:
             if self.state != "recording":
                 return
@@ -290,8 +394,6 @@ class RecordingManager:
             self._fusion_fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
             self._fusion_rows.append(record)
 
-            controller = dict(payload.get("controller") or {})
-            controller_seq = int(controller.get("seq", -1))
             if controller_seq >= 0 and controller_seq != self._last_master_controller_seq:
                 controller["record_receive_utc_ns"] = receive_utc_ns
                 self._controller_input_fh.write(
@@ -312,7 +414,8 @@ class RecordingManager:
         now = time.time_ns()
         return bool(self._last_hand_receive_ns and now - self._last_hand_receive_ns <= int(timeout_ns))
 
-    def readiness(self, arm_timeout_ns=500_000_000, hand_timeout_ns=500_000_000):
+    def readiness(self, arm_timeout_ns=500_000_000, hand_timeout_ns=500_000_000, method=None,
+                  raw_timeout_ns=500_000_000):
         now = time.time_ns()
         result = {
             "arm": bool(self._last_arm_receive_ns and now - self._last_arm_receive_ns <= arm_timeout_ns),
@@ -320,6 +423,27 @@ class RecordingManager:
             "left_camera": False,
             "right_camera": False,
             "disk": False,
+        }
+        required_raw = self._required_raw_inputs(method) if method else []
+        raw_ready = {}
+        with self.lock:
+            browser_connected = self._browser_raw_connected
+            last_seen = dict(self._raw_input_last_seen_ns)
+        for key in required_raw:
+            source = key.split(":", 1)[0]
+            if source == "keyboard":
+                raw_ready[key] = browser_connected
+            else:
+                raw_ready[key] = bool(
+                    (source != "gamepad" or browser_connected)
+                    and last_seen.get(key)
+                    and now - last_seen[key] <= int(raw_timeout_ns)
+                )
+        result["raw_input"] = {
+            "required": required_raw,
+            "ready": raw_ready,
+            "browser_connected": browser_connected,
+            "ok": all(raw_ready.values()) if required_raw else True,
         }
         try:
             camera = _http_json(self.camera_base_url + "/health", timeout=1.5)
@@ -339,6 +463,7 @@ class RecordingManager:
         except OSError as exc:
             result["disk_error"] = str(exc)
         result["ok"] = all(result.get(key) for key in ("arm", "hand", "left_camera", "right_camera", "disk"))
+        result["ok"] = result["ok"] and result["raw_input"]["ok"]
         if result["ok"]:
             with self.lock:
                 if self.state == "idle" and self.error == "required devices are not ready":
@@ -367,7 +492,7 @@ class RecordingManager:
             if self.state in {"arming", "recording", "stopping"}:
                 return {"ok": False, "message": "a recording session is already active", **self.status()}
             self.state, self.error = "arming", ""
-        ready = self.readiness()
+        ready = self.readiness(method=method)
         if require_ready and not ready["ok"]:
             with self.lock:
                 # A rejected preflight is not a failed recording session.  Keep
@@ -395,7 +520,7 @@ class RecordingManager:
             "readiness": ready,
         }
         _json_write(directory / "manifest.inprogress.json", manifest)
-        arm_fh = hand_fh = episode_fh = fusion_fh = controller_input_fh = glove_input_fh = None
+        arm_fh = hand_fh = episode_fh = fusion_fh = controller_input_fh = glove_input_fh = raw_input_fh = None
         try:
             camera = _http_json(
                 self.camera_base_url + "/record/start", "POST",
@@ -413,11 +538,12 @@ class RecordingManager:
             glove_input_fh = (directory / "master_glove_input.jsonl").open(
                 "w", encoding="utf-8", buffering=1
             )
+            raw_input_fh = (directory / "raw_input.jsonl").open("w", encoding="utf-8", buffering=1)
             arm_writer, hand_writer = csv.DictWriter(arm_fh, self.ARM_COLUMNS), csv.DictWriter(hand_fh, self.HAND_COLUMNS)
             episode_writer = csv.DictWriter(episode_fh, self.EPISODE_RECORD_COLUMNS)
             arm_writer.writeheader(); hand_writer.writeheader(); episode_writer.writeheader()
         except Exception as exc:
-            for fh in (arm_fh, hand_fh, episode_fh, fusion_fh, controller_input_fh, glove_input_fh):
+            for fh in (arm_fh, hand_fh, episode_fh, fusion_fh, controller_input_fh, glove_input_fh, raw_input_fh):
                 if fh:
                     fh.close()
             try:
@@ -439,9 +565,14 @@ class RecordingManager:
             self._fusion_fh = fusion_fh
             self._controller_input_fh = controller_input_fh
             self._glove_input_fh = glove_input_fh
+            self._raw_input_fh = raw_input_fh
             self._fusion_rows = []
             self._hand_channel_names = []
             self._last_master_controller_seq = self._last_master_glove_seq = None
+            self._raw_input_counts = {}
+            self._raw_input_rejected = {}
+            self._raw_input_required = self._required_raw_inputs(method)
+            self._last_raw_timestamp_ns = 0
             self._camera_counts = {"left": 0, "right": 0}
             self._clock = ClockMapper()
             self.state = "recording"
@@ -470,13 +601,14 @@ class RecordingManager:
         with self.lock:
             for fh in (
                 self._arm_fh, self._hand_fh, self._episode_fh,
-                self._fusion_fh, self._controller_input_fh, self._glove_input_fh,
+                self._fusion_fh, self._controller_input_fh, self._glove_input_fh, self._raw_input_fh,
             ):
                 if fh:
                     fh.flush(); fh.close()
             self._arm_fh = self._hand_fh = self._episode_fh = None
             self._arm_writer = self._hand_writer = self._episode_writer = None
             self._fusion_fh = self._controller_input_fh = self._glove_input_fh = None
+            self._raw_input_fh = None
         try:
             alignment = self._write_alignment(session, stopped_ns)
         except Exception as exc:
@@ -495,6 +627,17 @@ class RecordingManager:
         manifest = dict(session["manifest"])
         duration_sec = (stopped_ns - session["started_at_ns"]) / 1e9
         fusion_summary = self._master_fusion_summary()
+        missing_raw = [key for key in self._raw_input_required if self._raw_input_counts.get(key, 0) <= 0]
+        if missing_raw:
+            errors.append("missing required raw input: " + ", ".join(missing_raw))
+        raw_input_summary = {
+            "file": "raw_input.jsonl",
+            "required": list(self._raw_input_required),
+            "counts": dict(self._raw_input_counts),
+            "total": sum(self._raw_input_counts.values()),
+            "rejected": dict(self._raw_input_rejected),
+            "missing": missing_raw,
+        }
         manifest.update({
             "state": "incomplete" if incomplete_reason or errors else "complete",
             "complete": not bool(incomplete_reason or errors),
@@ -506,6 +649,7 @@ class RecordingManager:
                 "arm": len(self._arm_rows),
                 "hand": len(self._hand_rows),
                 "episode_records": len(self._episode_rows),
+                "raw_input": raw_input_summary["total"],
                 **fusion_summary["counts"],
                 **alignment.get("counts", {}),
             },
@@ -527,6 +671,7 @@ class RecordingManager:
             "camera": camera,
             "alignment": alignment,
             "master_fusion": fusion_summary,
+            "raw_input": raw_input_summary,
         })
         _json_write(session["dir"] / "manifest.json", manifest)
         (session["dir"] / "manifest.inprogress.json").unlink(missing_ok=True)
@@ -537,6 +682,10 @@ class RecordingManager:
             self._arm_rows, self._hand_rows, self._episode_rows = [], [], []
             self._fusion_rows = []
             self._hand_channel_names = []
+            self._raw_input_counts = {}
+            self._raw_input_rejected = {}
+            self._raw_input_required = []
+            self._last_raw_timestamp_ns = 0
         return {"ok": manifest["complete"], "message": manifest["state"], "manifest": manifest, **self.status()}
 
     def _master_fusion_summary(self):
@@ -803,9 +952,13 @@ class RecordingManager:
                     "arm": len(self._arm_rows), "hand": len(self._hand_rows),
                     "episode_records": len(self._episode_rows),
                     "master_fusion": len(self._fusion_rows),
+                    "raw_input": sum(self._raw_input_counts.values()),
+                    "raw_input_by_source": dict(self._raw_input_counts),
+                    "raw_input_rejected": dict(self._raw_input_rejected),
                     "left_frames": self._camera_counts["left"],
                     "right_frames": self._camera_counts["right"],
                 },
+                "raw_input_required": list(self._raw_input_required),
                 "error": self.error,
             }
 
@@ -822,6 +975,21 @@ class RecordingManager:
             missing.append("arm telemetry")
         if not self._last_hand_receive_ns or now - self._last_hand_receive_ns > grace_ns:
             missing.append("hand telemetry")
+        with self.lock:
+            required_raw = list(self._raw_input_required)
+            last_seen_raw = dict(self._raw_input_last_seen_ns)
+            browser_connected = self._browser_raw_connected
+        for key in required_raw:
+            source = key.split(":", 1)[0]
+            if source == "keyboard":
+                if not browser_connected:
+                    missing.append("keyboard raw input websocket")
+                continue
+            if source == "gamepad" and not browser_connected:
+                missing.append("gamepad raw input websocket")
+                continue
+            if not last_seen_raw.get(key) or now - last_seen_raw[key] > grace_ns:
+                missing.append(f"raw input {key}")
         try:
             camera = _http_json(self.camera_base_url + "/health", timeout=1.0)
             if not camera.get("left", {}).get("fresh"): missing.append("left camera")

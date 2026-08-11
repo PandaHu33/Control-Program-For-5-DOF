@@ -306,6 +306,11 @@ class XrHandGestureTests(unittest.TestCase):
         }
         sock = FakeSocket()
         bridge._handle_line(json.dumps(payload).encode("utf-8"), sock)
+        forwarded = [item for item, target in sock.sent if target[1] == 25001][0]
+        self.assertEqual(forwarded["source"], "xr-hands")
+        self.assertIn("unity-xr-hands", forwarded["jointFormat"])
+        self.assertEqual(len(forwarded["rightPositions"]), 63)
+        self.assertEqual(len(forwarded["rightRotations"]), 63)
         gesture = [item for item, target in sock.sent if target[1] == 25002][0]
         self.assertTrue(gesture["left_fist"])
         self.assertEqual(gesture["deadman"], 1)

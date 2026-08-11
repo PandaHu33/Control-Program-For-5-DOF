@@ -65,10 +65,37 @@ class RecordingManagerTests(unittest.TestCase):
             now = __import__("time").time_ns()
             manager.observe_arm({"source_time_ns": now, "seq": 0})
             manager.observe_hand({"source_time_ns": now, "seq": 0})
+            manager.set_browser_raw_connected(True)
+            manager.observe_raw_input({
+                "type": "raw_master_input", "schema_version": 1,
+                "source": "pico_hand", "signal_form": "continuous",
+                "value": {
+                    "stream": "hand_skeleton", "frameId": 0, "rightTracked": True,
+                    "rightPositions": [0.0] * 63, "rightRotations": [0.0] * 63,
+                },
+            })
             started = manager.start("keyboard+vr")
             self.assertTrue(started["ok"], started)
             session_dir = manager.session["dir"]
+            session_id = manager.session["id"]
             start_ns = manager.session["started_at_ns"]
+            manager.observe_raw_input({
+                "type": "raw_master_input", "schema_version": 1,
+                "source": "keyboard", "signal_form": "discrete",
+                "value": {
+                    "code": "KeyW", "key": "w", "event": "down", "repeat": False,
+                    "modifiers": {"alt": False, "ctrl": False, "shift": False, "meta": False},
+                    "pressed_keys": ["KeyW"], "client_time_ms": 1,
+                },
+            }, receive_utc_ns=start_ns + 1)
+            manager.observe_raw_input({
+                "type": "raw_master_input", "schema_version": 1,
+                "source": "pico_hand", "signal_form": "continuous",
+                "value": {
+                    "stream": "hand_skeleton", "frameId": 1, "rightTracked": True,
+                    "rightPositions": [0.1] * 63, "rightRotations": [0.2] * 63,
+                },
+            }, receive_utc_ns=start_ns + 1)
             for index in range(12):
                 stamp = start_ns + index * 10_000_000
                 manager.observe_arm({
@@ -141,6 +168,9 @@ class RecordingManagerTests(unittest.TestCase):
             self.assertEqual(manifest["counts"]["master_fusion"], 7)
             self.assertEqual(manifest["counts"]["master_controller_input"], 7)
             self.assertEqual(manifest["counts"]["master_glove_input"], 7)
+            self.assertEqual(manifest["counts"]["raw_input"], 2)
+            self.assertEqual(manifest["raw_input"]["counts"]["keyboard"], 1)
+            self.assertEqual(manifest["raw_input"]["counts"]["pico_hand:hand_skeleton"], 1)
             self.assertEqual(
                 manifest["hand_channel_names"],
                 ["thumb_pitch", "thumb_yaw", "index", "middle", "ring", "pinky"],
@@ -167,6 +197,11 @@ class RecordingManagerTests(unittest.TestCase):
             self.assertTrue((session_dir / "master_fusion.jsonl").exists())
             self.assertTrue((session_dir / "master_controller_input.jsonl").exists())
             self.assertTrue((session_dir / "master_glove_input.jsonl").exists())
+            self.assertTrue((session_dir / "raw_input.jsonl").exists())
+            raw_input = [json.loads(line) for line in (session_dir / "raw_input.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([row["source"] for row in raw_input], ["keyboard", "pico_hand"])
+            self.assertLess(raw_input[0]["timestamp_ns"], raw_input[1]["timestamp_ns"])
+            self.assertTrue(all(row["trial_id"] == session_id for row in raw_input))
             self.assertEqual(
                 manifest["master_fusion"]["calibration_ids"]["time_and_extrinsic"],
                 ["alignment-test"],
