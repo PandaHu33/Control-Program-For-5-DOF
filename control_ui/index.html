@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -194,9 +194,9 @@
     }
     .canonical-viewer-frame {
       position: relative;
-      width: 100%;
-      min-height: 280px;
+      width: min(360px, 100%);
       aspect-ratio: 4 / 3;
+      margin: 0 auto;
       overflow: hidden;
       border-radius: 10px;
       background: #fff;
@@ -221,7 +221,7 @@
     .canonical-camera-row {
       grid-column: 1 / -1;
       display: grid;
-      grid-template-columns: minmax(360px, 0.82fr) minmax(520px, 1.18fr);
+      grid-template-columns: minmax(360px, 420px) minmax(520px, 1.18fr);
       gap: 12px;
       align-items: start;
     }
@@ -254,8 +254,9 @@
     }
     .camera-slot {
       position: relative;
-      width: 100%;
-      padding-top: 56.25%;
+      width: min(640px, 100%);
+      aspect-ratio: 4 / 3;
+      margin: 0 auto;
       border-radius: 10px;
       overflow: hidden;
       background: #0b1221;
@@ -280,7 +281,13 @@
       background: rgba(3,7,18,0.72);
       font-size: 12px;
     }
-    .camera-slot-status { margin: -4px 2px 0; }
+    .camera-slot-status { margin: -4px 2px 0; text-align: center; }
+    #cameraStreamFrame {
+      width: min(640px, 100%);
+      margin: 0 auto;
+      aspect-ratio: 2 / 3;
+      padding-top: 0;
+    }
     .camera-mode-settings {
       margin-top: 10px;
       padding-top: 10px;
@@ -1173,23 +1180,22 @@
       return { x: width * 0.43 + horizontal * scale, y: height * 0.54 - vertical * scale, depth };
     }
 
+    // Fixed viewport and resolution: the canonical viewer no longer follows
+    // the card layout, so the skeleton keeps a stable metric scale.
+    const CANONICAL_VIEW_WIDTH = 360;
+    const CANONICAL_VIEW_HEIGHT = 270;
+
     function prepareCanonicalCanvas() {
       if (!canonicalSkeletonCanvas) return null;
-      const rect = canonicalSkeletonCanvas.getBoundingClientRect();
-      const cssWidth = Math.max(320, Math.round(rect.width || canonicalSkeletonCanvas.clientWidth || 640));
-      const cssHeight = Math.max(260, Math.round(rect.height || canonicalSkeletonCanvas.clientHeight || 420));
-      const ratio = Math.min(2, window.devicePixelRatio || 1);
-      const pixelWidth = Math.round(cssWidth * ratio);
-      const pixelHeight = Math.round(cssHeight * ratio);
-      if (canonicalSkeletonCanvas.width !== pixelWidth || canonicalSkeletonCanvas.height !== pixelHeight) {
-        canonicalSkeletonCanvas.width = pixelWidth;
-        canonicalSkeletonCanvas.height = pixelHeight;
+      if (canonicalSkeletonCanvas.width !== CANONICAL_VIEW_WIDTH || canonicalSkeletonCanvas.height !== CANONICAL_VIEW_HEIGHT) {
+        canonicalSkeletonCanvas.width = CANONICAL_VIEW_WIDTH;
+        canonicalSkeletonCanvas.height = CANONICAL_VIEW_HEIGHT;
       }
       const context = canonicalSkeletonCanvas.getContext("2d");
-      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      context.setTransform(1, 0, 0, 1, 0, 0);
       context.lineCap = "round";
       context.lineJoin = "round";
-      return { context, width: cssWidth, height: cssHeight };
+      return { context, width: CANONICAL_VIEW_WIDTH, height: CANONICAL_VIEW_HEIGHT };
     }
 
     function drawCanonicalPlaceholder(message) {
