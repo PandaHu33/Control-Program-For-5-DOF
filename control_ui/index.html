@@ -1485,9 +1485,9 @@
         arm_target_q_rad: targetAngles.slice(0, 4).map(Number),
         wrist_dof_mask: 15,
         mapping_id: mode === "gamepad"
-          ? "ui-gamepad-mapping-v3-pico-axes"
+          ? "ui-gamepad-mapping-v4-shared-lateral-intent"
           : mode === "keyboard"
-            ? "ui-keyboard-mapping-v2-pico-axes"
+            ? "ui-keyboard-mapping-v3-shared-lateral-intent"
             : `ui-${mode}-mapping-v1`,
         no_send: !!e1NoSendEl?.checked,
       }));
@@ -3027,7 +3027,7 @@
       // PICO is the Canonical direction reference.  The browser target/IK
       // convention is opposite on each displayed Cartesian control axis.
       const dx = (pressed.has("KeyS") ? step : 0) - (pressed.has("KeyW") ? step : 0);
-      const dy = (pressed.has("KeyA") ? step : 0) - (pressed.has("KeyD") ? step : 0);
+      const dy = keyboardLateralIntent() * step;
       const dz = (pressed.has("KeyE") ? step : 0) - (pressed.has("KeyQ") ? step : 0);
       applyJoint4Axis(keyboardJoint4Axis(), CONTROL_PERIOD_SCALE);
       applyPositionDelta(dx, dy, dz);
@@ -3036,8 +3036,7 @@
     function applyJointKeyboardStep() {
       ensureTargetInitialized();
       const step = JOINT_STEP * CONTROL_PERIOD_SCALE;
-      if (pressed.has("KeyA")) targetAngles[0] -= step;
-      if (pressed.has("KeyD")) targetAngles[0] += step;
+      targetAngles[0] += keyboardLateralIntent() * step;
       if (pressed.has("KeyS")) targetAngles[1] -= step;
       if (pressed.has("KeyW")) targetAngles[1] += step;
       if (pressed.has("KeyQ")) targetAngles[2] -= step;
@@ -3065,6 +3064,16 @@
     function applyGamepadDeadzone(value) {
       const n = Number(value) || 0;
       return Math.abs(n) < GAMEPAD_DEADZONE ? 0 : n;
+    }
+
+    function keyboardLateralIntent() {
+      return (pressed.has("KeyD") ? 1 : 0) - (pressed.has("KeyA") ? 1 : 0);
+    }
+
+    function gamepadLateralIntent(gp) {
+      // This controller reports LX with the opposite polarity from the
+      // operator-facing A(left)/D(right) convention. Normalize it once here.
+      return -applyGamepadDeadzone(gp?.axes?.[0] || 0);
     }
 
     function gamepadZAxis(gp) {
@@ -3254,7 +3263,7 @@
       if (mode === "gamepad") {
         const gp = getActiveGamepad();
         if (gp) {
-          const axisX = applyGamepadDeadzone(gp.axes?.[0] || 0);
+          const axisX = gamepadLateralIntent(gp);
           const axisY = applyGamepadDeadzone(gp.axes?.[1] || 0);
           x = axisX;
           y = axisY;
@@ -3347,7 +3356,7 @@
         return;
       }
       activeGamepadIndex = gp.index;
-      const ax = applyGamepadDeadzone(gp.axes?.[0] || 0);
+      const ax = gamepadLateralIntent(gp);
       const ay = applyGamepadDeadzone(gp.axes?.[1] || 0);
       const zAxis = gamepadZAxis(gp);
       const j4Axis = gamepadJoint4Axis(gp);
@@ -3363,13 +3372,12 @@
         updateKeyboardTargetHint();
         return;
       }
-      const axisX = applyGamepadDeadzone(gp.axes?.[0] || 0);
+      const lateralIntent = gamepadLateralIntent(gp);
       const axisY = applyGamepadDeadzone(gp.axes?.[1] || 0);
       const zAxis = gamepadZAxis(gp);
       applyJoint4Axis(gamepadJoint4Axis(gp), CONTROL_PERIOD_SCALE);
       const step = POSITION_STEP * CONTROL_PERIOD_SCALE;
-      // Same PICO-registered Canonical signs as the keyboard path.
-      applyPositionDelta(axisY * step, -axisX * step, -zAxis * step);
+      applyPositionDelta(axisY * step, lateralIntent * step, -zAxis * step);
     }
 
     function applyGamepadJointStep() {
@@ -3380,12 +3388,12 @@
         updateKeyboardTargetHint();
         return;
       }
-      const axisX = applyGamepadDeadzone(gp.axes?.[0] || 0);
+      const lateralIntent = gamepadLateralIntent(gp);
       const axisY = applyGamepadDeadzone(gp.axes?.[1] || 0);
       const qAxis = gamepadZAxis(gp);
       const j4Axis = gamepadJoint4Axis(gp);
       const step = JOINT_STEP * CONTROL_PERIOD_SCALE;
-      targetAngles[0] += axisX * step;  // A/D
+      targetAngles[0] += lateralIntent * step; // A/D
       targetAngles[1] += -axisY * step; // W/S
       targetAngles[2] += qAxis * step;  // Q/E
       applyJoint4Axis(j4Axis, CONTROL_PERIOD_SCALE);
