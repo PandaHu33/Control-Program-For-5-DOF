@@ -121,6 +121,7 @@
 - [版本更新记录](VERSION_HISTORY.md)
 - [操作员一键启动说明](control_ui/OPERATOR_README.txt)
 - [E1 Canonical no-send dry-run SOP](docs/E1_CANONICAL_DRY_RUN_SOP.md)
+- [灵巧手抓取任务设计与过流缓解方案](docs/TASK_DESIGN.md)
 - [感知辅助监控 Phase 1](docs/perception_assist_monitor_phase1.md)
 - [WA100 本地运动学模型](control_ui/WA100_KINEMATICS.md)
 - [Hand_Tracker 手部识别服务说明](Hand_Tracker/README.md)
