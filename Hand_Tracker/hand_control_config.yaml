@@ -84,7 +84,7 @@ xr_gesture_state:
 
 controller_delta:
   # Shared by VR hand tracking Delta mode and right-controller Delta mode.
-  gain_xyz: [0.5, 0.5, 0.5]
+  gain_xyz: [0.8, 0.8, 0.8]
   stale_timeout_sec: 0.40
   deadman_button_label: "Left X"
 
@@ -107,6 +107,8 @@ raw_master_telemetry:
 master_fusion:
   enabled: true
   mode: "m3"
+  # E1 wrist authority remains the VR controller. Fusion is diagnostic only.
+  apply_to_controller_delta: false
   host: "127.0.0.1"
   glove_port: 25008
   state_port: 25007

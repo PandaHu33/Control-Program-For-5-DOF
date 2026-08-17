@@ -192,6 +192,57 @@
       grid-template-columns: repeat(2, minmax(84px, 1fr));
       margin-top: 0;
     }
+    .canonical-viewer-frame {
+      position: relative;
+      width: 100%;
+      min-height: 280px;
+      aspect-ratio: 4 / 3;
+      overflow: hidden;
+      border-radius: 10px;
+      background: #fff;
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .canonical-viewer-frame canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .canonical-viewer-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+    .canonical-viewer-meta .status-line { margin: 0; }
+    .canonical-camera-row {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: minmax(360px, 0.82fr) minmax(520px, 1.18fr);
+      gap: 12px;
+      align-items: start;
+    }
+    .canonical-camera-row > .card { min-width: 0; }
+    .metric-group {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(80px, 1fr));
+      gap: 10px;
+    }
+    .metric-group.two { grid-template-columns: repeat(2, minmax(100px, 1fr)); }
+    .metric-group span {
+      min-width: 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .metric-group strong {
+      display: block;
+      margin-top: 3px;
+      color: var(--text);
+      font-size: 14px;
+    }
     #usbCameraFrame {
       display: grid;
       grid-template-columns: 1fr;
@@ -501,6 +552,12 @@
       .trigger-grid { grid-template-columns: repeat(2, 48px); }
       .stick-base { width: 60px; height: 60px; }
       .hand-vision-panel { grid-template-columns: 1fr; }
+      .canonical-camera-row { grid-template-columns: 1fr; }
+      .metric-group { grid-template-columns: 1fr; }
+      .metric-group.two { grid-template-columns: 1fr; }
+    }
+    @media (min-width: 641px) and (max-width: 1050px) {
+      .canonical-camera-row { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -545,10 +602,17 @@
         <div>状态<strong id="recordingStatus">idle</strong></div>
         <div>会话<strong id="recordingSession">-</strong></div>
         <div>时长<strong id="recordingElapsed">0.0 s</strong></div>
-        <div>机械臂样本<strong id="recordingArmSamples">0</strong></div>
-        <div>灵巧手样本<strong id="recordingHandSamples">0</strong></div>
-        <div>左相机帧<strong id="recordingLeftFrames">0</strong></div>
-        <div>右相机帧<strong id="recordingRightFrames">0</strong></div>
+        <div class="metric-group">
+          <span>机械臂样本<strong id="recordingArmSamples">0</strong></span>
+          <span>灵巧手样本<strong id="recordingHandSamples">0</strong></span>
+          <span>Canonical样本<strong id="recordingCanonicalSamples">0</strong></span>
+        </div>
+        <div>Canonical来源<strong id="canonicalSources">-</strong></div>
+        <div>Canonical最近错误<strong id="canonicalLastError">-</strong></div>
+        <div class="metric-group two">
+          <span>左相机帧<strong id="recordingLeftFrames">0</strong></span>
+          <span>右相机帧<strong id="recordingRightFrames">0</strong></span>
+        </div>
       </div>
       <p class="status-line" id="recordingHint">开始前将检查机械臂、灵巧手、左右相机和磁盘空间。</p>
     </div>
@@ -581,7 +645,7 @@
         </div>
         <div class="keyboard-mode-selector" id="handControlMode" aria-label="hand control mode">
           <label><input type="radio" name="handControlMode" value="vr" />VR手部追踪</label>
-          <label><input type="radio" name="handControlMode" value="glove" checked />手套操控模式</label>
+          <label><input type="radio" name="handControlMode" value="glove" />手套操控模式</label>
           <label><input type="radio" name="handControlMode" value="preset" />预编程位置模式</label>
         </div>
       </div>
@@ -646,6 +710,18 @@
       </div>
     </div>
 
+    <div class="canonical-camera-row">
+    <div class="card" id="canonicalViewerCard">
+      <h2>Canonical 腕部与手部骨架（1 s 刷新）</h2>
+      <div class="canonical-viewer-frame">
+        <canvas id="canonicalSkeletonCanvas" aria-label="Canonical wrist and hand skeleton live view"></canvas>
+      </div>
+      <div class="canonical-viewer-meta">
+        <p class="status-line" id="canonicalViewerStatus">等待 Canonical 数据...</p>
+        <p class="status-line" id="canonicalViewerPose">腕部位置：-</p>
+      </div>
+    </div>
+
     <div class="card" id="usbCameraCard">
       <h2>双摄像头</h2>
       <div class="video-frame" id="usbCameraFrame">
@@ -683,6 +759,7 @@
         </div>
         <p class="status-line" id="cameraModeSaveHint">模式切换在下次运行“一键启动显控”时生效。</p>
       </div>
+    </div>
     </div>
 
     <div class="card" id="armStatus">
@@ -892,6 +969,7 @@
         <div class="flex" style="margin-top: 8px;">
           <button id="sendNow">Send Frame</button>
           <button id="toggleAuto" class="active">Auto-send: ON</button>
+          <label><input id="e1NoSend" type="checkbox" /> E1 no-send dry-run</label>
         </div>
         <p class="status-line" id="lastPacket">Last packet: -</p>
         <p class="status-line">Frame: JSON schema + CRC32 (fixed-length)</p>
@@ -925,6 +1003,7 @@
     const API_BASE = "http://localhost:8090";
     const STATUS_WS_URL = "ws://localhost:8080/status";
     const RAW_INPUT_WS_URL = "ws://localhost:8080/raw-input";
+    const CANONICAL_WS_URL = "ws://localhost:8080/canonical-goal";
     const HAND_SERVICE_BASE = "http://127.0.0.1:8091";
     // Frame schema (mirrors protocol/frame_config.json). We'll try fetch, fallback to inline.
     const FRAME_SCHEMA_INLINE = {
@@ -984,7 +1063,13 @@
     let ws = null;
     let rawInputWs = null;
     let rawInputWsReconnectTimer = null;
+    let canonicalWs = null;
+    let canonicalWsReconnectTimer = null;
+    let latestCanonicalGoal = null;
+    let renderedCanonicalGoal = null;
+    let canonicalWristDelta = [0, 0, 0];
     let autoSend = true;
+    const e1NoSendEl = document.getElementById("e1NoSend");
     let lastPayloadBits = null;
     let dataLogRecording = false;
     let dataLogRows = [];
@@ -1026,6 +1111,331 @@
       rawInputWs.onerror = () => {};
     }
 
+    const CANONICAL_FINGERS = [
+      { name: "Thumb", color: "#D55E00", joints: [1, 2, 3, 4] },
+      { name: "Index", color: "#0072B2", joints: [5, 6, 7, 8] },
+      { name: "Middle", color: "#009E73", joints: [9, 10, 11, 12] },
+      { name: "Ring", color: "#CC79A7", joints: [13, 14, 15, 16] },
+      { name: "Little", color: "#E69F00", joints: [17, 18, 19, 20] },
+    ];
+    const canonicalSkeletonCanvas = document.getElementById("canonicalSkeletonCanvas");
+    const canonicalViewerStatus = document.getElementById("canonicalViewerStatus");
+    const canonicalViewerPose = document.getElementById("canonicalViewerPose");
+
+    function finiteCanonicalVector(value, length) {
+      return Array.isArray(value)
+        && value.length === length
+        && value.every(item => Number.isFinite(Number(item)));
+    }
+
+    function validCanonicalGoal(goal) {
+      return goal?.type === "canonical_goal"
+        && finiteCanonicalVector(goal?.wrist_pose_C?.position_m, 3)
+        && finiteCanonicalVector(goal?.wrist_pose_C?.orientation_xyzw, 4)
+        && Array.isArray(goal?.hand_skeleton_w)
+        && goal.hand_skeleton_w.length === 21
+        && goal.hand_skeleton_w.every(point => finiteCanonicalVector(point, 3));
+    }
+
+    function rotateCanonicalPoint(point, quaternion) {
+      let [x, y, z, w] = quaternion.map(Number);
+      const norm = Math.hypot(x, y, z, w);
+      if (!(norm > 1e-12)) return point.map(Number);
+      x /= norm; y /= norm; z /= norm; w /= norm;
+      const [vx, vy, vz] = point.map(Number);
+      const tx = 2 * (y * vz - z * vy);
+      const ty = 2 * (z * vx - x * vz);
+      const tz = 2 * (x * vy - y * vx);
+      return [
+        vx + w * tx + (y * tz - z * ty),
+        vy + w * ty + (z * tx - x * tz),
+        vz + w * tz + (x * ty - y * tx),
+      ];
+    }
+
+    function canonicalProjection(point, wrist, width, height) {
+      // Orthographic world-space camera, close to the static view used by the
+      // offline task plot. The wrist stays centred while its orientation and
+      // the hand articulation remain visible in a stable metric scale.
+      const azimuth = -58 * Math.PI / 180;
+      const elevation = 24 * Math.PI / 180;
+      const dx = point[0] - wrist[0];
+      const dy = point[1] - wrist[1];
+      const dz = point[2] - wrist[2];
+      const horizontal = -Math.sin(azimuth) * dx + Math.cos(azimuth) * dy;
+      const vertical = -Math.sin(elevation) * Math.cos(azimuth) * dx
+        - Math.sin(elevation) * Math.sin(azimuth) * dy
+        + Math.cos(elevation) * dz;
+      const depth = Math.cos(elevation) * Math.cos(azimuth) * dx
+        + Math.cos(elevation) * Math.sin(azimuth) * dy
+        + Math.sin(elevation) * dz;
+      const scale = Math.min(width / 0.29, height / 0.23);
+      return { x: width * 0.43 + horizontal * scale, y: height * 0.54 - vertical * scale, depth };
+    }
+
+    function prepareCanonicalCanvas() {
+      if (!canonicalSkeletonCanvas) return null;
+      const rect = canonicalSkeletonCanvas.getBoundingClientRect();
+      const cssWidth = Math.max(320, Math.round(rect.width || canonicalSkeletonCanvas.clientWidth || 640));
+      const cssHeight = Math.max(260, Math.round(rect.height || canonicalSkeletonCanvas.clientHeight || 420));
+      const ratio = Math.min(2, window.devicePixelRatio || 1);
+      const pixelWidth = Math.round(cssWidth * ratio);
+      const pixelHeight = Math.round(cssHeight * ratio);
+      if (canonicalSkeletonCanvas.width !== pixelWidth || canonicalSkeletonCanvas.height !== pixelHeight) {
+        canonicalSkeletonCanvas.width = pixelWidth;
+        canonicalSkeletonCanvas.height = pixelHeight;
+      }
+      const context = canonicalSkeletonCanvas.getContext("2d");
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      context.lineCap = "round";
+      context.lineJoin = "round";
+      return { context, width: cssWidth, height: cssHeight };
+    }
+
+    function drawCanonicalPlaceholder(message) {
+      const prepared = prepareCanonicalCanvas();
+      if (!prepared) return;
+      const { context, width, height } = prepared;
+      context.fillStyle = "#FFFFFF";
+      context.fillRect(0, 0, width, height);
+      context.fillStyle = "#6B7280";
+      context.font = "600 14px Segoe UI, sans-serif";
+      context.textAlign = "center";
+      context.fillText(message, width / 2, height / 2);
+    }
+
+    function drawCanonicalArrow(context, startX, startY, endX, endY, color, lineWidth = 2) {
+      const angle = Math.atan2(endY - startY, endX - startX);
+      const head = 7;
+      context.strokeStyle = color;
+      context.fillStyle = color;
+      context.lineWidth = lineWidth;
+      context.beginPath(); context.moveTo(startX, startY); context.lineTo(endX, endY); context.stroke();
+      context.beginPath();
+      context.moveTo(endX, endY);
+      context.lineTo(endX - head * Math.cos(angle - Math.PI / 6), endY - head * Math.sin(angle - Math.PI / 6));
+      context.lineTo(endX - head * Math.cos(angle + Math.PI / 6), endY - head * Math.sin(angle + Math.PI / 6));
+      context.closePath(); context.fill();
+    }
+
+    function drawCanonicalSkeleton(goal) {
+      if (!validCanonicalGoal(goal)) return;
+      const prepared = prepareCanonicalCanvas();
+      if (!prepared) return;
+      const { context, width, height } = prepared;
+      const wrist = goal.wrist_pose_C.position_m.map(Number);
+      const quaternion = goal.wrist_pose_C.orientation_xyzw.map(Number);
+      const worldPoints = goal.hand_skeleton_w.map(local => {
+        const rotated = rotateCanonicalPoint(local, quaternion);
+        return rotated.map((value, axis) => value + wrist[axis]);
+      });
+      const projected = worldPoints.map(point => canonicalProjection(point, wrist, width, height));
+      const wristMask = Number(goal.validity?.wrist_dof_mask || 0);
+      const handMask = Number(goal.validity?.hand_node_mask || 0);
+      const fullyValid = wristMask !== 0 && handMask !== 0;
+
+      context.clearRect(0, 0, width, height);
+      context.fillStyle = "#FFFFFF";
+      context.fillRect(0, 0, width, height);
+
+      // Metric floor grid centred on the current wrist, drawn in world XY.
+      context.save();
+      context.strokeStyle = "#E5E7EB";
+      context.lineWidth = 1;
+      for (let step = -2; step <= 2; step += 1) {
+        const offset = step * 0.05;
+        for (const endpoints of [
+          [[wrist[0] - 0.10, wrist[1] + offset, wrist[2]], [wrist[0] + 0.10, wrist[1] + offset, wrist[2]]],
+          [[wrist[0] + offset, wrist[1] - 0.10, wrist[2]], [wrist[0] + offset, wrist[1] + 0.10, wrist[2]]],
+        ]) {
+          const a = canonicalProjection(endpoints[0], wrist, width, height);
+          const b = canonicalProjection(endpoints[1], wrist, width, height);
+          context.beginPath(); context.moveTo(a.x, a.y); context.lineTo(b.x, b.y); context.stroke();
+        }
+      }
+      context.restore();
+
+      // Keep the hand centred, but move the world axes to the lower-left so
+      // they never cover the wrist or palm.
+      const origin2d = canonicalProjection(wrist, wrist, width, height);
+      const axisDirections = [
+        { label: "X", color: "#EF4444", end: [wrist[0] + 0.045, wrist[1], wrist[2]] },
+        { label: "Y", color: "#2563EB", end: [wrist[0], wrist[1] + 0.045, wrist[2]] },
+        { label: "Z", color: "#16A34A", end: [wrist[0], wrist[1], wrist[2] + 0.045] },
+      ];
+      const axesOrigin = { x: 48, y: height - 42 };
+      for (const axis of axisDirections) {
+        const end = canonicalProjection(axis.end, wrist, width, height);
+        const dx = end.x - origin2d.x;
+        const dy = end.y - origin2d.y;
+        const length = Math.max(1e-6, Math.hypot(dx, dy));
+        const axisEnd = { x: axesOrigin.x + dx / length * 30, y: axesOrigin.y + dy / length * 30 };
+        drawCanonicalArrow(context, axesOrigin.x, axesOrigin.y, axisEnd.x, axisEnd.y, axis.color, 1.7);
+        context.font = "700 11px Segoe UI, sans-serif";
+        context.textAlign = "center";
+        context.fillText(axis.label, axisEnd.x, axisEnd.y - 5);
+      }
+
+      // Join the five MCP roots into a palm before painting the articulated
+      // fingers. This reflects the canonical parent graph and avoids the
+      // misleading appearance of five unrelated polylines.
+      const palmSurface = [0, 5, 9, 13, 17].map(index => projected[index]);
+      context.globalAlpha = fullyValid ? 0.16 : 0.07;
+      context.fillStyle = "#64748B";
+      context.beginPath();
+      palmSurface.forEach((point, index) => index === 0
+        ? context.moveTo(point.x, point.y)
+        : context.lineTo(point.x, point.y));
+      context.closePath(); context.fill();
+      context.globalAlpha = fullyValid ? 0.9 : 0.32;
+      context.strokeStyle = "#64748B";
+      context.lineWidth = 2;
+      for (const root of [1, 5, 9, 13, 17]) {
+        context.beginPath();
+        context.moveTo(projected[0].x, projected[0].y);
+        context.lineTo(projected[root].x, projected[root].y);
+        context.stroke();
+      }
+      context.beginPath();
+      [1, 5, 9, 13, 17].forEach((root, index) => index === 0
+        ? context.moveTo(projected[root].x, projected[root].y)
+        : context.lineTo(projected[root].x, projected[root].y));
+      context.stroke();
+      context.globalAlpha = 1;
+
+      // Paint back-to-front so crossed fingers keep a consistent visual order.
+      const fingers = CANONICAL_FINGERS.slice().sort((left, right) => {
+        const meanDepth = item => item.joints.reduce((sum, index) => sum + projected[index].depth, 0) / item.joints.length;
+        return meanDepth(left) - meanDepth(right);
+      });
+      for (const finger of fingers) {
+        context.globalAlpha = fullyValid ? 1 : 0.38;
+        context.strokeStyle = finger.color;
+        context.lineWidth = 3;
+        context.beginPath();
+        finger.joints.forEach((joint, index) => {
+          const point = projected[joint];
+          if (index === 0) context.moveTo(point.x, point.y);
+          else context.lineTo(point.x, point.y);
+        });
+        context.stroke();
+        for (const joint of finger.joints) {
+          const point = projected[joint];
+          context.globalAlpha = handMask & (1 << joint) ? 1 : 0.28;
+          context.fillStyle = finger.color;
+          context.strokeStyle = "#FFFFFF";
+          context.lineWidth = 1.2;
+          context.beginPath(); context.arc(point.x, point.y, finger.name === "Thumb" ? 5 : 4.5, 0, Math.PI * 2);
+          context.fill(); context.stroke();
+        }
+      }
+      context.globalAlpha = wristMask ? 1 : 0.32;
+      context.fillStyle = "#111827";
+      context.fillRect(origin2d.x - 5, origin2d.y - 5, 10, 10);
+      context.globalAlpha = 1;
+
+      const movementM = Math.hypot(...canonicalWristDelta);
+      context.font = "600 11px Segoe UI, sans-serif";
+      context.textAlign = "left";
+      if (movementM >= 0.00025) {
+        const movementEndWorld = wrist.map((value, axis) => value + canonicalWristDelta[axis]);
+        const movementEnd = canonicalProjection(movementEndWorld, wrist, width, height);
+        const dx = movementEnd.x - origin2d.x;
+        const dy = movementEnd.y - origin2d.y;
+        const projectedLength = Math.max(1e-6, Math.hypot(dx, dy));
+        const arrowLength = Math.min(58, Math.max(28, 28 + movementM * 900));
+        const arrowStart = { x: 24, y: 72 };
+        const arrowEnd = {
+          x: arrowStart.x + dx / projectedLength * arrowLength,
+          y: arrowStart.y + dy / projectedLength * arrowLength,
+        };
+        drawCanonicalArrow(context, arrowStart.x, arrowStart.y, arrowEnd.x, arrowEnd.y, "#111827", 2.4);
+        context.fillStyle = "#374151";
+        context.fillText(`腕部移动 ${(movementM * 1000).toFixed(1)} mm / 1 s`, 24, 94);
+      } else {
+        context.fillStyle = "#6B7280";
+        context.fillText("腕部移动 < 0.25 mm / 1 s", 24, 78);
+      }
+
+      context.fillStyle = "#111827";
+      context.font = "700 15px Segoe UI, sans-serif";
+      context.textAlign = "left";
+      context.fillText("Canonical wrist + hand skeleton", 16, 25);
+      context.fillStyle = fullyValid ? "#374151" : "#B45309";
+      context.font = "12px Segoe UI, sans-serif";
+      context.fillText(`seq ${Number(goal.seq || 0)}  ·  ${goal.condition_id || "NON_E1"}`, 16, 44);
+
+      const legendX = Math.max(width - 94, width * 0.78);
+      CANONICAL_FINGERS.forEach((finger, index) => {
+        const y = 28 + index * 20;
+        context.strokeStyle = finger.color;
+        context.lineWidth = 3;
+        context.beginPath(); context.moveTo(legendX, y); context.lineTo(legendX + 18, y); context.stroke();
+        context.fillStyle = "#374151";
+        context.font = "11px Segoe UI, sans-serif";
+        context.textAlign = "left";
+        context.fillText(finger.name, legendX + 24, y + 4);
+      });
+    }
+
+    function commitLatestCanonicalGoal() {
+      if (!latestCanonicalGoal) return;
+      const previousPose = renderedCanonicalGoal?.wrist_pose_C?.position_m;
+      const nextPose = latestCanonicalGoal.wrist_pose_C.position_m.map(Number);
+      canonicalWristDelta = finiteCanonicalVector(previousPose, 3)
+        ? nextPose.map((value, axis) => value - Number(previousPose[axis]))
+        : [0, 0, 0];
+      renderedCanonicalGoal = latestCanonicalGoal;
+      drawCanonicalSkeleton(renderedCanonicalGoal);
+      const pose = nextPose;
+      const invalidReasons = renderedCanonicalGoal.invalid_reasons || [];
+      if (canonicalViewerStatus) {
+        canonicalViewerStatus.textContent = invalidReasons.length
+          ? `seq ${renderedCanonicalGoal.seq} · ${invalidReasons.join(", ")}`
+          : `seq ${renderedCanonicalGoal.seq} · ${renderedCanonicalGoal.wrist_source} + ${renderedCanonicalGoal.hand_source}`;
+        canonicalViewerStatus.classList.toggle("warning", invalidReasons.length > 0);
+      }
+      if (canonicalViewerPose) {
+        canonicalViewerPose.textContent = `腕部：X ${pose[0].toFixed(3)} / Y ${pose[1].toFixed(3)} / Z ${pose[2].toFixed(3)} m · Δ ${canonicalWristDelta.map(value => (value * 1000).toFixed(1)).join(" / ")} mm`;
+      }
+    }
+
+    function scheduleCanonicalWsReconnect() {
+      if (canonicalWsReconnectTimer) clearTimeout(canonicalWsReconnectTimer);
+      canonicalWsReconnectTimer = setTimeout(() => {
+        canonicalWsReconnectTimer = null;
+        connectCanonicalWebSocket();
+      }, 3000);
+    }
+
+    function connectCanonicalWebSocket() {
+      if (canonicalWs && (canonicalWs.readyState === WebSocket.OPEN || canonicalWs.readyState === WebSocket.CONNECTING)) return;
+      try {
+        canonicalWs = new WebSocket(CANONICAL_WS_URL);
+        canonicalWs.onopen = () => {
+          if (canonicalViewerStatus && !latestCanonicalGoal) canonicalViewerStatus.textContent = "Canonical 已连接，等待有效数据...";
+        };
+        canonicalWs.onmessage = event => {
+          try {
+            const goal = JSON.parse(event.data);
+            if (validCanonicalGoal(goal)) latestCanonicalGoal = goal;
+          } catch (_) {}
+        };
+        canonicalWs.onclose = () => {
+          canonicalWs = null;
+          if (canonicalViewerStatus) {
+            canonicalViewerStatus.textContent = "Canonical 连接已断开，正在重连...";
+            canonicalViewerStatus.classList.add("warning");
+          }
+          scheduleCanonicalWsReconnect();
+        };
+        canonicalWs.onerror = () => canonicalWs?.close();
+      } catch (_) {
+        canonicalWs = null;
+        scheduleCanonicalWsReconnect();
+      }
+    }
+
     function sendRawMasterInput(source, signalForm, value) {
       if (!rawInputWs || rawInputWs.readyState !== WebSocket.OPEN) return false;
       rawInputWs.send(JSON.stringify({
@@ -1034,6 +1444,46 @@
         source,
         signal_form: signalForm,
         value,
+      }));
+      return true;
+    }
+
+    function canonicalWristSource(mode) {
+      if (mode === "hand_vision") return "pico_wrist";
+      if (mode === "controller_delta") return "vr_controller";
+      return mode === "gamepad" ? "gamepad" : "keyboard";
+    }
+
+    function sendCanonicalWristAdapter(mode, sourceTimeMs, beforePosition, beforeRoll) {
+      if (!rawInputWs || rawInputWs.readyState !== WebSocket.OPEN) return false;
+      const position = canonicalWristPose.position_m.map(Number);
+      const roll = Number(targetAngles[3]) || 0;
+      const half = roll * 0.5;
+      const state = mode === "controller_delta" ? controllerDeltaState : handVisionState;
+      const sourceSeq = ["controller_delta", "hand_vision"].includes(mode)
+        ? Number(state?.vr?.seq ?? state?.seq ?? -1)
+        : Number(frameCounter);
+      rawInputWs.send(JSON.stringify({
+        type: "canonical_wrist_adapter",
+        schema_version: 1,
+        wrist_source: canonicalWristSource(mode),
+        source_seq: sourceSeq,
+        source_time_ns: Math.max(0, Math.round(Number(sourceTimeMs || Date.now()) * 1e6)),
+        adapter_wrist_delta: [
+          position[0] - Number(beforePosition?.[0] || 0),
+          position[1] - Number(beforePosition?.[1] || 0),
+          position[2] - Number(beforePosition?.[2] || 0),
+          roll - Number(beforeRoll || 0), 0, 0,
+        ],
+        wrist_pose_C: {position_m: position, orientation_xyzw: [Math.sin(half), 0, 0, Math.cos(half)]},
+        arm_target_q_rad: targetAngles.slice(0, 4).map(Number),
+        wrist_dof_mask: 15,
+        mapping_id: mode === "gamepad"
+          ? "ui-gamepad-mapping-v3-pico-axes"
+          : mode === "keyboard"
+            ? "ui-keyboard-mapping-v2-pico-axes"
+            : `ui-${mode}-mapping-v1`,
+        no_send: !!e1NoSendEl?.checked,
       }));
       return true;
     }
@@ -1087,6 +1537,9 @@
     const recordingElapsedEl = document.getElementById("recordingElapsed");
     const recordingArmSamplesEl = document.getElementById("recordingArmSamples");
     const recordingHandSamplesEl = document.getElementById("recordingHandSamples");
+    const recordingCanonicalSamplesEl = document.getElementById("recordingCanonicalSamples");
+    const canonicalSourcesEl = document.getElementById("canonicalSources");
+    const canonicalLastErrorEl = document.getElementById("canonicalLastError");
     const recordingLeftFramesEl = document.getElementById("recordingLeftFrames");
     const recordingRightFramesEl = document.getElementById("recordingRightFrames");
     const recordingHintEl = document.getElementById("recordingHint");
@@ -1177,7 +1630,7 @@
     const featureToggles = document.getElementById("featureToggles");
     const trajectoryGroup = document.getElementById("trajectoryGroup");
     let showingDebug = false;
-    let currentHandMode = "glove";
+    let currentHandMode = "idle";
 
     videoUrlInput.value = DEFAULT_VIDEO_URL;
     wsUrlInput.value = DEFAULT_WS_URL;
@@ -1300,7 +1753,7 @@
     }
 
     function setHandModeUi(mode, pending=false) {
-      currentHandMode = mode || currentHandMode || "vr";
+      currentHandMode = mode || "idle";
       if (handControlMode) {
         handControlMode.querySelectorAll('input[name="handControlMode"]').forEach((input) => {
           const active = input.value === currentHandMode;
@@ -1834,8 +2287,8 @@
 
     if (handControlMode) {
       handControlMode.addEventListener("change", () => {
-        const mode = handControlMode.querySelector('input[name="handControlMode"]:checked')?.value || "vr";
-        callApi(`POST /api/hand/mode/${mode}`);
+        const mode = handControlMode.querySelector('input[name="handControlMode"]:checked')?.value;
+        if (mode) callApi(`POST /api/hand/mode/${mode}`);
       });
     }
 
@@ -1876,6 +2329,8 @@
       }
     }
     connectStatusWs();
+    drawCanonicalPlaceholder("等待 Canonical 数据...");
+    connectCanonicalWebSocket();
     callApi("GET /api/status");
     connectHandVisionEvents();
     connectControllerDeltaEvents();
@@ -1888,7 +2343,18 @@
     window.addEventListener("beforeunload", () => {
       stopLocalCameraPreviews();
       stopCameraStreamPlayback();
+      if (canonicalWsReconnectTimer) clearTimeout(canonicalWsReconnectTimer);
+      canonicalWsReconnectTimer = null;
+      if (canonicalWs) {
+        canonicalWs.onclose = null;
+        canonicalWs.close();
+      }
     });
+    window.addEventListener("resize", () => {
+      if (renderedCanonicalGoal) drawCanonicalSkeleton(renderedCanonicalGoal);
+      else drawCanonicalPlaceholder("等待 Canonical 数据...");
+    });
+    setInterval(commitLatestCanonicalGoal, 1000);
     setInterval(refreshCameraStatus, 8000);
     setInterval(refreshHandVisionStatus, 8000);
     setInterval(refreshControllerDeltaStatus, 8000);
@@ -2159,6 +2625,14 @@
       if (recordingElapsedEl) recordingElapsedEl.textContent = `${Number(data.elapsed_sec || 0).toFixed(1)} s`;
       if (recordingArmSamplesEl) recordingArmSamplesEl.textContent = String(data.counts?.arm || 0);
       if (recordingHandSamplesEl) recordingHandSamplesEl.textContent = String(data.counts?.hand || 0);
+      if (recordingCanonicalSamplesEl) recordingCanonicalSamplesEl.textContent = String(data.counts?.canonical_goal || 0);
+      const canonical = data.canonical || {};
+      if (canonicalSourcesEl) {
+        canonicalSourcesEl.textContent = canonical.wrist_source || canonical.hand_source
+          ? `${canonical.wrist_source || "-"} / ${canonical.hand_source || "-"}`
+          : "-";
+      }
+      if (canonicalLastErrorEl) canonicalLastErrorEl.textContent = canonical.last_error || "-";
       if (recordingLeftFramesEl) recordingLeftFramesEl.textContent = String(data.counts?.left_frames || 0);
       if (recordingRightFramesEl) recordingRightFramesEl.textContent = String(data.counts?.right_frames || 0);
       const recordingReady = !!data.readiness?.ok;
@@ -2487,6 +2961,7 @@
     function ensurePositionTargetInitialized() {
       if (positionTargetInitialized) return;
       targetPosition = armForwardKinematics(targetAngles);
+      canonicalWristPose.position_m = targetPosition.slice(0, 3);
       positionTargetInitialized = true;
     }
 
@@ -2519,9 +2994,10 @@
     function setPositionTarget(position, extraFlag=0) {
       ensurePositionTargetInitialized();
       const workspace = clampTargetPositionToWorkspace(position);
-      targetPosition = workspace.position;
+      canonicalWristPose.position_m = workspace.position.slice(0, 3);
+      targetPosition = canonicalWristPose.position_m.slice(0, 3);
 
-      const ikResult = solveArmKinematics(targetPosition);
+      const ikResult = solveArmKinematics(canonicalWristPose.position_m);
       if (workspace.flag && !ikResult.flag) ikResult.flag = workspace.flag;
       if (extraFlag && !ikResult.flag) ikResult.flag = extraFlag;
       targetAngles[0] = ikResult.qs[0];
@@ -2542,12 +3018,11 @@
     function applyPositionKeyboardStep() {
       ensureTargetInitialized();
       const step = POSITION_STEP * CONTROL_PERIOD_SCALE;
-      const dx = (pressed.has("KeyW") ? step : 0) - (pressed.has("KeyS") ? step : 0);
-      // Position-space Y follows the physical operator view: A=left, D=right.
-      // J1 is converted from logical to physical once on Jetson, so do not
-      // apply the old pre-J1-inversion sign here.
-      const dy = (pressed.has("KeyD") ? step : 0) - (pressed.has("KeyA") ? step : 0);
-      const dz = (pressed.has("KeyQ") ? step : 0) - (pressed.has("KeyE") ? step : 0);
+      // PICO is the Canonical direction reference.  The browser target/IK
+      // convention is opposite on each displayed Cartesian control axis.
+      const dx = (pressed.has("KeyS") ? step : 0) - (pressed.has("KeyW") ? step : 0);
+      const dy = (pressed.has("KeyA") ? step : 0) - (pressed.has("KeyD") ? step : 0);
+      const dz = (pressed.has("KeyE") ? step : 0) - (pressed.has("KeyQ") ? step : 0);
       applyJoint4Axis(keyboardJoint4Axis(), CONTROL_PERIOD_SCALE);
       applyPositionDelta(dx, dy, dz);
     }
@@ -2563,6 +3038,7 @@
       if (pressed.has("KeyE")) targetAngles[2] += step;
       applyJoint4Axis(keyboardJoint4Axis(), CONTROL_PERIOD_SCALE);
       targetPosition = armForwardKinematics(targetAngles);
+      canonicalWristPose.position_m = targetPosition.slice(0, 3);
       positionTargetInitialized = true;
       updateKeyboardTargetHint();
     }
@@ -2742,6 +3218,8 @@
     function applyJoint4Axis(axis, scale=1) {
       const value = clampNumber(Number(axis) || 0, -1, 1);
       if (value) targetAngles[3] += value * JOINT_STEP * scale;
+      const half = targetAngles[3] * 0.5;
+      canonicalWristPose.orientation_xyzw = [Math.sin(half), 0, 0, Math.cos(half)];
     }
 
     function setStickDot(dot, x, y) {
@@ -2884,7 +3362,8 @@
       const zAxis = gamepadZAxis(gp);
       applyJoint4Axis(gamepadJoint4Axis(gp), CONTROL_PERIOD_SCALE);
       const step = POSITION_STEP * CONTROL_PERIOD_SCALE;
-      applyPositionDelta(-axisY * step, -axisX * step, zAxis * step);
+      // Same PICO-registered Canonical signs as the keyboard path.
+      applyPositionDelta(axisY * step, -axisX * step, -zAxis * step);
     }
 
     function applyGamepadJointStep() {
@@ -2905,6 +3384,7 @@
       targetAngles[2] += qAxis * step;  // Q/E
       applyJoint4Axis(j4Axis, CONTROL_PERIOD_SCALE);
       targetPosition = armForwardKinematics(targetAngles);
+      canonicalWristPose.position_m = targetPosition.slice(0, 3);
       positionTargetInitialized = true;
       updateKeyboardTargetHint();
     }
@@ -3060,6 +3540,10 @@
     const ARM_LINK_3 = 0.424;
     const ARM_LINK_5 = 0.424;
     let targetPosition = [ARM_LINK_3 + ARM_LINK_5, 0, 0];
+    let canonicalWristPose = {
+      position_m: targetPosition.slice(0, 3),
+      orientation_xyzw: [0, 0, 0, 1],
+    };
     let targetInitialized = false;
     let positionTargetInitialized = false;
     const ARM_MIN_ELBOW_ANGLE = Math.PI / 6;
@@ -3132,6 +3616,8 @@
           targetAngles[3] = armAngles[3];
           targetInitialized = true;
           targetPosition = armForwardKinematics(targetAngles);
+          canonicalWristPose.position_m = targetPosition.slice(0, 3);
+          canonicalWristPose.orientation_xyzw = [Math.sin(targetAngles[3] * 0.5), 0, 0, Math.cos(targetAngles[3] * 0.5)];
           positionTargetInitialized = true;
           updateKeyboardTargetHint();
         }
@@ -3180,6 +3666,8 @@
       targetAngles[3] = armAngles[3];
       targetInitialized = true;
       targetPosition = armForwardKinematics(targetAngles);
+      canonicalWristPose.position_m = targetPosition.slice(0, 3);
+      canonicalWristPose.orientation_xyzw = [Math.sin(targetAngles[3] * 0.5), 0, 0, Math.cos(targetAngles[3] * 0.5)];
       positionTargetInitialized = true;
       updateKeyboardTargetHint();
     }
@@ -3217,6 +3705,8 @@
       targetAngles[3] = Number(latest[3]) || 0;
       targetInitialized = true;
       targetPosition = armForwardKinematics(targetAngles);
+      canonicalWristPose.position_m = targetPosition.slice(0, 3);
+      canonicalWristPose.orientation_xyzw = [Math.sin(targetAngles[3] * 0.5), 0, 0, Math.cos(targetAngles[3] * 0.5)];
       positionTargetInitialized = true;
       updateKeyboardTargetHint();
     }
@@ -3609,6 +4099,8 @@
       // 预定轨迹：extend=8, retract=9（保留10-15）
       const emergencyChecked = !!featureToggles.querySelector('input[data-toggle="emergency_stop"]')?.checked;
       let modeSel = emergencyChecked ? "keyboard" : selectedControlMode();
+      const canonicalBeforePosition = canonicalWristPose.position_m.slice(0, 3);
+      const canonicalBeforeRoll = Number(targetAngles[3]) || 0;
       let trajSel = trajectoryGroup.querySelector('input[name=trajectory]:checked')?.value || 'none';
       if (emergencyChecked || modeSel !== "controller_delta") resetControllerDeltaLastDelta();
       if (emergencyChecked || modeSel !== "hand_vision") resetHandVisionLastDelta();
@@ -3649,6 +4141,8 @@
         targetAngles[3] = armAngles[3];
         targetInitialized = true;
         targetPosition = armForwardKinematics(targetAngles);
+        canonicalWristPose.position_m = targetPosition.slice(0, 3);
+        canonicalWristPose.orientation_xyzw = [Math.sin(targetAngles[3] * 0.5), 0, 0, Math.cos(targetAngles[3] * 0.5)];
         positionTargetInitialized = true;
       }
 
@@ -3733,6 +4227,9 @@
       }
       
       const tsMs = Number.isFinite(sourceTimeMs) ? Math.round(sourceTimeMs) : Date.now();
+      if (!emergencyChecked && ARM_LOCAL_MODES.has(modeSel)) {
+        sendCanonicalWristAdapter(modeSel, tsMs, canonicalBeforePosition, canonicalBeforeRoll);
+      }
       const obj = {
         ind: frameCounter++,
         time: tsMs,
@@ -3748,7 +4245,12 @@
       };
       const frame = packFrame(obj);
       lastPacket.textContent = `Last packet → mode:${modeVal} nibble:${(modeVal&0x0F)} ts:${tsMs}`;
-      if (ws && ws.readyState === WebSocket.OPEN) {
+      if (e1NoSendEl?.checked) {
+        lastPacket.textContent += " [E1 NO-SEND]";
+        if (modeSel === "gamepad") recordRawGamepadSample(getActiveGamepad(), tsMs);
+        recordDataSample(tsMs, modeSel, modeVal, orderVec);
+        recordExperimentSample(tsMs);
+      } else if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(frame);
         if (modeSel === "gamepad") recordRawGamepadSample(getActiveGamepad(), tsMs);
         recordDataSample(tsMs, modeSel, modeVal, orderVec);

@@ -244,6 +244,9 @@ class UiDeltaContractTests(unittest.TestCase):
     def test_ffmpeg_fallback_flips_each_input_before_stack(self):
         script = (ROOT / "control_ui" / "start_dual_rtsp_camera.ps1").read_text(encoding="utf-8")
         config = (ROOT / "control_ui" / "config.yaml").read_text(encoding="utf-8")
+        self.assertIn('$previousErrorActionPreference = $ErrorActionPreference', script)
+        self.assertIn('$ErrorActionPreference = "Continue"', script)
+        self.assertIn('$ErrorActionPreference = $previousErrorActionPreference', script)
         self.assertIn('$leftFlipFilter = if ($leftMirrorEnabled) { ",hflip" }', script)
         self.assertIn('$rightFlipFilter = if ($rightMirrorEnabled) { ",hflip" }', script)
         self.assertIn('$leftVerticalFlipFilter = if ($leftVerticalFlipEnabled) { ",vflip" }', script)
@@ -251,7 +254,7 @@ class UiDeltaContractTests(unittest.TestCase):
         self.assertIn("[left][right]vstack=inputs=2", script)
         self.assertIn("left_mirror: false", config)
         self.assertIn("right_mirror: true", config)
-        self.assertIn("left_vertical_flip: true", config)
+        self.assertIn("left_vertical_flip: false", config)
         self.assertIn("right_vertical_flip: false", config)
 
 

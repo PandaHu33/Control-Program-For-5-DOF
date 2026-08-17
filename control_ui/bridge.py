@@ -56,6 +56,11 @@ except ImportError:
     from control_ui.recording_service import RecordingManager
 
 try:
+    from canonical_goal import CanonicalGoalBuilder
+except ImportError:
+    from control_ui.canonical_goal import CanonicalGoalBuilder
+
+try:
     from perception_assist_monitor import PerceptionAssistMonitor, load_monitor_config
 except ImportError:
     from control_ui.perception_assist_monitor import PerceptionAssistMonitor, load_monitor_config
@@ -172,6 +177,7 @@ experiment_cfg = cfg.get("experiment", {})
 recording_cfg = cfg.get("recording", {})
 arm_control_cfg = cfg.get("arm_control", {})
 rtsp_camera_cfg = cfg.get("rtsp_dual_camera", {})
+canonical_cfg = cfg.get("canonical", {})
 
 SSH_COMMON_OPTIONS = [
     "-o", "BatchMode=yes",
@@ -186,6 +192,7 @@ WS_PORT = int(ws_cfg.get("port", 8080))
 UDP_PATH = ws_cfg.get("path", "/udp")
 STATUS_PATH = ws_cfg.get("status_path", "/status")
 RAW_INPUT_PATH = ws_cfg.get("raw_input_path", "/raw-input")
+CANONICAL_PATH = ws_cfg.get("canonical_path", "/canonical-goal")
 API_HOST = api_cfg.get("host", "0.0.0.0")
 API_PORT = int(api_cfg.get("port", 8090))
 
@@ -218,13 +225,25 @@ RAW_MASTER_PORT = int(recording_cfg.get("raw_master_port", 25009))
 RECORDING_MIN_FREE_BYTES = int(float(recording_cfg.get("min_free_gib", 2.0)) * 1024 ** 3)
 RECORDING_MAX_DURATION_SEC = float(recording_cfg.get("max_duration_minutes", 10.0)) * 60.0
 RECORDING_ALIGNMENT_HZ = float(recording_cfg.get("alignment_hz", 20.0))
+CANONICAL_CONTROL_ENABLED = str(canonical_cfg.get("control_path_enabled", True)).strip().lower() in {"1", "true", "yes", "on"}
+CANONICAL_LOG_ENABLED = str(canonical_cfg.get("log_enabled", True)).strip().lower() in {"1", "true", "yes", "on"}
+CANONICAL_STALE_TIMEOUT_SEC = float(canonical_cfg.get("stale_timeout_sec", 0.5))
+CANONICAL_PUBLISH_HZ = max(1.0, float(canonical_cfg.get("publish_hz", 50.0)))
+CANONICAL_PUBLISH_PERIOD_NS = int(round(1e9 / CANONICAL_PUBLISH_HZ))
+CANONICAL_HAND_MODEL_PATH = BASE_DIR / str(canonical_cfg.get("hi5_hand_model_path", "hi5_hand_model_v8.json"))
+CANONICAL_HAND_HOST = str(canonical_cfg.get("hand_host", HAND_UDP_LISTEN_HOST))
+CANONICAL_HAND_PORT = int(canonical_cfg.get("hand_port", HAND_UDP_LISTEN_PORT))
 RECORDING = RecordingManager(
     RECORDING_ROOT,
     f"http://{CAMERA_SERVICE_HOST}:{CAMERA_SERVICE_PORT}",
     RECORDING_MIN_FREE_BYTES,
     RECORDING_MAX_DURATION_SEC,
     alignment_hz=RECORDING_ALIGNMENT_HZ,
+    canonical_log_enabled=CANONICAL_LOG_ENABLED,
+    canonical_publish_hz=CANONICAL_PUBLISH_HZ,
 )
+CANONICAL = CanonicalGoalBuilder(CANONICAL_HAND_MODEL_PATH, CANONICAL_STALE_TIMEOUT_SEC)
+CANONICAL_HAND_SOCKET = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 PERCEPTION_CONFIG_PATH = BASE_DIR / "perception_assist_config.json"
 PERCEPTION_CONFIG = load_monitor_config(PERCEPTION_CONFIG_PATH)
 PERCEPTION_MONITOR = PerceptionAssistMonitor(PERCEPTION_CONFIG)
@@ -355,7 +374,7 @@ def camera_startup_settings():
 
 
 def normalize_hand_mode(mode):
-    value = str(mode or "vr").strip().lower()
+    value = str(mode or "idle").strip().lower()
     aliases = {
         "vr_hand": "vr",
         "vrhand": "vr",
@@ -363,10 +382,10 @@ def normalize_hand_mode(mode):
         "hand-tracking": "vr",
     }
     value = aliases.get(value, value)
-    return value if value in {"vr", "glove", "preset"} else "vr"
+    return value if value in {"idle", "vr", "glove", "preset"} else "idle"
 
 
-DEFAULT_HAND_MODE = normalize_hand_mode(hand_control_cfg.get("default_mode", "vr"))
+DEFAULT_HAND_MODE = normalize_hand_mode(hand_control_cfg.get("default_mode", "idle"))
 START_GLOVE_BY_DEFAULT = config_bool(hand_control_cfg.get("start_glove_by_default"), DEFAULT_HAND_MODE == "glove")
 
 udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -382,11 +401,13 @@ recent_ws_crc = deque(maxlen=256)
 UDP_CLIENTS = set()
 STATUS_CLIENTS = set()
 RAW_INPUT_CLIENTS = set()
+CANONICAL_CLIENTS = set()
 CLIENT_LOCK = threading.RLock()
 STATE_LOCK = threading.RLock()
 CAMERA_FRAME_LOCK = threading.RLock()
 EXPERIMENT_LOCK = threading.RLock()
 ARM_COMMAND_LOCK = threading.RLock()
+CANONICAL_PUBLISH_LOCK = threading.RLock()
 LOGS = deque(maxlen=300)
 PENDING_ARM_COMMANDS = {}
 PROCESSES = {}
@@ -632,6 +653,7 @@ SYSTEM = {
         "loaded_fingers": [],
         "current_residual": [None] * 6,
     },
+    "canonical": CANONICAL.status(),
     "modules": {
         "backend": {"status": "ONLINE", "last_seen": time.time(), "message": "后端服务运行中"},
         "jetson": {"status": "OFFLINE", "last_seen": 0, "message": "未检查"},
@@ -674,6 +696,7 @@ def snapshot():
             "hand_mode": SYSTEM.get("hand_mode", DEFAULT_HAND_MODE),
             "arm_control": arm_control,
             "perception_assist": json.loads(json.dumps(SYSTEM.get("perception_assist", {}), ensure_ascii=False)),
+            "canonical": json.loads(json.dumps(SYSTEM.get("canonical", {}), ensure_ascii=False)),
             "modules": json.loads(json.dumps(SYSTEM["modules"], ensure_ascii=False)),
             "faults": list(SYSTEM["faults"])[-20:],
             "logs": list(LOGS)[:80],
@@ -964,10 +987,34 @@ def is_glove_required(mode=None):
     return normalize_hand_mode(mode or SYSTEM.get("hand_mode", DEFAULT_HAND_MODE)) == "glove"
 
 
+def activate_hand_mode(mode, positions=None, name=None):
+    normalized = normalize_hand_mode(mode)
+    if normalized == "idle":
+        return False, "请选择 VR 手部追踪、手套操控或预编程位置模式"
+    if not is_process_alive("hand"):
+        ok, msg = start_program("hand", "hand_exe")
+        if not ok:
+            return False, msg
+    if normalized == "glove" and not is_process_alive("glove"):
+        ok, msg = start_program("glove", "unity_glove")
+        if not ok:
+            return False, msg
+    return send_hand_control(normalized, positions, name)
+
+
 def refresh_hand_link_status():
     hand_eps = [item for item in udp_endpoints(port=HAND_UDP_LISTEN_PORT) if endpoint_matches_host(item, HAND_UDP_LISTEN_HOST)]
     glove_proc = PROCESSES.get("glove")
     glove_eps = udp_endpoints(pid=glove_proc.pid) if glove_proc and glove_proc.poll() is None else []
+    if normalize_hand_mode(SYSTEM.get("hand_mode")) == "idle":
+        if hand_eps and glove_eps:
+            set_module("hand_link", "ONLINE", "灵巧手与 Unity 手套链路已就绪；当前为 idle 保持模式")
+            return True
+        if hand_eps or glove_eps:
+            set_module("hand_link", "WARNING", "手部程序正在启动；当前为 idle 保持模式")
+            return False
+        set_module("hand_link", "WARNING", "手部控制模式为 idle，等待灵巧手与 Unity 手套链路就绪")
+        return False
     if not is_glove_required():
         if hand_eps:
             set_module("hand_link", "ONLINE", f"VR hand tracking link ready: hand {describe_endpoints(hand_eps)}")
@@ -1306,11 +1353,17 @@ def sanitize_hand_positions(values):
 
 
 def send_hand_control(mode, positions=None, name=None):
+    normalized_mode = normalize_hand_mode(mode)
+    if normalized_mode == "idle":
+        # Idle is a deterministic safe-open state, not a hold of whatever
+        # encoder pose happened to be present when the executable started.
+        positions = list(HAND_PRESETS["reset"])
+        name = name or "idle_safe_open"
     payload = {
         "type": "h5_hand_control",
         "schema_version": 2,
         "source": "control_ui",
-        "mode": mode,
+        "mode": normalized_mode,
         "time": time.time(),
         "channel_names": HAND_CHANNEL_NAMES,
     }
@@ -1327,7 +1380,7 @@ def send_hand_control(mode, positions=None, name=None):
         HAND_CONTROL_REPEAT_INTERVAL_SEC,
     )
     if ok:
-        set_hand_mode(mode)
+        set_hand_mode(normalized_mode)
         refresh_hand_link_status()
     return ok, msg
 
@@ -1392,7 +1445,12 @@ def do_command(method, path, body=None):
                 f"{SYSTEM.get('hand_mode', 'unknown')}"
             )
         readiness = RECORDING.readiness(method=recording_method)
-        return {"ok": True, **RECORDING.status(), "readiness": readiness}
+        return {
+            "ok": True,
+            **RECORDING.status(),
+            "readiness": readiness,
+            "canonical": CANONICAL.status(),
+        }
     if path == "/api/recording/start" and method == "POST":
         with STATE_LOCK:
             arm_mode = SYSTEM.get("arm_control", {}).get("mode", "unknown")
@@ -1512,17 +1570,14 @@ def do_command(method, path, body=None):
         if LOCAL_PROGRAM_DELAY_SEC > 0:
             log_event("INFO", f"等待 {LOCAL_PROGRAM_DELAY_SEC:g} 秒后启动本地手/手套程序")
             time.sleep(LOCAL_PROGRAM_DELAY_SEC)
-        set_hand_mode(DEFAULT_HAND_MODE)
+        set_hand_mode("idle")
         hand_ok, _ = start_program("hand", "hand_exe")
-        glove_required = START_GLOVE_BY_DEFAULT or is_glove_required(DEFAULT_HAND_MODE)
-        if glove_required:
-            glove_ok, _ = start_program("glove", "unity_glove")
-        else:
-            glove_ok = True
-            set_module("glove", "OFFLINE", "VR hand tracking is default; Unity glove is not auto-started")
+        glove_ok, _ = start_program("glove", "unity_glove")
+        if hand_ok:
+            mode_ok, _ = send_hand_control("idle")
+            hand_ok = hand_ok and mode_ok
+        refresh_hand_link_status()
         set_module("matlab", "ONLINE", "USB 手柄由显控浏览器读取，主手/Simulink 已移入 Debug")
-        mode_ok, mode_msg = send_hand_control(DEFAULT_HAND_MODE)
-        hand_ok = hand_ok and mode_ok
         acquire_arm_authority("idle")
         ready = arm_ok and hand_ok and glove_ok
         set_state("READY" if ready else "ERROR", "初始化/启动流程完成，部分模块可能失败")
@@ -1533,6 +1588,7 @@ def do_command(method, path, body=None):
         )
     if path == "/api/system/stop":
         acquire_arm_authority("idle")
+        set_hand_mode("idle")
         ssh_run("stop_script")
         send_udp(MATLAB_HOST, MATLAB_PORT, "STOP")
         send_udp(HAND_HOST, HAND_PORT, "STOP")
@@ -1625,23 +1681,20 @@ def do_command(method, path, body=None):
         "/api/demo/backup": ("READY", "BACKUP_DEMO"),
     }
     if path == "/api/hand/mode/vr":
-        ok, msg = send_hand_control("vr")
+        ok, msg = activate_hand_mode("vr")
         return command_result(ok, "Switched to VR hand tracking mode" if ok else msg, {"output": msg})
     if path == "/api/hand/mode/glove":
-        set_hand_mode("glove")
-        if not is_process_alive("glove"):
-            start_program("glove", "unity_glove")
-        ok, msg = send_hand_control("glove")
+        ok, msg = activate_hand_mode("glove")
         return command_result(ok, "已切换到手套操控模式" if ok else msg, {"output": msg})
     if path == "/api/hand/mode/preset":
-        ok, msg = send_hand_control("preset")
+        ok, msg = activate_hand_mode("preset")
         return command_result(ok, "已切换到预编程位置模式" if ok else msg, {"output": msg})
     if path.startswith("/api/hand/preset/"):
         preset_name = path.rsplit("/", 1)[-1]
         positions = HAND_PRESETS.get(preset_name)
         if positions is None:
             return command_result(False, f"未知预编程位置: {preset_name}")
-        ok, msg = send_hand_control("preset", positions, preset_name)
+        ok, msg = activate_hand_mode("preset", positions, preset_name)
         return command_result(ok, f"已发送预编程位置: {preset_name}" if ok else msg, {"positions": positions, "output": msg})
     if path == "/api/hand/position":
         try:
@@ -1649,18 +1702,25 @@ def do_command(method, path, body=None):
         except Exception as exc:
             return command_result(False, str(exc))
         name = (body or {}).get("name") or "custom"
-        ok, msg = send_hand_control("preset", positions, name)
+        ok, msg = activate_hand_mode("preset", positions, name)
         return command_result(ok, "已发送自定义预编程位置" if ok else msg, {"positions": positions, "output": msg})
     if path == "/api/hand/start_exe":
         ok, msg = start_program("hand", "hand_exe")
-        return command_result(ok, "灵巧手程序已启动" if ok else msg)
+        idle_ok, idle_msg = send_hand_control("idle") if ok else (False, "hand start failed")
+        return command_result(
+            ok and idle_ok,
+            "灵巧手程序已启动，idle 六路已强制回到 2000" if ok and idle_ok else (idle_msg if ok else msg),
+            {"start_output": msg, "idle_output": idle_msg, "hand_positions": HAND_PRESETS["reset"]},
+        )
     if path == "/api/hand/restart_exe":
         stop_ok, stop_msg = stop_configured_program("hand", "hand_exe")
         ok, msg = start_program("hand", "hand_exe")
+        idle_ok, idle_msg = send_hand_control("idle") if ok else (False, "hand restart failed")
         return command_result(
-            ok,
-            "灵巧手 exe 已重启" if ok else f"灵巧手 exe 重启失败: {msg}",
-            {"stop_ok": stop_ok, "stop_output": stop_msg, "start_output": msg},
+            ok and idle_ok,
+            "灵巧手 exe 已重启，idle 六路已强制回到 2000" if ok and idle_ok else (idle_msg if ok else f"灵巧手 exe 重启失败: {msg}"),
+            {"stop_ok": stop_ok, "stop_output": stop_msg, "start_output": msg,
+             "idle_output": idle_msg, "hand_positions": HAND_PRESETS["reset"]},
         )
     if path == "/api/glove/start":
         ok, msg = start_program("glove", "unity_glove")
@@ -1797,6 +1857,7 @@ class WsClient:
             UDP_CLIENTS.discard(self)
             STATUS_CLIENTS.discard(self)
             RAW_INPUT_CLIENTS.discard(self)
+            CANONICAL_CLIENTS.discard(self)
             raw_connected = bool(RAW_INPUT_CLIENTS)
         RECORDING.set_browser_raw_connected(raw_connected)
         try:
@@ -1886,13 +1947,89 @@ def validate_raw_master_input(payload, browser_only=False):
     return True, ""
 
 
+def _publish_canonical_goal_unlocked(receive_utc_ns=None):
+    with STATE_LOCK:
+        arm_mode = str(SYSTEM.get("arm_control", {}).get("mode") or "idle")
+        hand_mode = str(SYSTEM.get("hand_mode") or "idle")
+    goal = CANONICAL.build(arm_mode, hand_mode, receive_utc_ns)
+    if goal is None:
+        with STATE_LOCK:
+            SYSTEM["canonical"] = CANONICAL.status()
+        return None
+    goal["publish_rate_hz"] = CANONICAL_PUBLISH_HZ
+    RECORDING.observe_canonical_goal(goal, receive_utc_ns or time.time_ns(), time.monotonic_ns())
+    encoded = json.dumps(goal, ensure_ascii=False, separators=(",", ":"))
+    with STATE_LOCK:
+        SYSTEM["canonical"] = CANONICAL.status()
+    with CLIENT_LOCK:
+        clients = list(CANONICAL_CLIENTS)
+    for client in clients:
+        try:
+            client.send_text(encoded)
+        except Exception:
+            client.close()
+    hand_targets = (goal.get("final_targets") or {}).get("hand_target_units")
+    hand_valid = int((goal.get("validity") or {}).get("hand_node_mask", 0)) != 0
+    if (
+        CANONICAL_CONTROL_ENABLED
+        and not bool(goal.get("no_send"))
+        and hand_valid
+        and isinstance(hand_targets, list)
+        and len(hand_targets) == 6
+    ):
+        try:
+            CANONICAL_HAND_SOCKET.sendto(encoded.encode("utf-8"), (CANONICAL_HAND_HOST, CANONICAL_HAND_PORT))
+        except OSError as exc:
+            with STATE_LOCK:
+                SYSTEM["canonical"]["last_error"] = f"canonical hand dispatch failed: {exc}"
+    return goal
+
+
+def publish_canonical_goal(receive_utc_ns=None):
+    # Wrist and hand adapters arrive on different threads. Keep seq allocation,
+    # recording and publication in one order even when both update together.
+    with CANONICAL_PUBLISH_LOCK:
+        return _publish_canonical_goal_unlocked(receive_utc_ns)
+
+
+def canonical_publish_loop():
+    """Resample the latest asynchronous adapter states onto a fixed clock."""
+    next_tick_ns = time.monotonic_ns()
+    while True:
+        publish_canonical_goal(time.time_ns())
+        next_tick_ns += CANONICAL_PUBLISH_PERIOD_NS
+        now_ns = time.monotonic_ns()
+        if next_tick_ns <= now_ns:
+            # Skip missed ticks instead of bursting after a scheduler stall.
+            next_tick_ns = now_ns + CANONICAL_PUBLISH_PERIOD_NS
+            continue
+        time.sleep((next_tick_ns - now_ns) / 1e9)
+
+
+def handle_canonical_wrist_adapter(payload, receive_utc_ns=None):
+    receive_utc_ns = int(receive_utc_ns or time.time_ns())
+    valid, reason = CANONICAL.observe_wrist_adapter(payload, receive_utc_ns)
+    if not valid:
+        with STATE_LOCK:
+            SYSTEM["canonical"] = {**CANONICAL.status(), "last_error": reason}
+        return False
+    return True
+
+
 def handle_raw_master_input(payload, browser_only=False, receive_utc_ns=None, receive_monotonic_ns=None):
     source = str(payload.get("source") or "unknown") if isinstance(payload, dict) else "unknown"
     valid, reason = validate_raw_master_input(payload, browser_only=browser_only)
     if not valid:
         RECORDING.reject_raw_input(source, reason)
         return False
-    return RECORDING.observe_raw_input(payload, receive_utc_ns, receive_monotonic_ns)
+    recorded = RECORDING.observe_raw_input(payload, receive_utc_ns, receive_monotonic_ns)
+    value = payload.get("value") or {}
+    if source in {"pico_hand", "data_glove"} and value.get("stream") == "hand_skeleton":
+        ok, canonical_reason = CANONICAL.observe_hand_input(source, value, receive_utc_ns)
+        if not ok:
+            with STATE_LOCK:
+                SYSTEM["canonical"] = {**CANONICAL.status(), "last_error": canonical_reason}
+    return recorded
 
 
 def websocket_client_loop(client):
@@ -1906,7 +2043,10 @@ def websocket_client_loop(client):
             if client.path == RAW_INPUT_PATH and opcode == 0x1:
                 try:
                     raw_payload = json.loads(payload.decode("utf-8"))
-                    handle_raw_master_input(raw_payload, browser_only=True)
+                    if raw_payload.get("type") == "canonical_wrist_adapter":
+                        handle_canonical_wrist_adapter(raw_payload)
+                    else:
+                        handle_raw_master_input(raw_payload, browser_only=True)
                 except (UnicodeDecodeError, ValueError, TypeError):
                     RECORDING.reject_raw_input("browser", "invalid_json")
                 continue
@@ -1940,7 +2080,8 @@ def websocket_server():
     srv.listen(20)
     print(
         f"[WS] bridge on ws://{WS_HOST}:{WS_PORT}{UDP_PATH}; "
-        f"status ws://{WS_HOST}:{WS_PORT}{STATUS_PATH}; raw input ws://{WS_HOST}:{WS_PORT}{RAW_INPUT_PATH}"
+        f"status ws://{WS_HOST}:{WS_PORT}{STATUS_PATH}; raw input ws://{WS_HOST}:{WS_PORT}{RAW_INPUT_PATH}; "
+        f"canonical ws://{WS_HOST}:{WS_PORT}{CANONICAL_PATH}"
     )
     while True:
         sock, addr = srv.accept()
@@ -1953,8 +2094,8 @@ def websocket_server():
                 if ":" in line:
                     k, v = line.split(":", 1)
                     headers[k.strip().lower()] = v.strip()
-            if path not in [UDP_PATH, STATUS_PATH, RAW_INPUT_PATH] or "sec-websocket-key" not in headers:
-                body = f"Demo Console backend. Use {UDP_PATH}, {STATUS_PATH}, or {RAW_INPUT_PATH}\n".encode("utf-8")
+            if path not in [UDP_PATH, STATUS_PATH, RAW_INPUT_PATH, CANONICAL_PATH] or "sec-websocket-key" not in headers:
+                body = f"Demo Console backend. Use {UDP_PATH}, {STATUS_PATH}, {RAW_INPUT_PATH}, or {CANONICAL_PATH}\n".encode("utf-8")
                 sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
                 sock.close()
                 continue
@@ -1973,6 +2114,8 @@ def websocket_server():
                 elif path == RAW_INPUT_PATH:
                     RAW_INPUT_CLIENTS.add(client)
                     RECORDING.set_browser_raw_connected(True)
+                elif path == CANONICAL_PATH:
+                    CANONICAL_CLIENTS.add(client)
                 else:
                     UDP_CLIENTS.add(client)
             print(f"[WS] client {addr} connected path={path}")
@@ -2184,6 +2327,7 @@ def main():
     threading.Thread(target=hand_telemetry_loop, daemon=True).start()
     threading.Thread(target=master_fusion_telemetry_loop, daemon=True).start()
     threading.Thread(target=raw_master_input_loop, daemon=True).start()
+    threading.Thread(target=canonical_publish_loop, daemon=True, name="canonical-50hz").start()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
     threading.Thread(target=local_program_monitor_loop, daemon=True).start()
     acquire_arm_authority("idle")

@@ -104,7 +104,17 @@ function Find-Executable($Name, [string[]]$ExtraCandidates) {
 }
 
 function Get-DshowVideoDeviceNames($FfmpegPath) {
-    $output = @(& $FfmpegPath -hide_banner -list_devices true -f dshow -i dummy 2>&1)
+    # FFmpeg writes the DirectShow device list to stderr even when enumeration
+    # succeeds.  With the script-wide Stop preference PowerShell 5 turns the
+    # first device line into a terminating NativeCommandError, so temporarily
+    # collect native stderr as ordinary pipeline output.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = @(& $FfmpegPath -hide_banner -list_devices true -f dshow -i dummy 2>&1)
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     $names = [System.Collections.Generic.List[string]]::new()
     foreach ($item in $output) {
         $line = "$item"

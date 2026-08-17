@@ -143,7 +143,8 @@ class RecordingManager:
     ]
 
     def __init__(self, root, camera_base_url="http://127.0.0.1:8092", min_free_bytes=2 * 1024**3,
-                 max_duration_sec=600, alignment_hz=30):
+                 max_duration_sec=600, alignment_hz=30, canonical_log_enabled=True,
+                 canonical_publish_hz=50.0):
         self.root = Path(root)
         self.camera_base_url = camera_base_url.rstrip("/")
         self.min_free_bytes = int(min_free_bytes)
@@ -151,6 +152,8 @@ class RecordingManager:
         self.alignment_hz = max(1.0, float(alignment_hz))
         alignment_label = f"{self.alignment_hz:g}".replace(".", "p")
         self.alignment_filename = f"aligned_{alignment_label}hz.csv"
+        self.canonical_log_enabled = bool(canonical_log_enabled)
+        self.canonical_publish_hz = max(1.0, float(canonical_publish_hz))
         self.lock = threading.RLock()
         self.state = "idle"
         self.error = ""
@@ -160,7 +163,9 @@ class RecordingManager:
         self._arm_rows, self._hand_rows, self._episode_rows = [], [], []
         self._fusion_fh = self._controller_input_fh = self._glove_input_fh = None
         self._raw_input_fh = None
+        self._canonical_fh = None
         self._fusion_rows = []
+        self._canonical_rows = []
         self._hand_channel_names = []
         self._last_master_controller_seq = self._last_master_glove_seq = None
         self._last_raw_controller_seq = None
@@ -202,6 +207,15 @@ class RecordingManager:
         if hand_mode in hand_sources:
             required.append(hand_sources[hand_mode])
         return required
+
+    @staticmethod
+    def _is_e1_method(method):
+        return str(method or "") in {
+            "hand_vision+vr",
+            "controller_delta+glove",
+            "gamepad+glove",
+            "keyboard+glove",
+        }
 
     def set_browser_raw_connected(self, connected):
         with self.lock:
@@ -248,6 +262,24 @@ class RecordingManager:
             }
             self._raw_input_fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
             self._raw_input_counts[key] = self._raw_input_counts.get(key, 0) + 1
+            return True
+
+    def observe_canonical_goal(self, payload, receive_utc_ns=None, receive_monotonic_ns=None):
+        if not isinstance(payload, dict) or payload.get("type") != "canonical_goal":
+            return False
+        if int(payload.get("schema_version", 0)) != 1:
+            return False
+        receive_utc_ns = int(receive_utc_ns or time.time_ns())
+        receive_monotonic_ns = int(receive_monotonic_ns or time.monotonic_ns())
+        with self.lock:
+            if self.state != "recording" or not self.session or not self._canonical_fh:
+                return False
+            record = dict(payload)
+            record["trial_id"] = self.session["id"]
+            record["record_receive_utc_ns"] = receive_utc_ns
+            record["record_receive_monotonic_ns"] = receive_monotonic_ns
+            self._canonical_fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+            self._canonical_rows.append(record)
             return True
 
     def _recover_interrupted(self):
@@ -520,7 +552,7 @@ class RecordingManager:
             "readiness": ready,
         }
         _json_write(directory / "manifest.inprogress.json", manifest)
-        arm_fh = hand_fh = episode_fh = fusion_fh = controller_input_fh = glove_input_fh = raw_input_fh = None
+        arm_fh = hand_fh = episode_fh = fusion_fh = controller_input_fh = glove_input_fh = raw_input_fh = canonical_fh = None
         try:
             camera = _http_json(
                 self.camera_base_url + "/record/start", "POST",
@@ -539,11 +571,13 @@ class RecordingManager:
                 "w", encoding="utf-8", buffering=1
             )
             raw_input_fh = (directory / "raw_input.jsonl").open("w", encoding="utf-8", buffering=1)
+            if self.canonical_log_enabled:
+                canonical_fh = (directory / "canonical_goal.jsonl").open("w", encoding="utf-8", buffering=1)
             arm_writer, hand_writer = csv.DictWriter(arm_fh, self.ARM_COLUMNS), csv.DictWriter(hand_fh, self.HAND_COLUMNS)
             episode_writer = csv.DictWriter(episode_fh, self.EPISODE_RECORD_COLUMNS)
             arm_writer.writeheader(); hand_writer.writeheader(); episode_writer.writeheader()
         except Exception as exc:
-            for fh in (arm_fh, hand_fh, episode_fh, fusion_fh, controller_input_fh, glove_input_fh, raw_input_fh):
+            for fh in (arm_fh, hand_fh, episode_fh, fusion_fh, controller_input_fh, glove_input_fh, raw_input_fh, canonical_fh):
                 if fh:
                     fh.close()
             try:
@@ -566,7 +600,9 @@ class RecordingManager:
             self._controller_input_fh = controller_input_fh
             self._glove_input_fh = glove_input_fh
             self._raw_input_fh = raw_input_fh
+            self._canonical_fh = canonical_fh
             self._fusion_rows = []
+            self._canonical_rows = []
             self._hand_channel_names = []
             self._last_master_controller_seq = self._last_master_glove_seq = None
             self._raw_input_counts = {}
@@ -602,6 +638,7 @@ class RecordingManager:
             for fh in (
                 self._arm_fh, self._hand_fh, self._episode_fh,
                 self._fusion_fh, self._controller_input_fh, self._glove_input_fh, self._raw_input_fh,
+                self._canonical_fh,
             ):
                 if fh:
                     fh.flush(); fh.close()
@@ -609,6 +646,7 @@ class RecordingManager:
             self._arm_writer = self._hand_writer = self._episode_writer = None
             self._fusion_fh = self._controller_input_fh = self._glove_input_fh = None
             self._raw_input_fh = None
+            self._canonical_fh = None
         try:
             alignment = self._write_alignment(session, stopped_ns)
         except Exception as exc:
@@ -627,9 +665,12 @@ class RecordingManager:
         manifest = dict(session["manifest"])
         duration_sec = (stopped_ns - session["started_at_ns"]) / 1e9
         fusion_summary = self._master_fusion_summary()
+        canonical_summary = self._canonical_summary()
         missing_raw = [key for key in self._raw_input_required if self._raw_input_counts.get(key, 0) <= 0]
         if missing_raw:
             errors.append("missing required raw input: " + ", ".join(missing_raw))
+        if self.canonical_log_enabled and self._is_e1_method(manifest.get("method")) and not canonical_summary["valid_samples"]:
+            errors.append("missing valid canonical_goal for E1 method")
         raw_input_summary = {
             "file": "raw_input.jsonl",
             "required": list(self._raw_input_required),
@@ -650,6 +691,7 @@ class RecordingManager:
                 "hand": len(self._hand_rows),
                 "episode_records": len(self._episode_rows),
                 "raw_input": raw_input_summary["total"],
+                "canonical_goal": canonical_summary["count"],
                 **fusion_summary["counts"],
                 **alignment.get("counts", {}),
             },
@@ -657,6 +699,7 @@ class RecordingManager:
                 "arm": len(self._arm_rows) / duration_sec if duration_sec > 0 else 0.0,
                 "hand": len(self._hand_rows) / duration_sec if duration_sec > 0 else 0.0,
                 "master_fusion": len(self._fusion_rows) / duration_sec if duration_sec > 0 else 0.0,
+                "canonical_goal": canonical_summary["count"] / duration_sec if duration_sec > 0 else 0.0,
                 "master_controller_input": (
                     fusion_summary["counts"]["master_controller_input"] / duration_sec
                     if duration_sec > 0 else 0.0
@@ -672,6 +715,7 @@ class RecordingManager:
             "alignment": alignment,
             "master_fusion": fusion_summary,
             "raw_input": raw_input_summary,
+            "canonical_goal": canonical_summary,
         })
         _json_write(session["dir"] / "manifest.json", manifest)
         (session["dir"] / "manifest.inprogress.json").unlink(missing_ok=True)
@@ -681,12 +725,83 @@ class RecordingManager:
             self.error = "; ".join(errors) or (incomplete_reason or "")
             self._arm_rows, self._hand_rows, self._episode_rows = [], [], []
             self._fusion_rows = []
+            self._canonical_rows = []
             self._hand_channel_names = []
             self._raw_input_counts = {}
             self._raw_input_rejected = {}
             self._raw_input_required = []
             self._last_raw_timestamp_ns = 0
         return {"ok": manifest["complete"], "message": manifest["state"], "manifest": manifest, **self.status()}
+
+    def _canonical_summary(self):
+        rows = list(self._canonical_rows)
+        sources = {"wrist": {}, "hand": {}}
+        calibration_ids = {"wrist_mapping": set(), "hand_model": set(), "hand_mapping": set()}
+        invalid_reasons = {}
+        valid_samples = 0
+        seqs = []
+        for row in rows:
+            seq = int(row.get("seq", 0))
+            if seq > 0:
+                seqs.append(seq)
+            for side, field in (("wrist", "wrist_source"), ("hand", "hand_source")):
+                value = str(row.get(field) or "unknown")
+                sources[side][value] = sources[side].get(value, 0) + 1
+            validity = row.get("validity") or {}
+            if int(validity.get("wrist_dof_mask", 0)) and int(validity.get("hand_node_mask", 0)):
+                valid_samples += 1
+            for reason in row.get("invalid_reasons") or []:
+                key = str(reason)
+                invalid_reasons[key] = invalid_reasons.get(key, 0) + 1
+            calibrations = row.get("calibrations") or {}
+            for key in calibration_ids:
+                value = str(calibrations.get(key) or "")
+                if value:
+                    calibration_ids[key].add(value)
+        unique_seqs = sorted(set(seqs))
+        sequence_drops = sum(
+            max(0, current - previous - 1)
+            for previous, current in zip(unique_seqs, unique_seqs[1:])
+        )
+        sequence_out_of_order = sum(
+            current <= previous for previous, current in zip(seqs, seqs[1:])
+        )
+        sequence_duplicates = len(seqs) - len(unique_seqs)
+        timestamps = [
+            int(row.get("record_receive_monotonic_ns", 0))
+            for row in rows
+            if int(row.get("record_receive_monotonic_ns", 0)) > 0
+        ]
+        intervals_ms = [
+            (current - previous) / 1e6
+            for previous, current in zip(timestamps, timestamps[1:])
+            if current > previous
+        ]
+        measured_rate_hz = (
+            (len(timestamps) - 1) * 1e9 / (timestamps[-1] - timestamps[0])
+            if len(timestamps) > 1 and timestamps[-1] > timestamps[0]
+            else 0.0
+        )
+        ordered_intervals = sorted(intervals_ms)
+        interval_p95_ms = (
+            ordered_intervals[min(len(ordered_intervals) - 1, int(len(ordered_intervals) * 0.95))]
+            if ordered_intervals else None
+        )
+        return {
+            "enabled": self.canonical_log_enabled,
+            "file": "canonical_goal.jsonl" if self.canonical_log_enabled else None,
+            "count": len(rows),
+            "valid_samples": valid_samples,
+            "source_counts": sources,
+            "sequence_drops": sequence_drops,
+            "sequence_out_of_order": sequence_out_of_order,
+            "sequence_duplicates": sequence_duplicates,
+            "target_rate_hz": self.canonical_publish_hz,
+            "measured_rate_hz": measured_rate_hz,
+            "interval_p95_ms": interval_p95_ms,
+            "invalid_reason_samples": invalid_reasons,
+            "calibration_ids": {key: sorted(values) for key, values in calibration_ids.items()},
+        }
 
     def _master_fusion_summary(self):
         rows = list(self._fusion_rows)
@@ -952,6 +1067,7 @@ class RecordingManager:
                     "arm": len(self._arm_rows), "hand": len(self._hand_rows),
                     "episode_records": len(self._episode_rows),
                     "master_fusion": len(self._fusion_rows),
+                    "canonical_goal": len(self._canonical_rows),
                     "raw_input": sum(self._raw_input_counts.values()),
                     "raw_input_by_source": dict(self._raw_input_counts),
                     "raw_input_rejected": dict(self._raw_input_rejected),

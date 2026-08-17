@@ -43,6 +43,37 @@ class RecordingManagerTests(unittest.TestCase):
             }
         return {"ok": True}
 
+    def test_canonical_sequence_summary_separates_missing_reordered_and_duplicate_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = RecordingManager(Path(temp_dir), min_free_bytes=0)
+            manager._canonical_rows = [
+                {"seq": seq, "validity": {}, "calibrations": {}}
+                for seq in (1, 3, 2, 4, 4)
+            ]
+            summary = manager._canonical_summary()
+            self.assertEqual(summary["sequence_drops"], 0)
+            self.assertEqual(summary["sequence_out_of_order"], 2)
+            self.assertEqual(summary["sequence_duplicates"], 1)
+
+    def test_canonical_summary_reports_fixed_50hz_clock(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = RecordingManager(
+                Path(temp_dir), min_free_bytes=0, canonical_publish_hz=50.0
+            )
+            manager._canonical_rows = [
+                {
+                    "seq": index + 1,
+                    "record_receive_monotonic_ns": 1_000_000_000 + index * 20_000_000,
+                    "validity": {},
+                    "calibrations": {},
+                }
+                for index in range(6)
+            ]
+            summary = manager._canonical_summary()
+            self.assertEqual(summary["target_rate_hz"], 50.0)
+            self.assertAlmostEqual(summary["measured_rate_hz"], 50.0)
+            self.assertEqual(summary["interval_p95_ms"], 20.0)
+
     @mock.patch("control_ui.recording_service._http_json")
     def test_readiness_exposes_the_same_camera_health_used_for_preflight(self, camera_api):
         camera_api.side_effect = self.camera_api
@@ -150,6 +181,16 @@ class RecordingManagerTests(unittest.TestCase):
                         "glove_mapping": "glove-test",
                     },
                 }, receive_utc_ns=stamp, receive_monotonic_ns=stamp)
+                manager.observe_canonical_goal({
+                    "type": "canonical_goal", "schema_version": 1, "seq": index + 1,
+                    "condition_id": "M1-PICO", "wrist_source": "pico_wrist", "hand_source": "pico_hand",
+                    "validity": {"wrist_dof_mask": 15, "hand_node_mask": (1 << 21) - 1},
+                    "calibrations": {
+                        "wrist_mapping": "pico-test", "hand_model": "pico-direct",
+                        "hand_mapping": "pico-hand-test",
+                    },
+                    "invalid_reasons": [],
+                }, receive_utc_ns=stamp, receive_monotonic_ns=stamp)
             for side in ("left", "right"):
                 (session_dir / f"{side}.mp4").write_bytes(b"synthetic-video")
                 with (session_dir / f"{side}_frames.csv").open("w", newline="", encoding="utf-8") as fh:
@@ -166,6 +207,7 @@ class RecordingManagerTests(unittest.TestCase):
             self.assertEqual(manifest["counts"]["hand"], 7)
             self.assertEqual(manifest["counts"]["episode_records"], 7)
             self.assertEqual(manifest["counts"]["master_fusion"], 7)
+            self.assertEqual(manifest["counts"]["canonical_goal"], 7)
             self.assertEqual(manifest["counts"]["master_controller_input"], 7)
             self.assertEqual(manifest["counts"]["master_glove_input"], 7)
             self.assertEqual(manifest["counts"]["raw_input"], 2)
@@ -198,6 +240,7 @@ class RecordingManagerTests(unittest.TestCase):
             self.assertTrue((session_dir / "master_controller_input.jsonl").exists())
             self.assertTrue((session_dir / "master_glove_input.jsonl").exists())
             self.assertTrue((session_dir / "raw_input.jsonl").exists())
+            self.assertTrue((session_dir / "canonical_goal.jsonl").exists())
             raw_input = [json.loads(line) for line in (session_dir / "raw_input.jsonl").read_text(encoding="utf-8").splitlines()]
             self.assertEqual([row["source"] for row in raw_input], ["keyboard", "pico_hand"])
             self.assertLess(raw_input[0]["timestamp_ns"], raw_input[1]["timestamp_ns"])
@@ -207,6 +250,19 @@ class RecordingManagerTests(unittest.TestCase):
                 ["alignment-test"],
             )
             self.assertEqual(manifest["master_fusion"]["degradation_events"], 1)
+            self.assertEqual(manifest["canonical_goal"]["valid_samples"], 7)
+
+    @mock.patch("control_ui.recording_service._http_json")
+    def test_canonical_logging_can_be_disabled_without_creating_a_file(self, camera_api):
+        camera_api.side_effect = self.camera_api
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = RecordingManager(Path(temp_dir), min_free_bytes=0, canonical_log_enabled=False)
+            started = manager.start("keyboard+glove", require_ready=False)
+            self.assertTrue(started["ok"])
+            session_dir = manager.session["dir"]
+            self.assertIsNone(manager._canonical_fh)
+            self.assertFalse((session_dir / "canonical_goal.jsonl").exists())
+            manager.stop("test cleanup")
 
     @mock.patch("control_ui.recording_service._http_json")
     def test_missing_required_modality_rejects_start(self, camera_api):

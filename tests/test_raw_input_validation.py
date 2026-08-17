@@ -61,6 +61,10 @@ class RawInputValidationTests(unittest.TestCase):
         self.assertTrue(bridge.validate_raw_master_input(envelope("data_glove", native))[0])
         self.assertFalse(bridge.validate_raw_master_input(envelope("pico_hand", native))[0])
 
+        self.set_modes("idle", "idle")
+        self.assertFalse(bridge.validate_raw_master_input(envelope("data_glove", native))[0])
+        self.assertFalse(bridge.validate_raw_master_input(envelope("pico_hand", native))[0])
+
 
 if __name__ == "__main__":
     unittest.main()

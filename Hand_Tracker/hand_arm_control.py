@@ -102,7 +102,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "stale_timeout_sec": 0.4,
     },
     "controller_delta": {
-        "gain_xyz": [0.5, 0.5, 0.5],
+        "gain_xyz": [0.8, 0.8, 0.8],
         "stale_timeout_sec": 0.4,
         "deadman_button_label": "Left X",
     },
@@ -119,6 +119,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "master_fusion": {
         "enabled": True,
         "mode": "m3",
+        "apply_to_controller_delta": False,
         "host": "127.0.0.1",
         "glove_port": 25008,
         "state_port": 25007,
@@ -738,9 +739,9 @@ class VRWristAxisController:
             },
         }
         self.stale_timeout_sec = float(cfg_get(config, ("vr", "stale_timeout_sec"), 0.6))
-        gain_raw = cfg_get(config, ("controller_delta", "gain_xyz"), [0.5, 0.5, 0.5])
+        gain_raw = cfg_get(config, ("controller_delta", "gain_xyz"), [0.8, 0.8, 0.8])
         if not isinstance(gain_raw, (list, tuple)) or len(gain_raw) < 3:
-            gain_raw = [0.5, 0.5, 0.5]
+            gain_raw = [0.8, 0.8, 0.8]
         self.gain = np.array([float(gain_raw[0]), float(gain_raw[1]), float(gain_raw[2])], dtype=float)
         self.deadman_label = str(cfg_get(config, ("vr", "deadman_label"), "Unity left fist"))
         self.joint4_gain = float(cfg_get(config, ("vr", "joint4_gain"), 0.5))
@@ -929,9 +930,9 @@ class ControllerDeltaAxisController:
                 cfg_get(config, ("vr", "stale_timeout_sec"), 0.4),
             )
         )
-        gain_raw = cfg_get(config, ("controller_delta", "gain_xyz"), [0.5, 0.5, 0.5])
+        gain_raw = cfg_get(config, ("controller_delta", "gain_xyz"), [0.8, 0.8, 0.8])
         if not isinstance(gain_raw, (list, tuple)) or len(gain_raw) < 3:
-            gain_raw = [0.5, 0.5, 0.5]
+            gain_raw = [0.8, 0.8, 0.8]
         self.gain = np.array([float(gain_raw[0]), float(gain_raw[1]), float(gain_raw[2])], dtype=float)
         self.deadman_button_label = str(cfg_get(config, ("controller_delta", "deadman_button_label"), "Left X"))
         self.joint4_gain = float(cfg_get(config, ("vr", "joint4_gain"), 0.5))
@@ -1471,7 +1472,12 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
             fused_controller_pose, fusion_state = wrist_fusion.update(
                 controller_pose, glove_frame, glove_age_sec
             )
-            controller_delta_status = controller_delta.update(fused_controller_pose, receiver.status())
+            # P0/E1 keeps the VR controller as the sole wrist authority.  The
+            # controller/glove fusion remains available as diagnostic telemetry
+            # and can only affect motion when explicitly opted in.
+            apply_master_fusion = bool(fusion_settings.get("apply_to_controller_delta", False))
+            controller_delta_pose = fused_controller_pose if apply_master_fusion else controller_pose
+            controller_delta_status = controller_delta.update(controller_delta_pose, receiver.status())
             controller_delta_status["master_fusion"] = {
                 "mode": fusion_state["mode"],
                 "mode_requested": fusion_state["mode_requested"],
@@ -1480,6 +1486,7 @@ def vr_capture_loop(config: Dict[str, Any], shared: SharedState, settings: Contr
                 "glove_weight": fusion_state["orientation"]["glove_weight"],
                 "validity": fusion_state["validity"],
                 "calibrations": fusion_state["calibrations"],
+                "applied_to_controller_delta": apply_master_fusion,
             }
             if fusion_socket is not None:
                 try:

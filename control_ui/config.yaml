@@ -17,7 +17,7 @@ local_checks:
   glove_ready_timeout_sec: 15
 
 hand_control:
-  default_mode: "glove"
+  default_mode: "idle"
   start_glove_by_default: true
 
 experiment:
@@ -37,6 +37,18 @@ recording:
   min_free_gib: 2.0
   max_duration_minutes: 10.0
 
+canonical:
+  # P0/E1 nominal semantic layer. This does not enable any E2 correction.
+  control_path_enabled: true
+  # Source adapters keep their native rates; canonical output is fixed-rate.
+  publish_hz: 50.0
+  # Logging is independent from control and may be disabled for parity checks.
+  log_enabled: true
+  stale_timeout_sec: 0.5
+  hi5_hand_model_path: "hi5_hand_model_v8.json"
+  hand_host: "127.0.0.1"
+  hand_port: 25001
+
 arm_control:
   runtime_motion_duration_sec: 5.0
   legacy_home_fallback: false
@@ -47,6 +59,7 @@ websocket:
   path: "/udp"
   status_path: "/status"
   raw_input_path: "/raw-input"
+  canonical_path: "/canonical-goal"
 
 api:
   host: "0.0.0.0"
@@ -61,7 +74,7 @@ rtsp_dual_camera:
   left_video_device: "RGB Camera"
   left_camera_index: 1
   left_mirror: false
-  left_vertical_flip: true
+  left_vertical_flip: false
   left_input_codec: "mjpeg"
   left_video_pin_name: ""
   right_video_device: "USB Camera"

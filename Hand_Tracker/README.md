@@ -67,7 +67,7 @@ If an axis moves opposite to expectation, flip the corresponding value under
 For Unity XR wrist Delta mode, pressing deadman captures the current wrist as
 the session anchor. Wrist displacement uses the same `controller_delta.gain_xyz`
 mapping as the right VR controller; releasing deadman, losing tracking, or a
-stale packet clears the anchor. The default gain is `[0.5, 0.5, 0.5]`.
+stale packet clears the anchor. The default gain is `[0.8, 0.8, 0.8]`.
 
 The arm deadman is evaluated in Unity and sent on the TCP 5005 wrist-pose
 stream: a left fist is `1`, while an open, untracked, or stale left hand is
