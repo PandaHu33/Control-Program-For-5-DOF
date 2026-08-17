@@ -9,7 +9,30 @@
 
 ## 当前正式版本
 
-### 2026-07-23：臂手控制与拇指映射正式并入主线
+### 2026-08-11：原始输入记录与遥操作控制正式并入主线
+
+| 仓库 | 功能基线提交 | 说明 |
+| --- | --- | --- |
+| 5-dof | `9f8d8c7` | 合并主手腕部融合、手部通道布局、相机回退与低延迟推流、原始输入记录与遥操作控制；子模块指向 WA100 `d091745` |
+| WA100 | `d091745` | 集成手套-手柄对齐、统一手部 ID 与手指死区补偿、原始手部输入遥测 |
+
+本版本的主要更新：
+
+- 增加原始输入（pre-mapping master input）记录：按当前控制方法（臂侧键盘/手柄/手部视觉/手柄增量 + 手侧 VR/数据手套）只记录活跃输入源的原始样本到 JSONL，非活跃来源拒绝并计数，保证实验数据来源可追溯。
+- 增加浏览器原始输入 WebSocket 通道（`/raw-input`）与遥操作控制界面。
+- 增加 WA100 本地运动学模型（URDF 编译 + 标定表 + 运行时正运动学），运行时不依赖 ROS/STL。
+- 主手采用右手手柄 + Hi5 手套腕部融合：手柄保留平移与控制权，Hi5 仅贡献短期姿态增量。
+- 记录服务扩展同步多模态记录（相机帧侧车索引、融合遥测、原始主手输入）。
+- 双路相机支持设备名回退匹配（精确 → 大小写不敏感子串）与低延迟 latest-frame 推流。
+- 统一手部 ID 通道布局并补偿手指死区。
+
+验证结果：
+
+- 5-dof：120 项 Python 测试通过，3 项环境相关测试跳过。
+- WA100：7 项 Python 测试通过；`wa100_channel_layout_test`、`wa100_feedback_filter_test`、`glove_thumb_mapper_test` 3 项 C++ 测试通过。
+- `udp_receiver_unity.exe` 等 WA100 目标构建成功。
+
+### 2026-07-23（上一正式版本）：臂手控制与拇指映射正式并入主线
 
 | 仓库 | 功能基线提交 | 说明 |
 | --- | --- | --- |
@@ -35,6 +58,42 @@
 - `udp_receiver_unity.exe` 等 WA100 目标构建成功。
 
 ## 5-dof 主仓库版本
+
+### 2026-08-11：`9f8d8c7` — 原始输入记录与遥操作控制
+
+- 增加原始主手输入（keyboard/gamepad/pico_hand/data_glove/vr_controller）校验与 JSONL 记录，仅记录当前控制方法涉及的活跃来源，非活跃来源按原因拒绝并计数。
+- H5 UI 与 bridge 增加遥操作控制与 `/raw-input` WebSocket 通道。
+- 增加 WA100 本地运动学模型（`wa100_kinematics.py`、`wa100_kinematics_calibration.json`、`wa100_kinematics_model.json`）及 `WA100_KINEMATICS.md` 文档。
+- 记录服务扩展原始输入记录与浏览器连接状态；更新 `Hand_Tracker` 输入遥测发布。
+- 新增 `test_raw_input_validation`、`test_wa100_kinematics`、`test_ui_teleop_control` 等测试。
+- 更新 WA100 子模块至 `d091745`。
+
+### 2026-08-05：`6af3262` — 相机回退与低延迟推流（合并 `ae1a3de`）
+
+- 相机设备名支持多候选回退匹配：先精确匹配，再按 `|` 分隔做大小写不敏感子串匹配（如 `USB Camera|DSJ-2062-309`）。
+- latest-frame 后端低延迟推流：30 fps 采集、20 fps 发布，支持 MJPG 输入与 CRF 配置。
+- 重构 `start_dual_rtsp_camera.ps1` 启动流程。
+
+该提交通过合并提交 `ae1a3de` 进入 `main`。
+
+### 2026-07-31：`5d578a3` — WA100 子模块更新
+
+- 子模块指向 WA100 合并后的 `main`（`99ad4de`）。
+
+### 2026-07-31：`b47f9f2` — 手部通道布局与腕部相机朝向（合并 `97cc86b`）
+
+- 统一手部通道布局（hand channel layout），新增 `test_hand_channel_layout`。
+- 腕部相机画面朝向对齐（镜像/翻转），调整双相机拼接、感知辅助配置与记录服务。
+
+该提交通过合并提交 `97cc86b` 进入 `main`。
+
+### 2026-07-27：`40f9c90` — 主手腕部融合与同步记录
+
+- 增加 `Hand_Tracker/master_fusion.py`：右手手柄 + Hi5 手套腕部融合，手柄保留平移与控制权，Hi5 仅贡献短期姿态增量。
+- 记录服务支持同步多模态记录：相机帧侧车索引、融合遥测与原始主手输入。
+- 增加手部控制配置与 `test_master_fusion` 等测试。
+- 增加臂手协同调研与实验大纲文档（`docs/`）。
+- 更新 WA100 子模块至 `76e5109`。
 
 ### 2026-07-23：`4c6cd39` — 臂手控制、记录与辅助监控
 
@@ -114,6 +173,24 @@
 - 建立相机和手部控制的基础链路。
 
 ## WA100 子仓库版本
+
+### 2026-08-11：`d091745` — 原始手部输入遥测
+
+- `udp_receiver_unity.cpp` 增加原始手部输入遥测（raw hand input telemetry）记录。
+
+### 2026-07-31：`99ad4de` — 统一手部 ID 与手指死区补偿（合并 `95124e1`）
+
+- 新增 `wa100_channel_layout.h` 统一手部 ID 通道布局，并增加对应 C++ 测试。
+- 补偿手指死区，更新相机、日志回放与拇指映射回放示例。
+
+该提交通过合并提交 `95124e1` 进入 `main`。
+
+### 2026-07-27：`76e5109` — 手套-手柄对齐与融合遥测
+
+- 增加手套-手柄对齐标定程序及 GUI（`glove_controller_alignment.py`、`glove_controller_alignment_gui.py`）。
+- 增加手指端点标定与 Hi5 语义回放工具。
+- `udp_receiver_unity.cpp` 增加融合遥测输出。
+- 新增 `test_glove_controller_alignment` 测试与 `GLOVE_CONTROLLER_ALIGNMENT.md` 文档。
 
 ### 2026-07-23：`df37c9d` — 正式主线集成
 
@@ -196,9 +273,9 @@
 
 | 用途 | 仓库 | 分支或标签 | 当前提交 |
 | --- | --- | --- | --- |
-| 正式主线功能基线 | 5-dof | `main` | `d1830e8` |
+| 正式主线功能基线 | 5-dof | `main` | `9f8d8c7` |
 | 合并前开发历史 | 5-dof | `agent/dual-mode-arm-motion` | `4c6cd39` |
-| 正式主线功能基线 | WA100 | `main` | `df37c9d` |
+| 正式主线功能基线 | WA100 | `main` | `d091745` |
 | 完整实验历史 | WA100 | `agent/glove-thumb-quaternion-calibration` | `8e9b09b` |
 | Rotation 原始基线 | WA100 | `glove-thumb-baseline-20260722` | `89a2ec2` |
 | 固定手腕单传感器基线 | WA100 | `glove-thumb-fixed-wrist-baseline-20260722` | `9dc213c` |
