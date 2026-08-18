@@ -1339,7 +1339,7 @@ HAND_PRESETS = {
     # Touch anchors match the Hi5/PICO thumb contact fusion targets
     # (thumb_glove_calibration.json gesture_anchors).
     "thumb_index": [750, 300, 350, 2000, 2000, 2000],
-    "thumb_middle": [750, 0, 2000, 350, 2000, 2000],
+    "thumb_middle": [800, 0, 2000, 350, 2000, 2000],
 }
 
 
