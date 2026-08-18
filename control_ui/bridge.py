@@ -1392,7 +1392,40 @@ def send_hand_control(mode, positions=None, name=None):
                 f"手型切换: {name}",
                 f"mode={normalized_mode} positions={payload.get('positions')}",
             )
+            sent_positions = payload.get("positions")
+            with STATE_LOCK:
+                SYSTEM["hand_preset"] = {
+                    "name": str(name),
+                    "positions": list(sent_positions) if sent_positions else [],
+                    "changed_at": now_ts(),
+                    "changed": True,
+                }
+            _record_preset_skeleton(name, sent_positions)
     return ok, msg
+
+
+def _record_preset_skeleton(name, positions):
+    """Publish the preset posture as a PICO-compatible 21-point skeleton to the
+    raw master recording stream (source=preset_hand) for replay/visualization."""
+    try:
+        if not isinstance(positions, list) or len(positions) != 6:
+            return
+        skeleton = CANONICAL.hand_model.preset_skeleton(positions)
+        payload = {
+            "type": "raw_master_input",
+            "schema_version": 1,
+            "source": "preset_hand",
+            "signal_form": "discrete",
+            "value": {
+                "stream": "hand_skeleton",
+                "name": str(name),
+                "rightPositions": [float(value) for value in skeleton.flatten()],
+                "mapped_target_units": [float(value) for value in positions],
+            },
+        }
+        RECORDING.observe_raw_input(payload, time.time_ns(), time.monotonic_ns())
+    except Exception as exc:
+        log_event("WARNING", f"preset 骨架记录失败: {name}", exc)
 
 
 def command_result(ok, message, extra=None):
@@ -2193,6 +2226,20 @@ def hand_telemetry_loop():
                 continue
             receive_utc_ns, receive_monotonic_ns = time.time_ns(), time.monotonic_ns()
             decision = PERCEPTION_MONITOR.update(payload, receive_utc_ns, receive_monotonic_ns)
+            with STATE_LOCK:
+                preset_state = dict(SYSTEM.get("hand_preset") or {})
+            if preset_state:
+                decision["preset"] = {
+                    "name": str(preset_state.get("name") or ""),
+                    "positions": list(preset_state.get("positions") or []),
+                    "changed_at": preset_state.get("changed_at"),
+                }
+                if preset_state.get("changed"):
+                    with STATE_LOCK:
+                        SYSTEM["hand_preset"]["changed"] = False
+                    events = list(decision.get("events") or [])
+                    events.append(f"PRESET_CHANGED:{preset_state.get('name') or ''}")
+                    decision["events"] = events
             PERCEPTION_LAST_PAYLOAD = payload
             PERCEPTION_LAST_RECEIVE_MONOTONIC_NS = receive_monotonic_ns
             RECORDING.observe_hand(payload, receive_utc_ns, receive_monotonic_ns)

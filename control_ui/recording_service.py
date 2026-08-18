@@ -140,6 +140,7 @@ class RecordingManager:
         "loaded_fingers_json", "valid", "invalid_reason", "reason", "events_json",
         "prompt_event", "monitor_only", "grasp_success_confirmed",
         "ablation_current_only", "ablation_closure_only", "ablation_joint",
+        "preset_name", "preset_positions_json", "preset_changed_at",
     ]
 
     def __init__(self, root, camera_base_url="http://127.0.0.1:8092", min_free_bytes=2 * 1024**3,
@@ -201,6 +202,7 @@ class RecordingManager:
         hand_sources = {
             "vr": "pico_hand:hand_skeleton",
             "glove": "data_glove:hand_skeleton",
+            "preset": "preset_hand:hand_skeleton",
         }
         if arm_mode in arm_sources:
             required.append(arm_sources[arm_mode])
@@ -236,7 +238,7 @@ class RecordingManager:
         source = str(payload.get("source") or "").strip()
         signal_form = str(payload.get("signal_form") or "").strip()
         value = payload.get("value")
-        if source not in {"keyboard", "gamepad", "pico_hand", "data_glove", "vr_controller"}:
+        if source not in {"keyboard", "gamepad", "pico_hand", "data_glove", "vr_controller", "preset_hand"}:
             return False
         if signal_form not in {"discrete", "continuous"} or not isinstance(value, dict):
             return False
@@ -382,6 +384,9 @@ class RecordingManager:
             "ablation_current_only": 1 if ablation.get("current_only") else 0,
             "ablation_closure_only": 1 if ablation.get("closure_only") else 0,
             "ablation_joint": 1 if ablation.get("joint") else 0,
+            "preset_name": str((decision.get("preset") or {}).get("name") or ""),
+            "preset_positions_json": json.dumps((decision.get("preset") or {}).get("positions") or [], separators=(",", ":")),
+            "preset_changed_at": str((decision.get("preset") or {}).get("changed_at") or ""),
         }
         with self.lock:
             if self.state != "recording":

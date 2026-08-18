@@ -65,6 +65,44 @@ class CanonicalGoalTests(unittest.TestCase):
             atol=1e-12,
         )
 
+    def test_preset_skeleton_open_and_closed_postures(self):
+        model = FrozenHi5HandModel.load(MODEL_V8)
+        open_skeleton = model.preset_skeleton([2000] * 6)
+        close_skeleton = model.preset_skeleton([0] * 6)
+        for skeleton in (open_skeleton, close_skeleton):
+            self.assertEqual(skeleton.shape, (21, 3))
+            self.assertTrue(np.all(np.isfinite(skeleton)))
+        # Wrist-origin Canonical frame, same layout as pico_skeleton_in_wrist_frame.
+        np.testing.assert_allclose(open_skeleton[0], np.zeros(3), atol=1e-12)
+        # Thumb comes from the registered WA100 physical kinematics: four
+        # ordered points, base -> tip, with the Canonical transform applied.
+        self.assertGreater(np.linalg.norm(open_skeleton[4] - open_skeleton[1]), 0.05)
+        self.assertGreater(
+            np.linalg.norm(close_skeleton[4] - open_skeleton[4]), 0.01
+        )
+        # Four fingers: index tip reaches forward (+x) when open and curls
+        # toward the palm (-z) when closed; the curled tip moves closer to MCP.
+        self.assertGreater(open_skeleton[8, 0], open_skeleton[5, 0])
+        self.assertLess(close_skeleton[8, 2], open_skeleton[8, 2] - 0.02)
+        self.assertLess(
+            np.linalg.norm(close_skeleton[8] - close_skeleton[5]),
+            np.linalg.norm(open_skeleton[8] - open_skeleton[5]),
+        )
+        # Straight finger length equals the FK offsets chain (scaled); the
+        # three offsets are nearly but not perfectly collinear, so sum vectors.
+        straight_length = float(
+            np.linalg.norm(
+                np.asarray(model.offsets[6], dtype=float)
+                + np.asarray(model.offsets[7], dtype=float)
+                + np.asarray(model.offsets[8], dtype=float)
+            )
+        ) * model.canonical_scale
+        np.testing.assert_allclose(
+            np.linalg.norm(open_skeleton[8] - open_skeleton[5]),
+            straight_length,
+            atol=1e-9,
+        )
+
     def test_v8_scales_complete_hi5_skeleton_around_wrist_to_pico_size(self):
         v7 = FrozenHi5HandModel.load(MODEL_V7)
         v8 = FrozenHi5HandModel.load(MODEL_V8)

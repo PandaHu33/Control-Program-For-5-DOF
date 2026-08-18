@@ -302,6 +302,52 @@ class FrozenHi5HandModel:
         # Scale about the wrist origin, preserving the Canonical wrist pose.
         return positions * self.canonical_scale
 
+    def preset_skeleton(self, target_units: Any) -> np.ndarray:
+        """Build the Canonical 21-point skeleton for a preset 6-channel target.
+
+        Uses the same 21-joint layout and wrist-origin Canonical frame as
+        ``pico_skeleton_in_wrist_frame`` so preset postures can be compared
+        directly with PICO/glove recordings (0=wrist, 1-4=thumb, 5-8=index,
+        9-12=middle, 13-16=ring, 17-20=pinky).  The thumb follows the
+        registered WA100 kinematic reference (motor units -> physical joint
+        angles -> feature points), exactly like the glove pipeline; the four
+        fingers bend from the straight FK model by their per-finger curl
+        ratios (2000 = open, 0 = closed).
+        """
+        targets = np.asarray(target_units, dtype=float).reshape(-1)
+        if targets.shape != (6,) or not np.all(np.isfinite(targets)):
+            raise ValueError("preset target_units must contain six finite values")
+        if self.wa100_thumb_kinematics is None:
+            raise ValueError("preset skeleton requires the WA100 thumb kinematic reference")
+        positions = np.zeros((21, 3), dtype=float)
+        orientations = np.zeros((21, 4), dtype=float)
+        orientations[:, 3] = 1.0
+        thumb_wa100 = self.wa100_thumb_kinematics.thumb_feature_points_from_motor_units(targets)
+        positions[1:5] = (self.wa100_thumb_rotation @ thumb_wa100.T).T + self.wa100_thumb_translation
+        # Four fingers: (MCP, PIP, DIP, TIP, channel).  Bones extend along +x
+        # in the Canonical FK model; a positive bend rotates the tip toward -z,
+        # i.e. into the palm for the PICO-compatible palm frame.
+        fingers = (
+            (5, 6, 7, 8, 2),
+            (9, 10, 11, 12, 3),
+            (13, 14, 15, 16, 4),
+            (17, 18, 19, 20, 5),
+        )
+        bend_deg = (90.0, 100.0, 70.0)  # MCP, PIP, DIP flexion at full curl
+        for mcp, pip, dip, tip, channel in fingers:
+            ratio = float(np.clip((2000.0 - targets[channel]) / 2000.0, 0.0, 1.0))
+            curls = {mcp: ratio * bend_deg[0], pip: ratio * bend_deg[1], dip: ratio * bend_deg[2], tip: 0.0}
+            for joint in (mcp, pip, dip, tip):
+                parent = CANONICAL_PARENTS[joint]
+                positions[joint] = positions[parent] + quaternion_rotate_xyzw(
+                    orientations[parent], self.offsets[joint]
+                )
+                local = euler_deg_to_quaternion_xyzw([0.0, curls[joint], 0.0], self.euler_order)
+                orientations[joint] = normalize_quaternion_xyzw(
+                    quaternion_multiply_xyzw(orientations[parent], local)
+                )
+        return positions * self.canonical_scale
+
 
 def pico_skeleton_in_wrist_frame(positions: Any) -> np.ndarray:
     points = np.asarray(positions, dtype=float).reshape(21, 3)

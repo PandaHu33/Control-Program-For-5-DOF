@@ -236,6 +236,8 @@ class RecordingManagerTests(unittest.TestCase):
                 episode_records = list(csv.DictReader(fh))
             self.assertEqual(episode_records[0]["timestamp_source"], "wa100_source_time_ns")
             self.assertEqual(episode_records[0]["grasp_success_confirmed"], "0")
+            self.assertIn("preset_name", episode_records[0])
+            self.assertIn("preset_positions_json", episode_records[0])
             self.assertTrue((session_dir / "master_fusion.jsonl").exists())
             self.assertTrue((session_dir / "master_controller_input.jsonl").exists())
             self.assertTrue((session_dir / "master_glove_input.jsonl").exists())
