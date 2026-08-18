@@ -245,7 +245,8 @@
     }
     #usbCameraFrame {
       display: grid;
-      grid-template-columns: 1fr;
+      /* 左右横排两路摄像头 */
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 10px;
       padding-top: 0;
       overflow: visible;
@@ -560,6 +561,7 @@
       .stick-base { width: 60px; height: 60px; }
       .hand-vision-panel { grid-template-columns: 1fr; }
       .canonical-camera-row { grid-template-columns: 1fr; }
+      #usbCameraFrame { grid-template-columns: 1fr; }
       .metric-group { grid-template-columns: 1fr; }
       .metric-group.two { grid-template-columns: 1fr; }
     }
@@ -597,31 +599,6 @@
     <div class="card console-wide">
       <h2>设备连接</h2>
       <div class="module-grid" id="moduleGrid"></div>
-    </div>
-
-    <div class="card console-wide">
-      <h2>多模态同步记录</h2>
-      <div class="flex">
-        <button id="recordingStart">开始记录</button>
-        <button id="recordingStop" disabled>停止记录</button>
-      </div>
-      <div class="experiment-readout">
-        <div>状态<strong id="recordingStatus">idle</strong></div>
-        <div>会话<strong id="recordingSession">-</strong></div>
-        <div>时长<strong id="recordingElapsed">0.0 s</strong></div>
-        <div class="metric-group">
-          <span>机械臂样本<strong id="recordingArmSamples">0</strong></span>
-          <span>灵巧手样本<strong id="recordingHandSamples">0</strong></span>
-          <span>Canonical样本<strong id="recordingCanonicalSamples">0</strong></span>
-        </div>
-        <div>Canonical来源<strong id="canonicalSources">-</strong></div>
-        <div>Canonical最近错误<strong id="canonicalLastError">-</strong></div>
-        <div class="metric-group two">
-          <span>左相机帧<strong id="recordingLeftFrames">0</strong></span>
-          <span>右相机帧<strong id="recordingRightFrames">0</strong></span>
-        </div>
-      </div>
-      <p class="status-line" id="recordingHint">开始前将检查机械臂、灵巧手、左右相机和磁盘空间。</p>
     </div>
 
     <div class="card console-wide" id="perceptionAssistCard">
@@ -767,6 +744,31 @@
         <p class="status-line" id="cameraModeSaveHint">模式切换在下次运行“一键启动显控”时生效。</p>
       </div>
     </div>
+    </div>
+
+    <div class="card console-wide">
+      <h2>多模态同步记录</h2>
+      <div class="flex">
+        <button id="recordingStart">开始记录</button>
+        <button id="recordingStop" disabled>停止记录</button>
+      </div>
+      <div class="experiment-readout">
+        <div>状态<strong id="recordingStatus">idle</strong></div>
+        <div>会话<strong id="recordingSession">-</strong></div>
+        <div>时长<strong id="recordingElapsed">0.0 s</strong></div>
+        <div class="metric-group">
+          <span>机械臂样本<strong id="recordingArmSamples">0</strong></span>
+          <span>灵巧手样本<strong id="recordingHandSamples">0</strong></span>
+          <span>Canonical样本<strong id="recordingCanonicalSamples">0</strong></span>
+        </div>
+        <div>Canonical来源<strong id="canonicalSources">-</strong></div>
+        <div>Canonical最近错误<strong id="canonicalLastError">-</strong></div>
+        <div class="metric-group two">
+          <span>左相机帧<strong id="recordingLeftFrames">0</strong></span>
+          <span>右相机帧<strong id="recordingRightFrames">0</strong></span>
+        </div>
+      </div>
+      <p class="status-line" id="recordingHint">开始前将检查机械臂、灵巧手、左右相机和磁盘空间。</p>
     </div>
 
     <div class="card" id="armStatus">
