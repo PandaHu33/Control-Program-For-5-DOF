@@ -1336,6 +1336,10 @@ HAND_PRESETS = {
     # Physical order: ID1 thumb pitch, ID2 thumb yaw, ID3-ID6 index-pinky.
     "pinch": [1200, 1600, 250, 2000, 2000, 2000],
     "hook": [2000, 2000, 250, 250, 250, 250],
+    # Touch anchors match the Hi5/PICO thumb contact fusion targets
+    # (thumb_glove_calibration.json gesture_anchors).
+    "thumb_index": [750, 300, 350, 2000, 2000, 2000],
+    "thumb_middle": [750, 0, 2000, 350, 2000, 2000],
 }
 
 
@@ -1382,6 +1386,12 @@ def send_hand_control(mode, positions=None, name=None):
     if ok:
         set_hand_mode(normalized_mode)
         refresh_hand_link_status()
+        if normalized_mode == "preset" and name:
+            log_event(
+                "HAND",
+                f"手型切换: {name}",
+                f"mode={normalized_mode} positions={payload.get('positions')}",
+            )
     return ok, msg
 
 

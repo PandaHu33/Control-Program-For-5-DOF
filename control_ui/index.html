@@ -140,6 +140,13 @@
       transition: all 0.12s ease;
     }
     .kbd.active { background: rgba(56,189,248,0.2); border-color: rgba(56,189,248,0.6); box-shadow: 0 0 0 4px rgba(56,189,248,0.1); }
+    .hint-text { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 8px; }
+    .demo-actions button kbd {
+      display: inline-block; margin-left: 4px; padding: 0 4px;
+      border: 1px solid rgba(255,255,255,0.18); border-radius: 4px;
+      background: rgba(255,255,255,0.08); font-size: 10px; line-height: 16px;
+      color: var(--text); vertical-align: 1px;
+    }
     .stick-panel { display: flex; gap: 12px; align-items: center; }
     .stick { display: flex; flex-direction: column; align-items: center; gap: 6px; }
     .stick-label { font-size: 11px; color: var(--muted); letter-spacing: 0.06em; }
@@ -841,13 +848,15 @@
         <button data-api="GET /api/hand/link_status">链路状态</button>
       </div>
       <div class="control-block">
-        <h3>预编程位置</h3>
+        <h3>预编程位置 <span class="hint-text">快捷键 T/Y/U/I/O/H/J</span></h3>
         <div class="demo-actions">
-          <button data-api="POST /api/hand/preset/reset">复位 2000</button>
-          <button data-api="POST /api/hand/preset/half">半握</button>
-          <button data-api="POST /api/hand/preset/close">握拳</button>
-          <button data-api="POST /api/hand/preset/pinch">捏取</button>
-          <button data-api="POST /api/hand/preset/hook">钩拉</button>
+          <button data-api="POST /api/hand/preset/reset" title="快捷键 T">复位 2000 <kbd>T</kbd></button>
+          <button data-api="POST /api/hand/preset/half" title="快捷键 Y">半握 <kbd>Y</kbd></button>
+          <button data-api="POST /api/hand/preset/close" title="快捷键 U">握拳 <kbd>U</kbd></button>
+          <button data-api="POST /api/hand/preset/pinch" title="快捷键 I">捏取 <kbd>I</kbd></button>
+          <button data-api="POST /api/hand/preset/hook" title="快捷键 O">钩拉 <kbd>O</kbd></button>
+          <button data-api="POST /api/hand/preset/thumb_index" title="快捷键 H">拇指-食指碰 <kbd>H</kbd></button>
+          <button data-api="POST /api/hand/preset/thumb_middle" title="快捷键 J">拇指-中指碰 <kbd>J</kbd></button>
         </div>
       </div>
       <div class="control-block">
@@ -3760,6 +3769,36 @@
       });
       sendArmPresetDegrees(degrees, name);
     }
+
+    // Hand preset hotkeys (independent of the arm-control keyMap).
+    const HAND_PRESET_KEYS = {
+      KeyT: "reset",
+      KeyY: "half",
+      KeyU: "close",
+      KeyI: "pinch",
+      KeyO: "hook",
+      KeyH: "thumb_index",
+      KeyJ: "thumb_middle",
+    };
+    const HAND_PRESET_LABELS = {
+      reset: "复位全开",
+      half: "半握",
+      close: "握拳",
+      pinch: "捏取",
+      hook: "钩拉",
+      thumb_index: "拇指-食指碰",
+      thumb_middle: "拇指-中指碰",
+    };
+    window.addEventListener("keydown", (e) => {
+      if (e.repeat) return;
+      if (isEditableTarget(e.target)) return;
+      const presetName = HAND_PRESET_KEYS[e.code];
+      if (!presetName) return;
+      e.preventDefault();
+      const label = HAND_PRESET_LABELS[presetName] || presetName;
+      appendConsoleLog("HAND", `键盘快捷键 ${e.key.toUpperCase()} -> 手型 ${label}`);
+      callApi(`POST /api/hand/preset/${presetName}`);
+    });
 
     window.addEventListener("keydown", (e) => {
       const inputEventTimeMs = Date.now();
