@@ -259,6 +259,7 @@ RECORDING = RecordingManager(
     alignment_hz=RECORDING_ALIGNMENT_HZ,
     canonical_log_enabled=CANONICAL_LOG_ENABLED,
     canonical_publish_hz=CANONICAL_PUBLISH_HZ,
+    canonical_queue_capacity=int(canonical_cfg.get("record_queue_capacity", 4096)),
 )
 CANONICAL = CanonicalGoalBuilder(
     CANONICAL_HAND_MODEL_PATH,
@@ -279,6 +280,27 @@ CANONICAL_MEASURED = {"arm": None, "hand": None, "current": None}
 SLAVE_COMMAND_LOCK = threading.RLock()
 LATEST_SLAVE_COMMAND = None
 CANONICAL_HAND_SOCKET = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+CANONICAL_ASYNC_CONDITION = threading.Condition()
+CANONICAL_LATEST_ENVELOPE = None
+CANONICAL_LATEST_VERSION = 0
+CANONICAL_PERF_LOCK = threading.RLock()
+CANONICAL_PERF = {
+    "publish_starts_ns": deque(maxlen=4096),
+    "critical_ms": deque(maxlen=4096),
+    "build_ms": deque(maxlen=4096),
+    "semantic_ms": deque(maxlen=4096),
+    "measured_fk_ms": deque(maxlen=4096),
+    "admittance_ms": deque(maxlen=4096),
+    "ik_bundle_ms": deque(maxlen=4096),
+    "record_enqueue_ms": deque(maxlen=4096),
+    "deadline_misses": 0,
+    "ws_sent": 0,
+    "ws_errors": 0,
+    "ws_overwritten": 0,
+    "hand_udp_sent": 0,
+    "hand_udp_errors": 0,
+    "hand_udp_overwritten": 0,
+}
 PERCEPTION_CONFIG_PATH = BASE_DIR / "perception_assist_config.json"
 PERCEPTION_CONFIG = load_monitor_config(PERCEPTION_CONFIG_PATH)
 PERCEPTION_MONITOR = PerceptionAssistMonitor(PERCEPTION_CONFIG)
@@ -2222,6 +2244,7 @@ def validate_raw_master_input(payload, browser_only=False):
 
 def _canonical_semantic_bundle(goal, now_ns):
     """Join nominal intent, actual feedback and bounded correction by decision_seq."""
+    bundle_started_ns = time.monotonic_ns()
     decision_seq = int(goal.get("seq") or 0)
     nominal = canonical_snapshot(
         "nominal", timestamp_ns=now_ns, decision_seq=decision_seq,
@@ -2277,11 +2300,13 @@ def _canonical_semantic_bundle(goal, now_ns):
         "arm_source_time_ns": int(arm.get("source_time_ns") or 0),
         "hand_source_time_ns": int(hand.get("source_time_ns") or 0),
     }
+    measured_done_ns = time.monotonic_ns()
     result = SEMANTIC.update(
         nominal, measured, current.get("residual"),
         current_timestamp_ns=int(current.get("timestamp_ns") or 0),
         now_ns=now_ns,
     )
+    admittance_done_ns = time.monotonic_ns()
     corrected, audit = result["corrected"], result["audit"]
     nominal_targets = dict(goal.get("final_targets") or {})
     arm_targets = list(nominal_targets.get("arm_target_q_rad") or [])
@@ -2320,6 +2345,11 @@ def _canonical_semantic_bundle(goal, now_ns):
         "wrist_dof_mask": int((goal.get("validity") or {}).get("wrist_dof_mask", 0)),
         "wrist_source": str(goal.get("wrist_source") or ""),
     }
+    audit["performance"] = {
+        "measured_fk_ms": (measured_done_ns - bundle_started_ns) / 1e6,
+        "admittance_ms": (admittance_done_ns - measured_done_ns) / 1e6,
+        "ik_bundle_ms": (time.monotonic_ns() - admittance_done_ns) / 1e6,
+    }
     envelope = dict(goal)
     published_hand = corrected if audit["dispatch_corrected"] else nominal
     envelope.update({
@@ -2337,15 +2367,18 @@ def _canonical_semantic_bundle(goal, now_ns):
 
 def _publish_canonical_goal_unlocked(receive_utc_ns=None):
     global LATEST_SLAVE_COMMAND
+    started_ns = time.monotonic_ns()
     with STATE_LOCK:
         arm_mode = str(SYSTEM.get("arm_control", {}).get("mode") or "idle")
         hand_mode = str(SYSTEM.get("hand_mode") or "idle")
     goal = CANONICAL.build(arm_mode, hand_mode, receive_utc_ns)
+    built_ns = time.monotonic_ns()
     if goal is None:
         with STATE_LOCK:
             SYSTEM["canonical"] = CANONICAL.status()
         return None
     goal = _canonical_semantic_bundle(goal, int(receive_utc_ns or time.time_ns()))
+    semantic_done_ns = time.monotonic_ns()
     with SLAVE_COMMAND_LOCK:
         LATEST_SLAVE_COMMAND = {
             **dict(goal.get("slave_kinematic_reference_cmd") or {}),
@@ -2354,32 +2387,129 @@ def _publish_canonical_goal_unlocked(receive_utc_ns=None):
             "no_send": bool(goal.get("no_send")),
         }
     goal["publish_rate_hz"] = CANONICAL_PUBLISH_HZ
-    RECORDING.observe_canonical_goal(goal, receive_utc_ns or time.time_ns(), time.monotonic_ns())
-    encoded = json.dumps(goal, ensure_ascii=False, separators=(",", ":"))
+    goal["publisher_performance"] = {
+        "build_ms": (built_ns - started_ns) / 1e6,
+        "semantic_and_dispatch_ms": (semantic_done_ns - built_ns) / 1e6,
+        "critical_ms": (time.monotonic_ns() - started_ns) / 1e6,
+    }
+    record_started_ns = time.monotonic_ns()
+    RECORDING.observe_canonical_goal(goal, receive_utc_ns or time.time_ns(), record_started_ns)
+    record_done_ns = time.monotonic_ns()
+    _publish_canonical_async(goal)
+    with CANONICAL_PERF_LOCK:
+        CANONICAL_PERF["publish_starts_ns"].append(started_ns)
+        CANONICAL_PERF["critical_ms"].append((semantic_done_ns - started_ns) / 1e6)
+        CANONICAL_PERF["build_ms"].append((built_ns - started_ns) / 1e6)
+        CANONICAL_PERF["semantic_ms"].append((semantic_done_ns - built_ns) / 1e6)
+        semantic_performance = (goal.get("semantic_admittance") or {}).get("performance") or {}
+        for source_key, destination_key in (
+            ("measured_fk_ms", "measured_fk_ms"),
+            ("admittance_ms", "admittance_ms"),
+            ("ik_bundle_ms", "ik_bundle_ms"),
+        ):
+            value = semantic_performance.get(source_key)
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                CANONICAL_PERF[destination_key].append(float(value))
+        CANONICAL_PERF["record_enqueue_ms"].append((record_done_ns - record_started_ns) / 1e6)
     with STATE_LOCK:
-        SYSTEM["canonical"] = CANONICAL.status()
-    with CLIENT_LOCK:
-        clients = list(CANONICAL_CLIENTS)
-    for client in clients:
-        try:
-            client.send_text(encoded)
-        except Exception:
-            client.close()
-    hand_targets = (goal.get("slave_kinematic_reference_cmd") or {}).get("hand_target_units")
-    hand_valid = int((goal.get("validity") or {}).get("hand_dof_mask", 0)) != 0
-    if (
-        CANONICAL_CONTROL_ENABLED
-        and not bool(goal.get("no_send"))
-        and hand_valid
-        and isinstance(hand_targets, list)
-        and len(hand_targets) == 6
-    ):
-        try:
-            CANONICAL_HAND_SOCKET.sendto(encoded.encode("utf-8"), (CANONICAL_HAND_HOST, CANONICAL_HAND_PORT))
-        except OSError as exc:
-            with STATE_LOCK:
-                SYSTEM["canonical"]["last_error"] = f"canonical hand dispatch failed: {exc}"
+        SYSTEM["canonical"] = {**CANONICAL.status(), "performance": canonical_performance_snapshot()}
     return goal
+
+
+def _publish_canonical_async(goal):
+    global CANONICAL_LATEST_ENVELOPE, CANONICAL_LATEST_VERSION
+    with CANONICAL_ASYNC_CONDITION:
+        CANONICAL_LATEST_ENVELOPE = goal
+        CANONICAL_LATEST_VERSION += 1
+        CANONICAL_ASYNC_CONDITION.notify_all()
+
+
+def _wait_for_canonical(last_version):
+    with CANONICAL_ASYNC_CONDITION:
+        while CANONICAL_LATEST_VERSION == last_version:
+            CANONICAL_ASYNC_CONDITION.wait()
+        return CANONICAL_LATEST_VERSION, CANONICAL_LATEST_ENVELOPE
+
+
+def _percentile(values, fraction):
+    ordered = sorted(values)
+    if not ordered:
+        return None
+    return float(ordered[min(len(ordered) - 1, int((len(ordered) - 1) * fraction))])
+
+
+def canonical_performance_snapshot():
+    with CANONICAL_PERF_LOCK:
+        starts = list(CANONICAL_PERF["publish_starts_ns"])
+        intervals = [(right - left) / 1e6 for left, right in zip(starts, starts[1:]) if right > left]
+        rate_hz = ((len(starts) - 1) * 1e9 / (starts[-1] - starts[0])) if len(starts) > 1 else 0.0
+        return {
+            "target_hz": CANONICAL_PUBLISH_HZ,
+            "measured_hz": rate_hz,
+            "interval_p95_ms": _percentile(intervals, 0.95),
+            "interval_p99_ms": _percentile(intervals, 0.99),
+            "critical_p95_ms": _percentile(CANONICAL_PERF["critical_ms"], 0.95),
+            "build_p95_ms": _percentile(CANONICAL_PERF["build_ms"], 0.95),
+            "semantic_p95_ms": _percentile(CANONICAL_PERF["semantic_ms"], 0.95),
+            "measured_fk_p95_ms": _percentile(CANONICAL_PERF["measured_fk_ms"], 0.95),
+            "admittance_p95_ms": _percentile(CANONICAL_PERF["admittance_ms"], 0.95),
+            "ik_bundle_p95_ms": _percentile(CANONICAL_PERF["ik_bundle_ms"], 0.95),
+            "record_enqueue_p95_ms": _percentile(CANONICAL_PERF["record_enqueue_ms"], 0.95),
+            **{key: int(CANONICAL_PERF[key]) for key in (
+                "deadline_misses", "ws_sent", "ws_errors", "ws_overwritten",
+                "hand_udp_sent", "hand_udp_errors", "hand_udp_overwritten",
+            )},
+        }
+
+
+def canonical_websocket_broadcast_loop():
+    last_version = 0
+    while True:
+        version, goal = _wait_for_canonical(last_version)
+        skipped = max(0, version - last_version - 1)
+        last_version = version
+        encoded = json.dumps(goal, ensure_ascii=False, separators=(",", ":"))
+        with CLIENT_LOCK:
+            clients = list(CANONICAL_CLIENTS)
+        sent = errors = 0
+        for client in clients:
+            try:
+                client.send_text(encoded)
+                sent += 1
+            except Exception:
+                errors += 1
+                client.close()
+        with CANONICAL_PERF_LOCK:
+            CANONICAL_PERF["ws_sent"] += sent
+            CANONICAL_PERF["ws_errors"] += errors
+            CANONICAL_PERF["ws_overwritten"] += skipped
+
+
+def canonical_hand_dispatch_loop():
+    last_version = 0
+    while True:
+        version, goal = _wait_for_canonical(last_version)
+        skipped = max(0, version - last_version - 1)
+        last_version = version
+        targets = (goal.get("slave_kinematic_reference_cmd") or {}).get("hand_target_units")
+        hand_valid = int((goal.get("validity") or {}).get("hand_dof_mask", 0)) != 0
+        sent = errors = 0
+        if (
+            CANONICAL_CONTROL_ENABLED and not bool(goal.get("no_send")) and hand_valid
+            and isinstance(targets, list) and len(targets) == 6
+        ):
+            try:
+                encoded = json.dumps(goal, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                CANONICAL_HAND_SOCKET.sendto(encoded, (CANONICAL_HAND_HOST, CANONICAL_HAND_PORT))
+                sent = 1
+            except OSError as exc:
+                errors = 1
+                with STATE_LOCK:
+                    SYSTEM["canonical"]["last_error"] = f"canonical hand dispatch failed: {exc}"
+        with CANONICAL_PERF_LOCK:
+            CANONICAL_PERF["hand_udp_sent"] += sent
+            CANONICAL_PERF["hand_udp_errors"] += errors
+            CANONICAL_PERF["hand_udp_overwritten"] += skipped
 
 
 def publish_canonical_goal(receive_utc_ns=None):
@@ -2397,10 +2527,26 @@ def canonical_publish_loop():
         next_tick_ns += CANONICAL_PUBLISH_PERIOD_NS
         now_ns = time.monotonic_ns()
         if next_tick_ns <= now_ns:
-            # Skip missed ticks instead of bursting after a scheduler stall.
-            next_tick_ns = now_ns + CANONICAL_PUBLISH_PERIOD_NS
-            continue
-        time.sleep((next_tick_ns - now_ns) / 1e9)
+            # Stay on the absolute clock. Skip whole missed slots without a
+            # catch-up burst and expose the loss in performance telemetry.
+            next_tick_ns, missed = advance_canonical_deadline(
+                next_tick_ns, now_ns, CANONICAL_PUBLISH_PERIOD_NS
+            )
+            with CANONICAL_PERF_LOCK:
+                CANONICAL_PERF["deadline_misses"] += missed
+            now_ns = time.monotonic_ns()
+        if next_tick_ns > now_ns:
+            time.sleep((next_tick_ns - now_ns) / 1e9)
+
+
+def advance_canonical_deadline(next_tick_ns, now_ns, period_ns):
+    """Advance an overdue absolute deadline without emitting catch-up bursts."""
+    period_ns = max(1, int(period_ns))
+    next_tick_ns, now_ns = int(next_tick_ns), int(now_ns)
+    if next_tick_ns > now_ns:
+        return next_tick_ns, 0
+    missed = int((now_ns - next_tick_ns) // period_ns) + 1
+    return next_tick_ns + missed * period_ns, missed
 
 
 def handle_canonical_wrist_adapter(payload, receive_utc_ns=None):
@@ -2877,6 +3023,10 @@ def main():
     threading.Thread(target=hand_telemetry_loop, daemon=True).start()
     threading.Thread(target=master_fusion_telemetry_loop, daemon=True).start()
     threading.Thread(target=raw_master_input_loop, daemon=True).start()
+    threading.Thread(target=canonical_websocket_broadcast_loop, daemon=True,
+                     name="canonical-ws-broadcast").start()
+    threading.Thread(target=canonical_hand_dispatch_loop, daemon=True,
+                     name="canonical-hand-dispatch").start()
     threading.Thread(target=canonical_publish_loop, daemon=True, name="canonical-50hz").start()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
     threading.Thread(target=local_program_monitor_loop, daemon=True).start()

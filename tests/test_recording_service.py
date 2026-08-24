@@ -1,6 +1,8 @@
 import csv
 import json
 import tempfile
+import threading
+import time
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
@@ -42,6 +44,32 @@ class RecordingManagerTests(unittest.TestCase):
                 "right": {"fresh": True, "age_sec": 0.03, "error": ""},
             }
         return {"ok": True}
+
+    def test_canonical_writer_is_nonblocking_and_overflow_is_explicit(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        class SlowFile:
+            def write(self, _text):
+                entered.set()
+                release.wait(2.0)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = RecordingManager(
+                Path(temp_dir), min_free_bytes=0, canonical_queue_capacity=64
+            )
+            manager._start_canonical_writer("test-session", SlowFile())
+            payload = {"type": "canonical_goal", "schema_version": 4, "seq": 1}
+            started = time.perf_counter()
+            self.assertTrue(manager.observe_canonical_goal(payload))
+            self.assertLess(time.perf_counter() - started, 0.05)
+            self.assertTrue(entered.wait(0.5))
+            for seq in range(2, 66):
+                self.assertTrue(manager.observe_canonical_goal({**payload, "seq": seq}))
+            self.assertFalse(manager.observe_canonical_goal({**payload, "seq": 66}))
+            release.set()
+            error = manager._stop_canonical_writer()
+            self.assertIn("queue overflow", error)
 
     def test_canonical_sequence_summary_separates_missing_reordered_and_duplicate_rows(self):
         with tempfile.TemporaryDirectory() as temp_dir:

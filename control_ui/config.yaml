@@ -42,6 +42,8 @@ canonical:
   control_path_enabled: true
   # Source adapters keep their native rates; canonical output is fixed-rate.
   publish_hz: 50.0
+  # Lossless asynchronous canonical recorder queue (~80 s at 50 Hz).
+  record_queue_capacity: 4096
   # Logging is independent from control and may be disabled for parity checks.
   log_enabled: true
   stale_timeout_sec: 0.5

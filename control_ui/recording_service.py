@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import queue
 import re
 import shutil
 import statistics
@@ -157,7 +158,7 @@ class RecordingManager:
 
     def __init__(self, root, camera_base_url="http://127.0.0.1:8092", min_free_bytes=2 * 1024**3,
                  max_duration_sec=600, alignment_hz=30, canonical_log_enabled=True,
-                 canonical_publish_hz=50.0):
+                 canonical_publish_hz=50.0, canonical_queue_capacity=4096):
         self.root = Path(root)
         self.camera_base_url = camera_base_url.rstrip("/")
         self.min_free_bytes = int(min_free_bytes)
@@ -167,7 +168,9 @@ class RecordingManager:
         self.alignment_filename = f"aligned_{alignment_label}hz.csv"
         self.canonical_log_enabled = bool(canonical_log_enabled)
         self.canonical_publish_hz = max(1.0, float(canonical_publish_hz))
+        self.canonical_queue_capacity = max(64, int(canonical_queue_capacity))
         self.lock = threading.RLock()
+        self._canonical_state_lock = threading.RLock()
         self.state = "idle"
         self.error = ""
         self.session = None
@@ -179,6 +182,14 @@ class RecordingManager:
         self._canonical_fh = None
         self._fusion_rows = []
         self._canonical_rows = []
+        self._canonical_queue = None
+        self._canonical_writer_thread = None
+        self._canonical_accepting = False
+        self._canonical_session_id = None
+        self._canonical_writer_error = ""
+        self._canonical_enqueued = 0
+        self._canonical_written = 0
+        self._canonical_queue_peak = 0
         self._hand_channel_names = []
         self._last_master_controller_seq = None
         self._last_raw_controller_seq = None
@@ -285,16 +296,80 @@ class RecordingManager:
             return False
         receive_utc_ns = int(receive_utc_ns or time.time_ns())
         receive_monotonic_ns = int(receive_monotonic_ns or time.monotonic_ns())
-        with self.lock:
-            if self.state != "recording" or not self.session or not self._canonical_fh:
+        with self._canonical_state_lock:
+            work_queue = self._canonical_queue
+            session_id = self._canonical_session_id
+            if not self._canonical_accepting or work_queue is None or not session_id:
                 return False
             record = dict(payload)
-            record["trial_id"] = self.session["id"]
+            record["trial_id"] = session_id
             record["record_receive_utc_ns"] = receive_utc_ns
             record["record_receive_monotonic_ns"] = receive_monotonic_ns
-            self._canonical_fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
-            self._canonical_rows.append(record)
-            return True
+            try:
+                work_queue.put_nowait(record)
+            except queue.Full:
+                self._canonical_writer_error = "canonical recording queue overflow"
+                return False
+            self._canonical_enqueued += 1
+            self._canonical_queue_peak = max(self._canonical_queue_peak, work_queue.qsize())
+        return True
+
+    def _canonical_writer_loop(self, work_queue, file_handle):
+        try:
+            while True:
+                record = work_queue.get()
+                try:
+                    if record is None:
+                        return
+                    file_handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+                    with self._canonical_state_lock:
+                        self._canonical_rows.append(record)
+                        self._canonical_written += 1
+                finally:
+                    work_queue.task_done()
+        except Exception as exc:
+            with self._canonical_state_lock:
+                self._canonical_writer_error = f"canonical writer failed: {exc}"
+
+    def _start_canonical_writer(self, session_id, file_handle):
+        with self._canonical_state_lock:
+            self._canonical_queue = queue.Queue(maxsize=self.canonical_queue_capacity)
+            self._canonical_accepting = bool(file_handle)
+            self._canonical_session_id = session_id if file_handle else None
+            self._canonical_writer_error = ""
+            self._canonical_enqueued = 0
+            self._canonical_written = 0
+            self._canonical_queue_peak = 0
+            self._canonical_writer_thread = None
+            if file_handle:
+                self._canonical_writer_thread = threading.Thread(
+                    target=self._canonical_writer_loop,
+                    args=(self._canonical_queue, file_handle),
+                    daemon=True,
+                    name=f"canonical-recorder-{session_id}",
+                )
+                self._canonical_writer_thread.start()
+
+    def _stop_canonical_writer(self, timeout_sec=15.0):
+        with self._canonical_state_lock:
+            self._canonical_accepting = False
+            work_queue = self._canonical_queue
+            writer = self._canonical_writer_thread
+        if work_queue is not None and writer is not None:
+            try:
+                work_queue.put(None, timeout=max(0.1, float(timeout_sec)))
+            except queue.Full:
+                with self._canonical_state_lock:
+                    self._canonical_writer_error = "canonical writer did not drain before stop"
+            writer.join(timeout=max(0.1, float(timeout_sec)))
+            if writer.is_alive():
+                with self._canonical_state_lock:
+                    self._canonical_writer_error = "canonical writer stop timeout"
+        with self._canonical_state_lock:
+            self._canonical_writer_thread = None
+            self._canonical_queue = None
+            self._canonical_session_id = None
+            return self._canonical_writer_error
 
     def _recover_interrupted(self):
         if not self.root.exists():
@@ -646,6 +721,9 @@ class RecordingManager:
             self._last_raw_timestamp_ns = 0
             self._camera_counts = {"left": 0, "right": 0}
             self._clock = ClockMapper()
+            # Arm the queue before exposing the recording state so the first
+            # canonical tick cannot fall into a startup race.
+            self._start_canonical_writer(session_id, canonical_fh)
             self.state = "recording"
             manifest["state"] = "recording"
             _json_write(directory / "manifest.inprogress.json", manifest)
@@ -660,6 +738,9 @@ class RecordingManager:
             self.state = "stopping"
             session = self.session
         stopped_ns, errors, camera = time.time_ns(), [], {}
+        canonical_writer_error = self._stop_canonical_writer()
+        if canonical_writer_error:
+            errors.append(canonical_writer_error)
         try:
             camera = _http_json(
                 self.camera_base_url + "/record/stop", "POST", {"session_id": session["id"]}, timeout=90.0
@@ -830,6 +911,22 @@ class RecordingManager:
             ordered_intervals[min(len(ordered_intervals) - 1, int(len(ordered_intervals) * 0.95))]
             if ordered_intervals else None
         )
+        interval_p99_ms = (
+            ordered_intervals[min(len(ordered_intervals) - 1, int(len(ordered_intervals) * 0.99))]
+            if ordered_intervals else None
+        )
+        publisher_metrics = {
+            key: [
+                float((row.get("publisher_performance") or {}).get(key))
+                for row in rows
+                if _finite((row.get("publisher_performance") or {}).get(key))
+            ]
+            for key in ("build_ms", "semantic_and_dispatch_ms", "critical_ms")
+        }
+        publisher_p95_ms = {
+            key: sorted(values)[min(len(values) - 1, int(len(values) * 0.95))] if values else None
+            for key, values in publisher_metrics.items()
+        }
         return {
             "enabled": self.canonical_log_enabled,
             "file": "canonical_goal.jsonl" if self.canonical_log_enabled else None,
@@ -842,12 +939,21 @@ class RecordingManager:
             "target_rate_hz": self.canonical_publish_hz,
             "measured_rate_hz": measured_rate_hz,
             "interval_p95_ms": interval_p95_ms,
+            "interval_p99_ms": interval_p99_ms,
+            "publisher_p95_ms": publisher_p95_ms,
             "invalid_reason_samples": invalid_reasons,
             "calibration_ids": {key: sorted(values) for key, values in calibration_ids.items()},
             "semantic_counts": semantic_counts,
             "semantic_missing": [key for key, count in semantic_counts.items() if count == 0],
             "semantic_mode_samples": semantic_modes,
             "software_version": "wa100-canonical-v4",
+            "writer": {
+                "enqueued": self._canonical_enqueued,
+                "written": self._canonical_written,
+                "queue_peak": self._canonical_queue_peak,
+                "queue_capacity": self.canonical_queue_capacity,
+                "error": self._canonical_writer_error,
+            },
         }
 
     def _master_fusion_summary(self):
@@ -1092,6 +1198,16 @@ class RecordingManager:
 
     def status(self):
         with self.lock:
+            with self._canonical_state_lock:
+                canonical_queue_depth = self._canonical_queue.qsize() if self._canonical_queue is not None else 0
+                canonical_writer = {
+                    "queue_depth": canonical_queue_depth,
+                    "queue_peak": self._canonical_queue_peak,
+                    "queue_capacity": self.canonical_queue_capacity,
+                    "enqueued": self._canonical_enqueued,
+                    "written": self._canonical_written,
+                    "error": self._canonical_writer_error,
+                }
             now = time.time_ns()
             session = self.session
             return {
@@ -1110,6 +1226,7 @@ class RecordingManager:
                     "right_frames": self._camera_counts["right"],
                 },
                 "raw_input_required": list(self._raw_input_required),
+                "canonical_writer": canonical_writer,
                 "error": self.error,
             }
 

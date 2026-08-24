@@ -130,6 +130,31 @@ class CanonicalDispatchTests(unittest.TestCase):
         self.assertEqual(bundle["canonical_measured"]["hand_position_units"], [1500.0] * 6)
         self.assertEqual(bundle["final_targets"]["hand_target_units"], [1000.0] * 6)
 
+    def test_absolute_deadline_skips_whole_slots_without_drift(self):
+        period = 20_000_000
+        next_tick, missed = bridge.advance_canonical_deadline(
+            100_000_000, 145_000_000, period
+        )
+        self.assertEqual(missed, 3)
+        self.assertEqual(next_tick, 160_000_000)
+        unchanged, missed = bridge.advance_canonical_deadline(next_tick, 159_000_000, period)
+        self.assertEqual((unchanged, missed), (next_tick, 0))
+
+    def test_latest_canonical_slot_overwrites_without_waiting_for_consumers(self):
+        previous_goal = bridge.CANONICAL_LATEST_ENVELOPE
+        previous_version = bridge.CANONICAL_LATEST_VERSION
+        try:
+            bridge._publish_canonical_async({"seq": 1})
+            first_version = bridge.CANONICAL_LATEST_VERSION
+            bridge._publish_canonical_async({"seq": 2})
+            version, goal = bridge._wait_for_canonical(first_version)
+            self.assertGreater(version, first_version)
+            self.assertEqual(goal["seq"], 2)
+        finally:
+            with bridge.CANONICAL_ASYNC_CONDITION:
+                bridge.CANONICAL_LATEST_ENVELOPE = previous_goal
+                bridge.CANONICAL_LATEST_VERSION = previous_version
+
 
 if __name__ == "__main__":
     unittest.main()

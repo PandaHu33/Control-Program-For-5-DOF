@@ -1097,6 +1097,22 @@
     let latestCanonicalGoal = null;
     let renderedCanonicalGoal = null;
     let canonicalWristDelta = [0, 0, 0];
+    const canonicalQuery = new URLSearchParams(window.location.search);
+    const requestedCanonicalRenderFps = Number(canonicalQuery.get("canonical_render_fps"));
+    const CANONICAL_BENCHMARK_ENABLED = canonicalQuery.get("canonical_benchmark") === "1";
+    const CANONICAL_RENDER_FPS = [20, 30, 40, 50].includes(requestedCanonicalRenderFps)
+      ? requestedCanonicalRenderFps : 30;
+    const CANONICAL_RENDER_PERIOD_MS = 1000 / CANONICAL_RENDER_FPS;
+    const canonicalReceiveTimes = [];
+    const canonicalRenderTimes = [];
+    const canonicalDrawDurations = [];
+    const canonicalRenderAges = [];
+    let canonicalLatestReceiveMs = 0;
+    let canonicalOverwrittenFrames = 0;
+    let canonicalLastAnimationMs = 0;
+    let canonicalLongestAnimationStallMs = 0;
+    let canonicalLastRenderGateMs = 0;
+    let canonicalBenchmarkResetMs = performance.now();
     let autoSend = true;
     const e1NoSendEl = document.getElementById("e1NoSend");
     let lastPayloadBits = null;
@@ -1384,7 +1400,7 @@
         };
         drawCanonicalArrow(context, arrowStart.x, arrowStart.y, arrowEnd.x, arrowEnd.y, "#111827", 2.4);
         context.fillStyle = "#374151";
-        context.fillText(`腕部移动 ${(movementM * 1000).toFixed(1)} mm / 1 s`, 24, 94);
+        context.fillText(`腕部移动 ${(movementM * 1000).toFixed(1)} mm / 更新帧`, 24, 94);
       } else {
         context.fillStyle = "#6B7280";
         context.fillText("腕部移动 < 0.25 mm / 1 s", 24, 78);
@@ -1413,6 +1429,7 @@
 
     function commitLatestCanonicalGoal() {
       if (!latestCanonicalGoal) return;
+      const drawStartedMs = performance.now();
       const previousPose = renderedCanonicalGoal?.wrist_pose_C?.position_m;
       const nextPose = latestCanonicalGoal.wrist_pose_C.position_m.map(Number);
       canonicalWristDelta = finiteCanonicalVector(previousPose, 3)
@@ -1423,9 +1440,22 @@
       const pose = nextPose;
       const invalidReasons = renderedCanonicalGoal.invalid_reasons || [];
       if (canonicalViewerStatus) {
-        canonicalViewerStatus.textContent = invalidReasons.length
-          ? `seq ${renderedCanonicalGoal.seq} · ${invalidReasons.join(", ")}`
-          : `seq ${renderedCanonicalGoal.seq} · ${renderedCanonicalGoal.wrist_source} + ${renderedCanonicalGoal.hand_source}`;
+        const nowMs = performance.now();
+        const cutoffMs = nowMs - 5000;
+        while (canonicalReceiveTimes.length && canonicalReceiveTimes[0] < cutoffMs) canonicalReceiveTimes.shift();
+        while (canonicalRenderTimes.length && canonicalRenderTimes[0] < cutoffMs) canonicalRenderTimes.shift();
+        const receiveHz = canonicalReceiveTimes.length > 1
+          ? (canonicalReceiveTimes.length - 1) * 1000 / (canonicalReceiveTimes.at(-1) - canonicalReceiveTimes[0]) : 0;
+        const renderFps = canonicalRenderTimes.length > 1
+          ? (canonicalRenderTimes.length - 1) * 1000 / (canonicalRenderTimes.at(-1) - canonicalRenderTimes[0]) : 0;
+        const ageMs = canonicalLatestReceiveMs ? nowMs - canonicalLatestReceiveMs : NaN;
+        const orderedDrawMs = canonicalDrawDurations.slice().sort((left, right) => left - right);
+        const drawP95Ms = orderedDrawMs.length
+          ? orderedDrawMs[Math.min(orderedDrawMs.length - 1, Math.floor(orderedDrawMs.length * 0.95))] : 0;
+        const source = invalidReasons.length
+          ? invalidReasons.join(", ")
+          : `${renderedCanonicalGoal.wrist_source} + ${renderedCanonicalGoal.hand_source}`;
+        canonicalViewerStatus.textContent = `seq ${renderedCanonicalGoal.seq} · ${source} · RX ${receiveHz.toFixed(1)} Hz · 显示 ${renderFps.toFixed(1)}/${CANONICAL_RENDER_FPS} FPS · age ${ageMs.toFixed(1)} ms · draw P95 ${drawP95Ms.toFixed(2)} ms · 最长卡顿 ${canonicalLongestAnimationStallMs.toFixed(0)} ms · 覆盖 ${canonicalOverwrittenFrames}`;
         canonicalViewerStatus.classList.toggle("warning", invalidReasons.length > 0);
       }
       if (canonicalViewerPose) {
@@ -1454,6 +1484,116 @@
         canonicalViewerHand.textContent = `WA100 mask 0x${handMask.toString(16).padStart(2, "0")} · 目标 ${formatUnits(nominalUnits)} · 实测 ${formatUnits(measuredUnits)} · 修正 ${formatUnits(correctedUnits)} · 捏合 ${Number(indexPinch.normalized_distance ?? NaN).toFixed(3)}/${Number(middlePinch.normalized_distance ?? NaN).toFixed(3)} · 锚点 ${anchor}`;
         canonicalViewerHand.classList.toggle("warning", gestures.active_anchor && gestures.active_anchor !== "none");
       }
+      const drawDoneMs = performance.now();
+      canonicalRenderTimes.push(drawDoneMs);
+      canonicalDrawDurations.push(drawDoneMs - drawStartedMs);
+      canonicalRenderAges.push(canonicalLatestReceiveMs ? drawDoneMs - canonicalLatestReceiveMs : 0);
+      if (canonicalDrawDurations.length > 300) canonicalDrawDurations.shift();
+      if (canonicalRenderAges.length > 300) canonicalRenderAges.shift();
+      if (CANONICAL_BENCHMARK_ENABLED && canonicalSkeletonCanvas) {
+        canonicalSkeletonCanvas.dataset.benchmark = JSON.stringify(canonicalBenchmarkSnapshot());
+      }
+    }
+
+    function acceptCanonicalGoal(goal) {
+      if (!validCanonicalGoal(goal)) return false;
+      const nowMs = performance.now();
+      if (latestCanonicalGoal
+          && Number(latestCanonicalGoal.seq || 0) !== Number(renderedCanonicalGoal?.seq || 0)) {
+        canonicalOverwrittenFrames += 1;
+      }
+      latestCanonicalGoal = goal;
+      canonicalLatestReceiveMs = nowMs;
+      canonicalReceiveTimes.push(nowMs);
+      const cutoffMs = nowMs - 5000;
+      while (canonicalReceiveTimes.length && canonicalReceiveTimes[0] < cutoffMs) canonicalReceiveTimes.shift();
+      return true;
+    }
+
+    function canonicalBenchmarkSnapshot() {
+      const elapsedSec = Math.max(0.001, (performance.now() - canonicalBenchmarkResetMs) / 1000);
+      const orderedDraw = canonicalDrawDurations.slice().sort((left, right) => left - right);
+      const orderedAge = canonicalRenderAges.slice().sort((left, right) => left - right);
+      const receiveHz = canonicalReceiveTimes.length > 1
+        ? (canonicalReceiveTimes.length - 1) * 1000 / (canonicalReceiveTimes.at(-1) - canonicalReceiveTimes[0]) : 0;
+      const renderFps = canonicalRenderTimes.length > 1
+        ? (canonicalRenderTimes.length - 1) * 1000 / (canonicalRenderTimes.at(-1) - canonicalRenderTimes[0]) : 0;
+      return {
+        targetFps: CANONICAL_RENDER_FPS,
+        elapsedSec,
+        received: canonicalReceiveTimes.length,
+        rendered: canonicalRenderTimes.length,
+        receiveHz,
+        renderFps,
+        drawMeanMs: orderedDraw.reduce((sum, value) => sum + value, 0) / Math.max(1, orderedDraw.length),
+        drawP95Ms: orderedDraw[Math.min(orderedDraw.length - 1, Math.floor(orderedDraw.length * 0.95))] || 0,
+        dataAgeP95Ms: orderedAge[Math.min(orderedAge.length - 1, Math.floor(orderedAge.length * 0.95))] || 0,
+        overwritten: canonicalOverwrittenFrames,
+        longestStallMs: canonicalLongestAnimationStallMs,
+      };
+    }
+
+    if (CANONICAL_BENCHMARK_ENABLED) {
+      window.canonicalViewerBenchmark = {
+        feed: acceptCanonicalGoal,
+        reset() {
+          canonicalReceiveTimes.splice(0); canonicalRenderTimes.splice(0); canonicalDrawDurations.splice(0);
+          canonicalRenderAges.splice(0);
+          canonicalOverwrittenFrames = 0; canonicalLongestAnimationStallMs = 0;
+          canonicalBenchmarkResetMs = performance.now();
+        },
+        snapshot: canonicalBenchmarkSnapshot,
+      };
+      window.addEventListener("canonical-benchmark-feed", event => acceptCanonicalGoal(event.detail));
+      window.addEventListener("canonical-benchmark-reset", () => {
+        canonicalReceiveTimes.splice(0); canonicalRenderTimes.splice(0); canonicalDrawDurations.splice(0);
+        canonicalRenderAges.splice(0);
+        canonicalOverwrittenFrames = 0; canonicalLongestAnimationStallMs = 0;
+        canonicalBenchmarkResetMs = performance.now();
+      });
+      const benchmarkHand = Array.from({ length: 21 }, (_, index) => [
+        index * 0.002, (index % 5) * 0.001, (index % 4) * 0.003,
+      ]);
+      let benchmarkSeq = 0;
+      window.setInterval(() => {
+        benchmarkSeq += 1;
+        const units = [1000, 1000, 1000, 1000, 1000, 1000];
+        acceptCanonicalGoal({
+          type: "canonical_goal", schema_version: 4, seq: benchmarkSeq,
+          condition_id: "BENCH", wrist_source: "keyboard", hand_source: "data_glove",
+          wrist_pose_C: {
+            position_m: [0.6 + 0.005 * Math.sin(benchmarkSeq / 10), 0, 0.1],
+            orientation_xyzw: [0, 0, 0, 1],
+          },
+          hand_position_units: units, hand_skeleton_C: benchmarkHand,
+          validity: { wrist_dof_mask: 0x3F, hand_dof_mask: 0x3F }, invalid_reasons: [],
+          planning: { name: "jerk_limited", valid_for_dispatch: true, processing_time_ms: 0.1, source_age_sec: 0.01 },
+          calibrations: { wa100_kinematics: "benchmark" },
+          canonical_nominal: { hand_position_units: units },
+          canonical_measured: { hand_position_units: units },
+          canonical_corrected: { hand_position_units: units },
+          gestures: { active_anchor: "none" },
+        });
+      }, 20);
+    }
+
+    function canonicalRenderLoop(animationMs) {
+      if (canonicalLastAnimationMs) {
+        canonicalLongestAnimationStallMs = Math.max(
+          canonicalLongestAnimationStallMs, animationMs - canonicalLastAnimationMs
+        );
+      }
+      canonicalLastAnimationMs = animationMs;
+      const hasNewSequence = latestCanonicalGoal
+        && Number(latestCanonicalGoal.seq || 0) !== Number(renderedCanonicalGoal?.seq || 0);
+      if (!canonicalLastRenderGateMs) canonicalLastRenderGateMs = animationMs;
+      if (hasNewSequence && animationMs + 0.5 >= canonicalLastRenderGateMs) {
+        commitLatestCanonicalGoal();
+        do {
+          canonicalLastRenderGateMs += CANONICAL_RENDER_PERIOD_MS;
+        } while (canonicalLastRenderGateMs <= animationMs);
+      }
+      window.requestAnimationFrame(canonicalRenderLoop);
     }
 
     function scheduleCanonicalWsReconnect() {
@@ -1473,8 +1613,7 @@
         };
         canonicalWs.onmessage = event => {
           try {
-            const goal = JSON.parse(event.data);
-            if (validCanonicalGoal(goal)) latestCanonicalGoal = goal;
+            acceptCanonicalGoal(JSON.parse(event.data));
           } catch (_) {}
         };
         canonicalWs.onclose = () => {
@@ -2474,7 +2613,7 @@
       if (renderedCanonicalGoal) drawCanonicalSkeleton(renderedCanonicalGoal);
       else drawCanonicalPlaceholder("等待 Canonical 数据...");
     });
-    setInterval(commitLatestCanonicalGoal, 1000);
+    window.requestAnimationFrame(canonicalRenderLoop);
     setInterval(refreshCameraStatus, 8000);
     setInterval(refreshHandVisionStatus, 8000);
     setInterval(refreshControllerDeltaStatus, 8000);

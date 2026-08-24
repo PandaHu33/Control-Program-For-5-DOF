@@ -193,15 +193,20 @@ class SemanticAdmittance:
                 corrected_units += unload_ratio * (2000.0 - nominal_units)
             else:
                 unload_ratio = 0.0
+            nominal_hand = np.asarray(nominal.get("hand_skeleton_C"), dtype=float).reshape(21, 3)
             if self.hand_kinematics is None:
-                corrected_hand = np.asarray(nominal.get("hand_skeleton_C"), dtype=float).reshape(21, 3)
+                corrected_hand = nominal_hand.copy()
                 if not np.allclose(corrected_units, nominal_units):
                     reasons.append("wa100_kinematics_unavailable")
                     corrected_units = nominal_units.copy()
                     unload_ratio = 0.0
+            elif np.allclose(corrected_units, nominal_units):
+                # OFF/SHADOW and non-triggered samples are exact pass-throughs;
+                # reuse the already validated nominal skeleton instead of a
+                # second WA100 FK on every canonical tick.
+                corrected_hand = nominal_hand.copy()
             else:
                 corrected_hand = self.hand_kinematics.canonical_skeleton_21(corrected_units)
-            nominal_hand = np.asarray(nominal.get("hand_skeleton_C"), dtype=float).reshape(21, 3)
             delta_hand = corrected_hand - nominal_hand
             delta_units = corrected_units - nominal_units
 
