@@ -3,7 +3,9 @@ from pathlib import Path
 
 import numpy as np
 
-from control_ui.wa100_kinematics import WA100Kinematics, rotation_rpy, transform
+from control_ui.wa100_kinematics import (
+    WA100Kinematics, WA100_CANONICAL_FROM_MODEL_ROTATION, rotation_rpy, transform,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,6 +75,34 @@ class WA100KinematicsTest(unittest.TestCase):
         for finger in ("index", "middle", "ring", "little"):
             self.assertEqual(skeleton[finger].shape, (4, 3))
         self.assertTrue(all(np.all(np.isfinite(points)) for points in skeleton.values()))
+
+    def test_canonical_21_points_are_fk_with_four_distal_midpoints(self):
+        units = [300, 700, 250, 800, 1200, 1600]
+        canonical = self.kinematics.canonical_skeleton_21(units)
+        native = self.kinematics.skeleton_from_motor_units(units)
+        rotate = lambda points: (WA100_CANONICAL_FROM_MODEL_ROTATION @ np.asarray(points).T).T
+        self.assertEqual(canonical.shape, (21, 3))
+        np.testing.assert_allclose(canonical[1:5], rotate(native["thumb"][1:]), atol=1e-12)
+        for start, key in ((5, "index"), (9, "middle"), (13, "ring"), (17, "little")):
+            expected = rotate(native[key])
+            np.testing.assert_allclose(canonical[start:start + 2], expected[1:3], atol=1e-12)
+            np.testing.assert_allclose(canonical[start + 2], 0.5 * (expected[2] + expected[3]), atol=1e-12)
+            np.testing.assert_allclose(canonical[start + 3], expected[3], atol=1e-12)
+            self.assertGreater(np.linalg.norm(canonical[start + 2] - canonical[start + 1]), 0.0)
+
+    def test_open_canonical_pose_is_palm_down_right_hand_in_xy_plane(self):
+        skeleton = self.kinematics.canonical_skeleton_21([2000] * 6)
+        # Finger length lies in XY; Z contains only the physical palm/thumb
+        # thickness from the WA100 model and is small relative to hand length.
+        self.assertGreater(np.ptp(skeleton[:, 1]), 0.19)
+        self.assertLess(np.ptp(skeleton[:, 2]), 0.02)
+        # Fingers point +Y. For a palm-down right hand the thumb is on -X and
+        # index-base cross pinky-base points toward -Z.
+        self.assertGreater(skeleton[8, 1], skeleton[5, 1])
+        self.assertLess(skeleton[4, 0], skeleton[5, 0])
+        self.assertLess(skeleton[5, 0], skeleton[17, 0])
+        palm_normal = np.cross(skeleton[5] - skeleton[0], skeleton[17] - skeleton[0])
+        self.assertLess(palm_normal[2], 0.0)
 
     def test_thumb_exposes_four_physical_feature_points(self):
         points = self.kinematics.thumb_feature_points_from_motor_units([1000] * 6)

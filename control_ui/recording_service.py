@@ -39,6 +39,15 @@ HAND_VECTOR_FIELDS = (
     "filtered_current_ma",
     "compliance_offset_units",
 )
+# Admittance policy vectors introduced by WA100 telemetry schema 4.
+HAND_ADMITTANCE_FIELDS = (
+    "adm_closure",
+    "adm_off_hold",
+    "adm_gain_scale",
+    "adm_trigger_on_ma",
+    "adm_trigger_off_ma",
+    "adm_load_evidence",
+)
 
 
 def _vector(value, size, fill=None):
@@ -130,7 +139,10 @@ class RecordingManager:
     HAND_COLUMNS = [
         "seq", "source_time_ns", "receive_utc_ns", "receive_monotonic_ns", "aligned_utc_ns",
         "feedback_valid", "position_valid_mask", "current_valid_mask", "position_zero_wrap_corrected_mask", "control_mode",
-    ] + [f"{field}_{joint}" for field in HAND_VECTOR_FIELDS for joint in range(1, 7)]
+        # Admittance policy (WA100 telemetry schema 4; empty on schema 1-3).
+        "admittance_mode", "retreat_level", "retreat_active",
+    ] + [f"{field}_{joint}" for field in HAND_ADMITTANCE_FIELDS for joint in range(1, 7)] \
+      + [f"{field}_{joint}" for field in HAND_VECTOR_FIELDS for joint in range(1, 7)]
     # One row per PerceptionAssistMonitor decision.  This is the phase-1
     # EpisodeRecord stream; vector/list fields remain JSON so channel identity is
     # not lost when configurations change.
@@ -162,13 +174,13 @@ class RecordingManager:
         self._arm_fh = self._hand_fh = self._episode_fh = None
         self._arm_writer = self._hand_writer = self._episode_writer = None
         self._arm_rows, self._hand_rows, self._episode_rows = [], [], []
-        self._fusion_fh = self._controller_input_fh = self._glove_input_fh = None
+        self._fusion_fh = self._controller_input_fh = None
         self._raw_input_fh = None
         self._canonical_fh = None
         self._fusion_rows = []
         self._canonical_rows = []
         self._hand_channel_names = []
-        self._last_master_controller_seq = self._last_master_glove_seq = None
+        self._last_master_controller_seq = None
         self._last_raw_controller_seq = None
         self._raw_input_counts = {}
         self._raw_input_rejected = {}
@@ -269,7 +281,7 @@ class RecordingManager:
     def observe_canonical_goal(self, payload, receive_utc_ns=None, receive_monotonic_ns=None):
         if not isinstance(payload, dict) or payload.get("type") != "canonical_goal":
             return False
-        if int(payload.get("schema_version", 0)) != 1:
+        if int(payload.get("schema_version", 0)) not in {1, 2, 3, 4}:
             return False
         receive_utc_ns = int(receive_utc_ns or time.time_ns())
         receive_monotonic_ns = int(receive_monotonic_ns or time.monotonic_ns())
@@ -351,7 +363,27 @@ class RecordingManager:
                     ) if corrected
                 ),
                 "control_mode": str(payload.get("control_mode") or "unknown"),
+                "admittance_mode": str(payload.get("admittance_mode") or ""),
+                "retreat_level": (
+                    float(payload.get("retreat_level"))
+                    if _finite(payload.get("retreat_level")) else ""
+                ),
+                "retreat_active": 1 if payload.get("retreat_active") else 0,
             }
+            admittance_vectors = {
+                "adm_closure": payload.get("admittance_closure"),
+                "adm_off_hold": payload.get("off_hold_active"),
+                "adm_gain_scale": payload.get("admittance_gain_scale"),
+                "adm_trigger_on_ma": payload.get("admittance_trigger_on_ma"),
+                "adm_trigger_off_ma": payload.get("admittance_trigger_off_ma"),
+                "adm_load_evidence": payload.get("channel_load_evidence"),
+            }
+            for field in HAND_ADMITTANCE_FIELDS:
+                for index, value in enumerate(_vector(admittance_vectors.get(field), 6), 1):
+                    if isinstance(value, bool):
+                        row[f"{field}_{index}"] = 1 if value else 0
+                    else:
+                        row[f"{field}_{index}"] = value if _finite(value) else ""
             for field in HAND_VECTOR_FIELDS:
                 for index, value in enumerate(_vector(payload.get(field), 6), 1):
                     row[f"{field}_{index}"] = value if _finite(value) else ""
@@ -426,6 +458,13 @@ class RecordingManager:
             if self.state != "recording":
                 return
             record = dict(payload)
+            # The active glove sample is already preserved once in raw_input.
+            # Keep only freshness/validity here, never another full hand frame.
+            glove = dict(record.pop("glove", {}) or {})
+            record["glove_state"] = {
+                key: glove.get(key) for key in ("frame_id", "age_sec", "valid", "invalid_reason")
+                if key in glove
+            }
             record["record_receive_utc_ns"] = receive_utc_ns
             record["record_receive_monotonic_ns"] = receive_monotonic_ns
             self._fusion_fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -438,14 +477,6 @@ class RecordingManager:
                 )
                 self._last_master_controller_seq = controller_seq
 
-            glove = dict(payload.get("glove") or {})
-            glove_seq = int(glove.get("frame_id", -1))
-            if glove_seq >= 0 and glove_seq != self._last_master_glove_seq:
-                glove["record_receive_utc_ns"] = receive_utc_ns
-                self._glove_input_fh.write(
-                    json.dumps(glove, ensure_ascii=False, separators=(",", ":")) + "\n"
-                )
-                self._last_master_glove_seq = glove_seq
 
     def hand_telemetry_fresh(self, timeout_ns=500_000_000):
         now = time.time_ns()
@@ -470,6 +501,9 @@ class RecordingManager:
             source = key.split(":", 1)[0]
             if source == "keyboard":
                 raw_ready[key] = browser_connected
+            elif source == "preset_hand":
+                # A preset is a latched discrete state, not a streaming sensor.
+                raw_ready[key] = bool(last_seen.get(key))
             else:
                 raw_ready[key] = bool(
                     (source != "gamepad" or browser_connected)
@@ -557,7 +591,7 @@ class RecordingManager:
             "readiness": ready,
         }
         _json_write(directory / "manifest.inprogress.json", manifest)
-        arm_fh = hand_fh = episode_fh = fusion_fh = controller_input_fh = glove_input_fh = raw_input_fh = canonical_fh = None
+        arm_fh = hand_fh = episode_fh = fusion_fh = controller_input_fh = raw_input_fh = canonical_fh = None
         try:
             camera = _http_json(
                 self.camera_base_url + "/record/start", "POST",
@@ -572,9 +606,6 @@ class RecordingManager:
             controller_input_fh = (directory / "master_controller_input.jsonl").open(
                 "w", encoding="utf-8", buffering=1
             )
-            glove_input_fh = (directory / "master_glove_input.jsonl").open(
-                "w", encoding="utf-8", buffering=1
-            )
             raw_input_fh = (directory / "raw_input.jsonl").open("w", encoding="utf-8", buffering=1)
             if self.canonical_log_enabled:
                 canonical_fh = (directory / "canonical_goal.jsonl").open("w", encoding="utf-8", buffering=1)
@@ -582,7 +613,7 @@ class RecordingManager:
             episode_writer = csv.DictWriter(episode_fh, self.EPISODE_RECORD_COLUMNS)
             arm_writer.writeheader(); hand_writer.writeheader(); episode_writer.writeheader()
         except Exception as exc:
-            for fh in (arm_fh, hand_fh, episode_fh, fusion_fh, controller_input_fh, glove_input_fh, raw_input_fh, canonical_fh):
+            for fh in (arm_fh, hand_fh, episode_fh, fusion_fh, controller_input_fh, raw_input_fh, canonical_fh):
                 if fh:
                     fh.close()
             try:
@@ -603,13 +634,12 @@ class RecordingManager:
             self._arm_rows, self._hand_rows, self._episode_rows = [], [], []
             self._fusion_fh = fusion_fh
             self._controller_input_fh = controller_input_fh
-            self._glove_input_fh = glove_input_fh
             self._raw_input_fh = raw_input_fh
             self._canonical_fh = canonical_fh
             self._fusion_rows = []
             self._canonical_rows = []
             self._hand_channel_names = []
-            self._last_master_controller_seq = self._last_master_glove_seq = None
+            self._last_master_controller_seq = None
             self._raw_input_counts = {}
             self._raw_input_rejected = {}
             self._raw_input_required = self._required_raw_inputs(method)
@@ -642,14 +672,14 @@ class RecordingManager:
         with self.lock:
             for fh in (
                 self._arm_fh, self._hand_fh, self._episode_fh,
-                self._fusion_fh, self._controller_input_fh, self._glove_input_fh, self._raw_input_fh,
+                self._fusion_fh, self._controller_input_fh, self._raw_input_fh,
                 self._canonical_fh,
             ):
                 if fh:
                     fh.flush(); fh.close()
             self._arm_fh = self._hand_fh = self._episode_fh = None
             self._arm_writer = self._hand_writer = self._episode_writer = None
-            self._fusion_fh = self._controller_input_fh = self._glove_input_fh = None
+            self._fusion_fh = self._controller_input_fh = None
             self._raw_input_fh = None
             self._canonical_fh = None
         try:
@@ -697,6 +727,7 @@ class RecordingManager:
                 "episode_records": len(self._episode_rows),
                 "raw_input": raw_input_summary["total"],
                 "canonical_goal": canonical_summary["count"],
+                **canonical_summary.get("semantic_counts", {}),
                 **fusion_summary["counts"],
                 **alignment.get("counts", {}),
             },
@@ -707,10 +738,6 @@ class RecordingManager:
                 "canonical_goal": canonical_summary["count"] / duration_sec if duration_sec > 0 else 0.0,
                 "master_controller_input": (
                     fusion_summary["counts"]["master_controller_input"] / duration_sec
-                    if duration_sec > 0 else 0.0
-                ),
-                "master_glove_input": (
-                    fusion_summary["counts"]["master_glove_input"] / duration_sec
                     if duration_sec > 0 else 0.0
                 ),
             },
@@ -741,9 +768,13 @@ class RecordingManager:
     def _canonical_summary(self):
         rows = list(self._canonical_rows)
         sources = {"wrist": {}, "hand": {}}
-        calibration_ids = {"wrist_mapping": set(), "hand_model": set(), "hand_mapping": set()}
+        calibration_ids = {"wrist_mapping": set(), "wa100_kinematics": set(), "hand_mapping": set()}
         invalid_reasons = {}
         valid_samples = 0
+        semantic_counts = {"canonical_nominal": 0, "canonical_measured": 0,
+                           "canonical_corrected": 0, "semantic_admittance": 0,
+                           "slave_kinematic_reference_cmd": 0}
+        semantic_modes = {}
         seqs = []
         for row in rows:
             seq = int(row.get("seq", 0))
@@ -753,7 +784,8 @@ class RecordingManager:
                 value = str(row.get(field) or "unknown")
                 sources[side][value] = sources[side].get(value, 0) + 1
             validity = row.get("validity") or {}
-            if int(validity.get("wrist_dof_mask", 0)) and int(validity.get("hand_node_mask", 0)):
+            hand_mask = validity.get("hand_dof_mask") if int(row.get("schema_version", 0)) >= 4 else validity.get("hand_node_mask")
+            if int(validity.get("wrist_dof_mask", 0)) and int(hand_mask or 0):
                 valid_samples += 1
             for reason in row.get("invalid_reasons") or []:
                 key = str(reason)
@@ -763,6 +795,12 @@ class RecordingManager:
                 value = str(calibrations.get(key) or "")
                 if value:
                     calibration_ids[key].add(value)
+            for key in semantic_counts:
+                if isinstance(row.get(key), dict):
+                    semantic_counts[key] += 1
+            semantic = row.get("semantic_admittance") or {}
+            mode = str(semantic.get("mode") or "unknown")
+            semantic_modes[mode] = semantic_modes.get(mode, 0) + 1
         unique_seqs = sorted(set(seqs))
         sequence_drops = sum(
             max(0, current - previous - 1)
@@ -806,30 +844,29 @@ class RecordingManager:
             "interval_p95_ms": interval_p95_ms,
             "invalid_reason_samples": invalid_reasons,
             "calibration_ids": {key: sorted(values) for key, values in calibration_ids.items()},
+            "semantic_counts": semantic_counts,
+            "semantic_missing": [key for key, count in semantic_counts.items() if count == 0],
+            "semantic_mode_samples": semantic_modes,
+            "software_version": "wa100-canonical-v4",
         }
 
     def _master_fusion_summary(self):
         rows = list(self._fusion_rows)
-        controller_seqs, glove_seqs = [], []
-        controller_ages, glove_ages = [], []
-        calibration_ids = {"time_and_extrinsic": set(), "glove_mapping": set()}
+        controller_seqs = []
+        controller_ages = []
+        calibration_ids = {"time_and_extrinsic": set()}
         degradation_counts = {}
         mode_counts = {}
         last_mode = None
         degradation_events = 0
         for row in rows:
             controller = row.get("controller") or {}
-            glove = row.get("glove") or {}
             calibrations = row.get("calibrations") or {}
-            controller_seq, glove_seq = int(controller.get("seq", -1)), int(glove.get("frame_id", -1))
+            controller_seq = int(controller.get("seq", -1))
             if controller_seq >= 0 and (not controller_seqs or controller_seq != controller_seqs[-1]):
                 controller_seqs.append(controller_seq)
-            if glove_seq >= 0 and (not glove_seqs or glove_seq != glove_seqs[-1]):
-                glove_seqs.append(glove_seq)
             if _finite(controller.get("age_sec")):
                 controller_ages.append(float(controller["age_sec"]) * 1000.0)
-            if _finite(glove.get("age_sec")):
-                glove_ages.append(float(glove["age_sec"]) * 1000.0)
             for key in calibration_ids:
                 value = str(calibrations.get(key) or "")
                 if value:
@@ -850,26 +887,19 @@ class RecordingManager:
             "files": {
                 "fusion": "master_fusion.jsonl",
                 "controller_input": "master_controller_input.jsonl",
-                "glove_input": "master_glove_input.jsonl",
             },
             "counts": {
                 "master_fusion": len(rows),
                 "master_controller_input": len(controller_seqs),
-                "master_glove_input": len(glove_seqs),
             },
             "drops": {
                 "controller_sequence": sum(
                     max(0, current - previous - 1)
                     for previous, current in zip(controller_seqs, controller_seqs[1:])
                 ),
-                "glove_sequence": sum(
-                    max(0, current - previous - 1)
-                    for previous, current in zip(glove_seqs, glove_seqs[1:])
-                ),
             },
             "data_age_p95_ms": {
                 "controller": p95(controller_ages),
-                "glove": p95(glove_ages),
             },
             "degradation_events": degradation_events,
             "degradation_reason_samples": degradation_counts,

@@ -20,6 +20,35 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 
+WA100_HAND_CHANNEL_NAMES = (
+    "thumb_pitch", "thumb_yaw", "index", "middle", "ring", "pinky",
+)
+WA100_CANONICAL_POINT_NAMES = (
+    "wrist",
+    "thumb_base", "thumb_j1", "thumb_j2", "thumb_tip",
+    "index_j1", "index_j2", "index_virtual_distal", "index_tip",
+    "middle_j1", "middle_j2", "middle_virtual_distal", "middle_tip",
+    "ring_j1", "ring_j2", "ring_virtual_distal", "ring_tip",
+    "pinky_j1", "pinky_j2", "pinky_virtual_distal", "pinky_tip",
+)
+WA100_CANONICAL_PARENTS = (
+    -1,
+    0, 1, 2, 3,
+    0, 5, 6, 7,
+    0, 9, 10, 11,
+    0, 13, 14, 15,
+    0, 17, 18, 19,
+)
+# WA100 URDF opens in its XZ plane.  Canonical C is a right-handed, palm-down
+# right-hand frame: fingers point +Y, the right thumb is on -X, and the palm
+# normal (index-base cross pinky-base) points -Z.
+WA100_CANONICAL_FROM_MODEL_ROTATION = np.array([
+    [-1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [0.0, 1.0, 0.0],
+], dtype=float)
+
+
 def _vector(value: Sequence[float] | str | None, default: Sequence[float] = (0.0, 0.0, 0.0)) -> np.ndarray:
     if value is None:
         value = default
@@ -79,8 +108,9 @@ class JointGeometry:
 class WA100Kinematics:
     """Forward kinematics driven by six WA100 motor position units."""
 
-    def __init__(self, model: Mapping[str, Any]):
+    def __init__(self, model: Mapping[str, Any], source_path: str | Path | None = None):
         self.model = dict(model)
+        self.source_path = Path(source_path).resolve() if source_path is not None else None
         if int(self.model.get("schema_version", 0)) != 1:
             raise ValueError("unsupported WA100 kinematics schema")
         self.root_link = str(self.model["root_link"])
@@ -88,6 +118,17 @@ class WA100Kinematics:
         self.channel_index = {name: index for index, name in enumerate(self.channel_names)}
         if len(self.channel_names) != 6 or len(self.channel_index) != 6:
             raise ValueError("WA100 model must define six unique channels")
+        if self.channel_names != WA100_HAND_CHANNEL_NAMES:
+            raise ValueError("WA100 channel order does not match the canonical six-DOF contract")
+        canonical = json.dumps(
+            self.model, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        self.content_sha256 = hashlib.sha256(
+            self.source_path.read_bytes() if self.source_path is not None else canonical
+        ).hexdigest()
+        self.calibration_id = str(self.model["calibration"].get("calibration_id") or "")
+        if not self.calibration_id:
+            raise ValueError("WA100 calibration_id is required")
         self.finger_chains = {name: tuple(chain) for name, chain in self.model["calibration"]["finger_chains"].items()}
         self.tip_frames = dict(self.model["calibration"]["tip_frames"])
         self.joint_mappings = dict(self.model["calibration"]["joint_mappings"])
@@ -104,7 +145,8 @@ class WA100Kinematics:
 
     @classmethod
     def load(cls, path: str | Path) -> "WA100Kinematics":
-        return cls(json.loads(Path(path).read_text(encoding="utf-8")))
+        source = Path(path).resolve()
+        return cls(json.loads(source.read_text(encoding="utf-8")), source)
 
     def _validate(self) -> None:
         mapped = set(self.joint_mappings)
@@ -288,6 +330,38 @@ class WA100Kinematics:
 
     def skeleton_from_motor_units(self, motor_units: Sequence[float], base_transform: np.ndarray | None = None) -> dict[str, np.ndarray]:
         return self.skeleton_from_joint_angles(self.motor_units_to_joint_angles(motor_units), base_transform)
+
+    def canonical_skeleton_21(
+        self, motor_units: Sequence[float], base_transform: np.ndarray | None = None
+    ) -> np.ndarray:
+        """Return the stable 21-point Canonical view of the physical WA100 hand.
+
+        The physical model provides four non-root thumb points and three
+        non-root points for each two-joint finger.  A midpoint on each distal
+        link is inserted for the legacy 21-point display topology.  These four
+        virtual points are pure FK features and introduce no extra DOF.
+        """
+        native = self.skeleton_from_motor_units(motor_units)
+        result = np.zeros((21, 3), dtype=float)
+        result[0] = native["thumb"][0]
+        result[1:5] = native["thumb"][1:5]
+        for start, key in ((5, "index"), (9, "middle"), (13, "ring"), (17, "little")):
+            points = native[key]
+            if points.shape != (4, 3):
+                raise ValueError(f"unexpected WA100 finger skeleton shape: {key}={points.shape}")
+            result[start] = points[1]
+            result[start + 1] = points[2]
+            result[start + 2] = 0.5 * (points[2] + points[3])
+            result[start + 3] = points[3]
+        result = (WA100_CANONICAL_FROM_MODEL_ROTATION @ result.T).T
+        if base_transform is not None:
+            world_from_canonical = np.asarray(base_transform, dtype=float).reshape(4, 4)
+            result = (
+                world_from_canonical[:3, :3] @ result.T
+            ).T + world_from_canonical[:3, 3]
+        if not np.all(np.isfinite(result)):
+            raise ValueError("WA100 canonical skeleton contains non-finite values")
+        return result
 
     def thumb_feature_points_from_joint_angles(
         self,

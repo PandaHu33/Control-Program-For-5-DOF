@@ -209,7 +209,8 @@ class RecordingManagerTests(unittest.TestCase):
             self.assertEqual(manifest["counts"]["master_fusion"], 7)
             self.assertEqual(manifest["counts"]["canonical_goal"], 7)
             self.assertEqual(manifest["counts"]["master_controller_input"], 7)
-            self.assertEqual(manifest["counts"]["master_glove_input"], 7)
+            self.assertNotIn("master_glove_input", manifest["counts"])
+            self.assertFalse((session_dir / "master_glove_input.jsonl").exists())
             self.assertEqual(manifest["counts"]["raw_input"], 2)
             self.assertEqual(manifest["raw_input"]["counts"]["keyboard"], 1)
             self.assertEqual(manifest["raw_input"]["counts"]["pico_hand:hand_skeleton"], 1)
@@ -240,9 +241,13 @@ class RecordingManagerTests(unittest.TestCase):
             self.assertIn("preset_positions_json", episode_records[0])
             self.assertTrue((session_dir / "master_fusion.jsonl").exists())
             self.assertTrue((session_dir / "master_controller_input.jsonl").exists())
-            self.assertTrue((session_dir / "master_glove_input.jsonl").exists())
             self.assertTrue((session_dir / "raw_input.jsonl").exists())
             self.assertTrue((session_dir / "canonical_goal.jsonl").exists())
+            fusion_rows = [json.loads(line) for line in (session_dir / "master_fusion.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertNotIn("glove", fusion_rows[0])
+            self.assertEqual(set(fusion_rows[0]["glove_state"]), {"frame_id", "age_sec"})
+            canonical_rows = [json.loads(line) for line in (session_dir / "canonical_goal.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertNotIn("glove_state", canonical_rows[0])
             raw_input = [json.loads(line) for line in (session_dir / "raw_input.jsonl").read_text(encoding="utf-8").splitlines()]
             self.assertEqual([row["source"] for row in raw_input], ["keyboard", "pico_hand"])
             self.assertLess(raw_input[0]["timestamp_ns"], raw_input[1]["timestamp_ns"])

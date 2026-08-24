@@ -40,11 +40,21 @@ actual_units = [1200, 1800, 900, 1000, 1100, 1300]
 joint_angles = hand.motor_units_to_joint_angles(actual_units)
 local_skeleton = hand.skeleton_from_motor_units(actual_units)
 local_tips = hand.fingertip_positions(actual_units)
+canonical_21 = hand.canonical_skeleton_21(actual_units)
 
 # 可选：直接输出世界坐标
 world_from_hand = transform(translation=[0.8, 0.1, -0.2])
 world_skeleton = hand.skeleton_from_motor_units(actual_units, world_from_hand)
 ```
+
+`canonical_skeleton_21()` 是显控和 Canonical v4 的唯一手部骨架入口。它按
+`wrist + thumb(4) + index/middle/ring/pinky(4 each)` 输出 `21×3` 点；四指的
+第 3 点是末端关节中心和指尖的固定中点，不引入额外自由度。
+
+Canonical C 坐标系固定为右手掌心向下的默认姿态：骨架主要展开在 XY 平面，
+手指由腕部指向 +Y，右手拇指位于 −X 一侧，掌面法向（食指根到小指根的叉积）
+指向 −Z。WA100 URDF 的原生 XZ 骨架会先经过这一固定刚体旋转，再应用调用方
+提供的 `base_transform`。
 
 每根手指的骨架数组均包含手基座、各 URDF 关节特征点和最后的指尖点。
 

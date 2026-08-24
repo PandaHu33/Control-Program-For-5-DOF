@@ -10,7 +10,7 @@ Canonical 层以固定 50 Hz 发布最新有效语义目标，而键盘、游戏
 2. 检查机械臂、WA100、PICO/VR、手柄或键盘、Hi5 手套连接。检查双相机画面、时间连续性和磁盘剩余空间（至少 2 GiB）。
 3. 确认 `control_ui/config.yaml` 中 `canonical.control_path_enabled: true`。E1 正式取数时还应为 `canonical.log_enabled: true`；日志开关不得用于改变控制结果。
 4. 冻结并记录以下文件/编号：
-   - 当前配置所指向的 Hi5 模型（现为 `control_ui/hi5_hand_model_v2.json`）的 `calibration_id` 和程序显示的 SHA-256；旧记录继续使用其记录在案的 v1 标定；
+   - 当前配置所指向的 `control_ui/wa100_kinematics_model.json` 的 `calibration_id` 和程序显示的 SHA-256；schema 1–3 旧记录仅作只读显示；
    - 手套拇指标定 `calibration_id`；
    - wrist mapping、PICO 外参和相机配置版本。
 5. 任一标定文件缺失、哈希变化、编号不匹配或数值非有限时，停止本次检查，恢复正确冻结文件后重新启动程序，不得沿用旧输入。

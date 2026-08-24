@@ -45,9 +45,47 @@ canonical:
   # Logging is independent from control and may be disabled for parity checks.
   log_enabled: true
   stale_timeout_sec: 0.5
-  hi5_hand_model_path: "hi5_hand_model_v8.json"
+  # One physical six-DOF model drives PICO, glove, preset, measured and
+  # corrected Canonical hand skeletons.
+  wa100_kinematics_model_path: "wa100_kinematics_model.json"
   hand_host: "127.0.0.1"
   hand_port: 25001
+  # Source-adaptive Canonical wrist planning. Use the runtime API override for
+  # off/cross-planner E1 ablations without changing the frozen configuration.
+  planner_enabled: true
+  planner_keyboard_profile: "jerk_limited"
+  planner_gamepad_profile: "jerk_limited"
+  planner_pico_wrist_profile: "one_euro"
+  planner_vr_controller_profile: "one_euro"
+  planner_translation_max_velocity_m_s: 0.20
+  planner_translation_max_acceleration_m_s2: 1.0
+  planner_translation_max_jerk_m_s3: 10.0
+  planner_roll_max_velocity_rad_s: 1.0
+  planner_roll_max_acceleration_rad_s2: 5.0
+  planner_roll_max_jerk_rad_s3: 50.0
+  planner_one_euro_min_cutoff_hz: 2.0
+  planner_one_euro_beta: 0.6
+  planner_one_euro_derivative_cutoff_hz: 1.0
+  planner_one_euro_max_velocity_m_s: 0.45
+  planner_one_euro_max_roll_velocity_rad_s: 1.5
+  planner_one_euro_innovation_base_m: 0.003
+  planner_one_euro_prediction_horizon_sec: 0.06
+  planner_one_euro_prediction_velocity_threshold_m_s: 0.03
+  planner_one_euro_prediction_full_velocity_m_s: 0.10
+  planner_one_euro_prediction_roll_threshold_rad_s: 0.10
+  planner_one_euro_prediction_full_roll_rad_s: 0.50
+  planner_hold_timeout_sec: 0.10
+
+semantic_admittance:
+  # Safe baseline: no canonical correction and existing low-level policy unchanged.
+  mode: "OFF"
+  measured_timeout_sec: 0.25
+  current_timeout_sec: 0.25
+  trigger_ma: 80.0
+  registered_retreat_direction_C: [-1.0, 0.0, 0.0]
+  wrist_max_displacement_m: 0.025
+  wrist_max_speed_m_s: 0.02
+  hand_max_unload_ratio: 0.25
 
 arm_control:
   runtime_motion_duration_sec: 5.0

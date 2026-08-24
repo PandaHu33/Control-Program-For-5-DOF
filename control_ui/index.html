@@ -171,6 +171,8 @@
       padding-top: 10px;
       border-top: 1px solid rgba(255,255,255,0.06);
     }
+    /* debug-only override keeps the grid layout when the panel is shown in debug mode */
+    body.debug .hand-vision-panel.debug-only { display: grid; }
     .hand-vision-title {
       color: var(--muted);
       font-size: 12px;
@@ -608,7 +610,7 @@
       <div class="module-grid" id="moduleGrid"></div>
     </div>
 
-    <div class="card console-wide" id="perceptionAssistCard">
+    <div class="card console-wide debug-only" id="perceptionAssistCard">
       <h2>形态—负载一致性辅助（monitor-only）</h2>
       <div class="experiment-readout">
         <div>状态<strong id="perceptionAssistState">FREE</strong></div>
@@ -639,7 +641,14 @@
           <label><input type="radio" name="handControlMode" value="glove" />手套操控模式</label>
           <label><input type="radio" name="handControlMode" value="preset" />预编程位置模式</label>
         </div>
+        <div class="keyboard-mode-selector" id="admittanceModeSelector" aria-label="admittance mode">
+          <label><input type="radio" name="admittanceMode" value="OFF" checked />OFF</label>
+          <label><input type="radio" name="admittanceMode" value="SHADOW" />SHADOW</label>
+          <label><input type="radio" name="admittanceMode" value="HAND_ONLY" />HAND_ONLY</label>
+          <label><input type="radio" name="admittanceMode" value="ARM_HAND" />ARM_HAND</label>
+        </div>
       </div>
+      <p class="status-line" id="admittanceModeStatus">导纳模式未知（等待 WA100 遥测）</p>
       <div class="input-visual-row">
         <div class="kbd-grid" id="kbdGrid">
           <div class="kbd" data-key="KeyQ">Q</div>
@@ -676,7 +685,7 @@
       </div>
       <p class="status-line" id="keyboardTargetHint">位置控制</p>
       <p class="status-line" id="gamepadStatusHint">USB 手柄未连接</p>
-      <div class="hand-vision-panel" id="handVisionPanel">
+      <div class="hand-vision-panel debug-only" id="handVisionPanel">
         <div>
           <div class="hand-vision-title">VR wrist input</div>
           <div class="hand-vision-frame">
@@ -703,13 +712,15 @@
 
     <div class="canonical-camera-row">
     <div class="card" id="canonicalViewerCard">
-      <h2>Canonical 腕部与手部骨架（1 s 刷新）</h2>
+      <h2>Canonical 腕部与 WA100 六自由度手部</h2>
       <div class="canonical-viewer-frame">
         <canvas id="canonicalSkeletonCanvas" aria-label="Canonical wrist and hand skeleton live view"></canvas>
       </div>
       <div class="canonical-viewer-meta">
         <p class="status-line" id="canonicalViewerStatus">等待 Canonical 数据...</p>
         <p class="status-line" id="canonicalViewerPose">腕部位置：-</p>
+        <p class="status-line" id="canonicalViewerPlanner">规划器：-</p>
+        <p class="status-line" id="canonicalViewerHand">手部姿态：-</p>
       </div>
     </div>
 
@@ -1139,6 +1150,8 @@
     const canonicalSkeletonCanvas = document.getElementById("canonicalSkeletonCanvas");
     const canonicalViewerStatus = document.getElementById("canonicalViewerStatus");
     const canonicalViewerPose = document.getElementById("canonicalViewerPose");
+    const canonicalViewerPlanner = document.getElementById("canonicalViewerPlanner");
+    const canonicalViewerHand = document.getElementById("canonicalViewerHand");
 
     function finiteCanonicalVector(value, length) {
       return Array.isArray(value)
@@ -1148,11 +1161,13 @@
 
     function validCanonicalGoal(goal) {
       return goal?.type === "canonical_goal"
+        && Number(goal?.schema_version) === 4
         && finiteCanonicalVector(goal?.wrist_pose_C?.position_m, 3)
         && finiteCanonicalVector(goal?.wrist_pose_C?.orientation_xyzw, 4)
-        && Array.isArray(goal?.hand_skeleton_w)
-        && goal.hand_skeleton_w.length === 21
-        && goal.hand_skeleton_w.every(point => finiteCanonicalVector(point, 3));
+        && finiteCanonicalVector(goal?.hand_position_units, 6)
+        && Array.isArray(goal?.hand_skeleton_C)
+        && goal.hand_skeleton_C.length === 21
+        && goal.hand_skeleton_C.every(point => finiteCanonicalVector(point, 3));
     }
 
     function rotateCanonicalPoint(point, quaternion) {
@@ -1242,13 +1257,14 @@
       const { context, width, height } = prepared;
       const wrist = goal.wrist_pose_C.position_m.map(Number);
       const quaternion = goal.wrist_pose_C.orientation_xyzw.map(Number);
-      const worldPoints = goal.hand_skeleton_w.map(local => {
+      const canonicalPoints = goal.hand_skeleton_C;
+      const worldPoints = canonicalPoints.map(local => {
         const rotated = rotateCanonicalPoint(local, quaternion);
         return rotated.map((value, axis) => value + wrist[axis]);
       });
       const projected = worldPoints.map(point => canonicalProjection(point, wrist, width, height));
       const wristMask = Number(goal.validity?.wrist_dof_mask || 0);
-      const handMask = Number(goal.validity?.hand_node_mask || 0);
+      const handMask = Number(goal.validity?.hand_dof_mask || 0);
       const fullyValid = wristMask !== 0 && handMask !== 0;
 
       context.clearRect(0, 0, width, height);
@@ -1414,6 +1430,29 @@
       }
       if (canonicalViewerPose) {
         canonicalViewerPose.textContent = `腕部：X ${pose[0].toFixed(3)} / Y ${pose[1].toFixed(3)} / Z ${pose[2].toFixed(3)} m · Δ ${canonicalWristDelta.map(value => (value * 1000).toFixed(1)).join(" / ")} mm`;
+      }
+      if (canonicalViewerPlanner) {
+        const planning = renderedCanonicalGoal.planning || {};
+        const rawPose = renderedCanonicalGoal.raw_intent?.wrist_pose_C?.position_m;
+        const rawErrorMm = finiteCanonicalVector(rawPose, 3)
+          ? Math.hypot(...pose.map((value, axis) => value - Number(rawPose[axis]))) * 1000
+          : 0;
+        canonicalViewerPlanner.textContent = `规划器：${planning.name || "off"} · raw→planned ${rawErrorMm.toFixed(1)} mm · source ${(Number(planning.source_age_sec || 0) * 1000).toFixed(1)} ms · compute ${Number(planning.processing_time_ms || 0).toFixed(3)} ms · FK ${renderedCanonicalGoal.calibrations?.wa100_kinematics || "-"}`;
+        canonicalViewerPlanner.classList.toggle("warning", !planning.valid_for_dispatch);
+      }
+      if (canonicalViewerHand) {
+        const formatUnits = values => finiteCanonicalVector(values, 6)
+          ? values.map(value => Number(value).toFixed(0)).join("/") : "-";
+        const nominalUnits = renderedCanonicalGoal.canonical_nominal?.hand_position_units;
+        const measuredUnits = renderedCanonicalGoal.canonical_measured?.hand_position_units;
+        const correctedUnits = renderedCanonicalGoal.canonical_corrected?.hand_position_units;
+        const handMask = Number(renderedCanonicalGoal.validity?.hand_dof_mask || 0);
+        const gestures = renderedCanonicalGoal.gestures || {};
+        const indexPinch = gestures.thumb_index_pinch || {};
+        const middlePinch = gestures.thumb_middle_pinch || {};
+        const anchor = gestures.active_anchor && gestures.active_anchor !== "none" ? gestures.active_anchor : "无";
+        canonicalViewerHand.textContent = `WA100 mask 0x${handMask.toString(16).padStart(2, "0")} · 目标 ${formatUnits(nominalUnits)} · 实测 ${formatUnits(measuredUnits)} · 修正 ${formatUnits(correctedUnits)} · 捏合 ${Number(indexPinch.normalized_distance ?? NaN).toFixed(3)}/${Number(middlePinch.normalized_distance ?? NaN).toFixed(3)} · 锚点 ${anchor}`;
+        canonicalViewerHand.classList.toggle("warning", gestures.active_anchor && gestures.active_anchor !== "none");
       }
     }
 
@@ -1703,6 +1742,7 @@
     })();
     const ARM_CLIENT_BYTES = Uint8Array.from(ARM_CLIENT_ID.match(/../g).map((value) => parseInt(value, 16)));
     let armAuthority = { mode: "idle", owner_id: null, telemetry_fresh: false };
+    let admittanceAssist = { mode: "unknown", retreat_active: false, retreat_level: 0, fresh: false };
     let armControlPending = false;
 
     function ownsArmAuthority(mode=armAuthority.mode) {
@@ -1793,6 +1833,8 @@
       if (data.hand_mode) setHandModeUi(data.hand_mode);
       if (data.arm_control) setArmAuthorityUi(data.arm_control);
       if (data.perception_assist) renderPerceptionAssist(data.perception_assist);
+      if (data.admittance_assist) renderAdmittanceAssist(data.admittance_assist);
+      if (data.semantic_admittance) renderSemanticAdmittance(data.semantic_admittance);
       updateButtonAvailability(data.state || "OFFLINE");
       if (moduleGrid) {
         const modules = { ...(data.modules || {}) };
@@ -1809,6 +1851,41 @@
         consoleLog.innerHTML = "";
         data.logs.forEach((item) => appendConsoleLog(item.level, item.message, item.detail));
       }
+    }
+
+    function renderAdmittanceAssist(state) {
+      if (!state) return;
+      const mode = String(state.mode || "unknown");
+      admittanceAssist = {
+        mode,
+        retreat_active: !!state.retreat_active,
+        retreat_level: Number(state.retreat_level) || 0,
+        fresh: !!state.fresh,
+      };
+      // Mirror the WA100-reported mode into the radio group.  A change event
+      // switches immediately, so the echo and the selection always agree.
+      if (ADMITTANCE_MODE_VALUES.includes(mode)) {
+        const radio = document.querySelector(`input[name="admittanceMode"][value="${mode}"]`);
+        if (radio) radio.checked = true;
+      }
+      const statusEl = document.getElementById("admittanceModeStatus");
+      if (statusEl) {
+        const stale = state.fresh ? "" : " · 遥测过期";
+        const retreat = state.retreat_active
+          ? ` · 退让中 R=${Number(state.retreat_level || 0).toFixed(2)}` : "";
+        statusEl.textContent = `导纳模式: ${mode}${retreat}${stale}`;
+        statusEl.classList.toggle("warning", !!state.retreat_active);
+      }
+    }
+
+    function renderSemanticAdmittance(state) {
+      const mode = String(state?.mode || "OFF").toUpperCase();
+      if (ADMITTANCE_MODE_VALUES.includes(mode)) {
+        const radio = document.querySelector(`input[name="admittanceMode"][value="${mode}"]`);
+        if (radio) radio.checked = true;
+      }
+      const statusEl = document.getElementById("admittanceModeStatus");
+      if (statusEl) statusEl.textContent = `中央语义导纳: ${mode}`;
     }
 
     function setHandVisionPreviewActive(active) {
@@ -2291,6 +2368,32 @@
       });
     });
 
+    const ADMITTANCE_MODE_VALUES = ["OFF", "SHADOW", "HAND_ONLY", "ARM_HAND"];
+    async function sendAdmittanceModeRequest(mode) {
+      appendConsoleLog("ACTION", `POST /api/hand/admittance-mode (${mode})`);
+      try {
+        const res = await fetch(`${API_BASE}/api/semantic-admittance/mode`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode }),
+        });
+        const data = await res.json();
+        appendConsoleLog(data.ok ? "OK" : "ERROR", data.message || "/api/hand/admittance-mode");
+        renderSupervisorStatus(data.status || data);
+        return data;
+      } catch (err) {
+        appendConsoleLog("ERROR", "后端服务不可达，导纳模式未切换", err.message);
+        return null;
+      }
+    }
+    // Selecting an admittance mode switches immediately (radio button style,
+    // same row as the local input device selectors).
+    document.querySelectorAll('input[name="admittanceMode"]').forEach((radio) => {
+      radio.addEventListener("change", () => {
+        sendAdmittanceModeRequest(String(radio.value || "OFF"));
+      });
+    });
+
     if (sendHandCustomPositionBtn) {
       sendHandCustomPositionBtn.addEventListener("click", () => {
         const positions = [...document.querySelectorAll(".hand-position-input")].map((input) => {
@@ -2646,7 +2749,7 @@
       const canonical = data.canonical || {};
       if (canonicalSourcesEl) {
         canonicalSourcesEl.textContent = canonical.wrist_source || canonical.hand_source
-          ? `${canonical.wrist_source || "-"} / ${canonical.hand_source || "-"}`
+          ? `${canonical.wrist_source || "-"} / ${canonical.hand_source || "-"} · ${canonical.planning?.name || "off"}`
           : "-";
       }
       if (canonicalLastErrorEl) canonicalLastErrorEl.textContent = canonical.last_error || "-";
@@ -3593,7 +3696,7 @@
     const GRIPPER_ORDER_INDEX = 10;
     const JOINT_STEP = 0.05;
     const requestedControlPeriod = Number(new URLSearchParams(location.search).get("arm_period_ms"));
-    const ARM_COMMAND_PERIOD_MS = [20, 50, 100].includes(requestedControlPeriod) ? requestedControlPeriod : 100;
+    const ARM_COMMAND_PERIOD_MS = [20, 50, 100].includes(requestedControlPeriod) ? requestedControlPeriod : 20;
     const CONTROL_PERIOD_SCALE = ARM_COMMAND_PERIOD_MS / 100.0;
     const GAMEPAD_DEADZONE = 0.15;
     const GAMEPAD_Z_DOWN_BUTTON = 4;
@@ -4271,10 +4374,10 @@
       };
 
       if (modeSel === 'keyboard' || modeSel === 'gamepad' || modeSel === 'hand_vision' || modeSel === 'controller_delta') {
-        orderVec[0] = targetAngles[0]; // J1 Target Angle
-        orderVec[1] = targetAngles[1]; // J2 Target Angle
-        orderVec[2] = targetAngles[2]; // J3 Target Angle
-        orderVec[3] = targetAngles[3]; // J4 Target Angle
+        orderVec[0] = targetAngles[0]; // J1 nominal target; backend applies canonical correction
+        orderVec[1] = targetAngles[1]; // J2 nominal target
+        orderVec[2] = targetAngles[2]; // J3 nominal target
+        orderVec[3] = targetAngles[3]; // J4 nominal target
         if (GRIPPER_ORDER_INDEX < orderVec.length) {
           orderVec[GRIPPER_ORDER_INDEX] = activeGripperCommand(modeSel); // KB_D gripper: 1 close, 0 idle, -1 open
         }

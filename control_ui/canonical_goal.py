@@ -6,7 +6,6 @@ contain contact inference, admittance, or any E2 closed-loop behaviour.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import threading
@@ -17,12 +16,26 @@ from typing import Any, Dict, Optional, Sequence
 import numpy as np
 
 try:
-    from .wa100_kinematics import WA100Kinematics
+    from .wa100_kinematics import (
+        WA100Kinematics,
+        WA100_CANONICAL_PARENTS,
+        WA100_CANONICAL_POINT_NAMES,
+        WA100_HAND_CHANNEL_NAMES,
+    )
 except ImportError:
-    from wa100_kinematics import WA100Kinematics
+    from wa100_kinematics import (
+        WA100Kinematics,
+        WA100_CANONICAL_PARENTS,
+        WA100_CANONICAL_POINT_NAMES,
+        WA100_HAND_CHANNEL_NAMES,
+    )
 
+try:
+    from .canonical_planning import CanonicalPlannerConfig, CanonicalWristPlanner
+except ImportError:
+    from canonical_planning import CanonicalPlannerConfig, CanonicalWristPlanner
 
-CANONICAL_SCHEMA_VERSION = 1
+CANONICAL_SCHEMA_VERSION = 4
 WRIST_DOF_POSITION_X = 1 << 0
 WRIST_DOF_POSITION_Y = 1 << 1
 WRIST_DOF_POSITION_Z = 1 << 2
@@ -30,17 +43,9 @@ WRIST_DOF_ROLL = 1 << 3
 WRIST_SUPPORTED_MASK = (
     WRIST_DOF_POSITION_X | WRIST_DOF_POSITION_Y | WRIST_DOF_POSITION_Z | WRIST_DOF_ROLL
 )
-HAND_ALL_VALID_MASK = (1 << 21) - 1
-
-CANONICAL_JOINT_NAMES = (
-    "wrist",
-    "thumb_cmc", "thumb_mcp", "thumb_ip", "thumb_tip",
-    "index_mcp", "index_pip", "index_dip", "index_tip",
-    "middle_mcp", "middle_pip", "middle_dip", "middle_tip",
-    "ring_mcp", "ring_pip", "ring_dip", "ring_tip",
-    "pinky_mcp", "pinky_pip", "pinky_dip", "pinky_tip",
-)
-CANONICAL_PARENTS = (-1, 0, 1, 2, 3, 0, 5, 6, 7, 0, 9, 10, 11, 0, 13, 14, 15, 0, 17, 18, 19)
+HAND_ALL_VALID_MASK = (1 << 6) - 1
+CANONICAL_JOINT_NAMES = WA100_CANONICAL_POINT_NAMES
+CANONICAL_PARENTS = WA100_CANONICAL_PARENTS
 E1_CONDITIONS = {
     ("hand_vision", "vr"): "M1-PICO",
     ("controller_delta", "glove"): "M2-VR-GLOVE",
@@ -139,274 +144,126 @@ def integrate_wrist_pose(
     }
 
 
-class FrozenHi5HandModel:
-    """Frozen kinematic model converting Hi5 local rotations into 21 points."""
-
-    def __init__(self, payload: Dict[str, Any], source_path: Optional[Path] = None):
-        if int(payload.get("schema_version", 0)) != 1:
-            raise ValueError("unsupported Hi5 hand model schema")
-        offsets = np.asarray(payload.get("offsets_w_m"), dtype=float)
-        if offsets.shape != (21, 3) or not np.all(np.isfinite(offsets)):
-            raise ValueError("Hi5 hand model must contain finite offsets_w_m[21][3]")
-        parents = tuple(int(value) for value in payload.get("parents", []))
-        if parents != CANONICAL_PARENTS:
-            raise ValueError("Hi5 hand model parent order does not match canonical order")
-        source_indices = payload.get("source_rotation_indices")
-        if not isinstance(source_indices, list) or len(source_indices) != 21:
-            raise ValueError("Hi5 source_rotation_indices must contain 21 entries")
-        self.offsets = offsets
-        self.source_rotation_indices = tuple(None if value is None else int(value) for value in source_indices)
-        self.euler_order = str(payload.get("euler_order", "zyx")).lower()
-        neutral = np.asarray(payload.get("neutral_source_rotations_deg", np.zeros((21, 3))), dtype=float)
-        if neutral.shape != (21, 3) or not np.all(np.isfinite(neutral)):
-            raise ValueError("Hi5 neutral_source_rotations_deg must contain finite [21][3] values")
-        self.neutral_source_rotations_deg = neutral
-        signs = np.asarray(payload.get("source_rotation_signs", np.ones((21, 3))), dtype=float)
-        if signs.shape != (21, 3) or not np.all(np.isin(signs, (-1.0, 1.0))):
-            raise ValueError("Hi5 source_rotation_signs must contain only +/-1 [21][3] values")
-        self.source_rotation_signs = signs
-        self.canonical_scale = float(payload.get("canonical_scale", 1.0))
-        if not math.isfinite(self.canonical_scale) or self.canonical_scale <= 0.0:
-            raise ValueError("Hi5 canonical_scale must be finite and positive")
-        thumb_mapping = payload.get("thumb_semantic_mapping")
-        self.thumb_semantic_mapping = None
-        if thumb_mapping is not None:
-            if not isinstance(thumb_mapping, dict):
-                raise ValueError("Hi5 thumb_semantic_mapping must be an object")
-            pitch_weights = np.asarray(thumb_mapping.get("pitch_joint_weights"), dtype=float)
-            yaw_weights = np.asarray(thumb_mapping.get("yaw_joint_weights"), dtype=float)
-            if pitch_weights.shape != (3,) or yaw_weights.shape != (3,) or not all(
-                np.all(np.isfinite(value)) for value in (pitch_weights, yaw_weights)
-            ):
-                raise ValueError("Hi5 thumb semantic joint weights must contain three finite values")
-            open_target = float(thumb_mapping.get("open_target", 2000.0))
-            close_target = float(thumb_mapping.get("close_target", 0.0))
-            if not all(math.isfinite(value) for value in (open_target, close_target)) or abs(open_target - close_target) < 1e-9:
-                raise ValueError("Hi5 thumb semantic target range is invalid")
-            self.thumb_semantic_mapping = {
-                "pitch_target_index": int(thumb_mapping.get("pitch_target_index", 0)),
-                "yaw_target_index": int(thumb_mapping.get("yaw_target_index", 1)),
-                "open_target": open_target,
-                "close_target": close_target,
-                "pitch_max_deg": float(thumb_mapping.get("pitch_max_deg", 0.0)),
-                "yaw_max_deg": float(thumb_mapping.get("yaw_max_deg", 0.0)),
-                "pitch_joint_weights": pitch_weights,
-                "yaw_joint_weights": yaw_weights,
-            }
-        self.wa100_thumb_kinematics = None
-        self.wa100_thumb_rotation = None
-        self.wa100_thumb_translation = None
-        wa100_thumb = payload.get("wa100_thumb_reference")
-        if wa100_thumb is not None:
-            if not isinstance(wa100_thumb, dict) or source_path is None:
-                raise ValueError("Hi5 wa100_thumb_reference requires a file-backed model")
-            reference_path = (Path(source_path).resolve().parent / str(wa100_thumb.get("kinematics_model_path"))).resolve()
-            expected_hash = str(wa100_thumb.get("kinematics_model_sha256") or "").lower()
-            actual_hash = hashlib.sha256(reference_path.read_bytes()).hexdigest()
-            if expected_hash and actual_hash != expected_hash:
-                raise ValueError("WA100 thumb reference model sha256 mismatch")
-            kinematics = WA100Kinematics.load(reference_path)
-            expected_calibration = str(wa100_thumb.get("calibration_id") or "")
-            actual_calibration = str(kinematics.model["calibration"].get("calibration_id") or "")
-            if expected_calibration and actual_calibration != expected_calibration:
-                raise ValueError("WA100 thumb reference calibration_id mismatch")
-            rotation = np.asarray(wa100_thumb.get("canonical_from_wa100_rotation"), dtype=float)
-            translation = np.asarray(wa100_thumb.get("canonical_translation_m", [0.0, 0.0, 0.0]), dtype=float)
-            if rotation.shape != (3, 3) or translation.shape != (3,) or not all(
-                np.all(np.isfinite(value)) for value in (rotation, translation)
-            ):
-                raise ValueError("WA100 thumb Canonical registration is invalid")
-            if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-9) or not math.isclose(
-                float(np.linalg.det(rotation)), 1.0, abs_tol=1e-9
-            ):
-                raise ValueError("WA100 thumb Canonical registration must be a proper rotation")
-            self.wa100_thumb_kinematics = kinematics
-            self.wa100_thumb_rotation = rotation
-            self.wa100_thumb_translation = translation
-        self.calibration_id = str(payload.get("calibration_id") or "")
-        if not self.calibration_id:
-            raise ValueError("Hi5 hand model calibration_id is required")
-        canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        self.content_sha256 = hashlib.sha256(canonical).hexdigest()
-        expected = str(payload.get("content_sha256") or "").strip().lower()
-        if expected and expected != self.content_sha256:
-            # The hash field itself cannot be included in its own digest.  Accept
-            # the conventional digest computed after removing that field.
-            unhashed = dict(payload)
-            unhashed.pop("content_sha256", None)
-            raw = json.dumps(unhashed, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            self.content_sha256 = hashlib.sha256(raw).hexdigest()
-            if expected != self.content_sha256:
-                raise ValueError("Hi5 hand model content_sha256 mismatch")
-        self.source_path = source_path
-
-    @classmethod
-    def load(cls, path: Path | str) -> "FrozenHi5HandModel":
-        source = Path(path).resolve()
-        return cls(json.loads(source.read_text(encoding="utf-8")), source)
-
-    def skeleton(self, rotations: Any, mapped_target_units: Any = None) -> np.ndarray:
-        values = np.asarray(rotations, dtype=float).reshape(21, 3)
-        if not np.all(np.isfinite(values)):
-            raise ValueError("Hi5 rotations contain non-finite values")
-        positions = np.zeros((21, 3), dtype=float)
-        orientations = np.zeros((21, 4), dtype=float)
-        orientations[:, 3] = 1.0
-        thumb_locals = None
-        if self.thumb_semantic_mapping is not None and mapped_target_units is not None:
-            targets = np.asarray(mapped_target_units, dtype=float).reshape(-1)
-            mapping = self.thumb_semantic_mapping
-            required = max(mapping["pitch_target_index"], mapping["yaw_target_index"])
-            if targets.size <= required or not np.all(np.isfinite(targets)):
-                raise ValueError("Hi5 mapped_target_units cannot drive semantic thumb mapping")
-            denominator = mapping["close_target"] - mapping["open_target"]
-            pitch_ratio = float(np.clip(
-                (targets[mapping["pitch_target_index"]] - mapping["open_target"]) / denominator, 0.0, 1.0
-            ))
-            yaw_ratio = float(np.clip(
-                (targets[mapping["yaw_target_index"]] - mapping["open_target"]) / denominator, 0.0, 1.0
-            ))
-            pitch = pitch_ratio * mapping["pitch_max_deg"] * mapping["pitch_joint_weights"]
-            yaw = yaw_ratio * mapping["yaw_max_deg"] * mapping["yaw_joint_weights"]
-            thumb_locals = [
-                euler_deg_to_quaternion_xyzw([0.0, pitch[index], yaw[index]], self.euler_order)
-                for index in range(3)
-            ]
-        for joint in range(1, 21):
-            parent = CANONICAL_PARENTS[joint]
-            positions[joint] = positions[parent] + quaternion_rotate_xyzw(
-                orientations[parent], self.offsets[joint]
-            )
-            source_index = self.source_rotation_indices[joint]
-            if thumb_locals is not None and joint in (1, 2, 3):
-                local = thumb_locals[joint - 1]
-            elif source_index is None:
-                local = np.array([0.0, 0.0, 0.0, 1.0], dtype=float)
-            else:
-                relative_deg = (
-                    values[source_index] - self.neutral_source_rotations_deg[source_index] + 180.0
-                ) % 360.0 - 180.0
-                relative_deg *= self.source_rotation_signs[source_index]
-                local = euler_deg_to_quaternion_xyzw(relative_deg, self.euler_order)
-            orientations[joint] = normalize_quaternion_xyzw(
-                quaternion_multiply_xyzw(orientations[parent], local)
-            )
-        if self.wa100_thumb_kinematics is not None and mapped_target_units is not None:
-            targets = np.asarray(mapped_target_units, dtype=float).reshape(-1)
-            if targets.shape != (6,) or not np.all(np.isfinite(targets)):
-                raise ValueError("Hi5 mapped_target_units cannot drive WA100 thumb reference")
-            thumb_wa100 = self.wa100_thumb_kinematics.thumb_feature_points_from_motor_units(targets)
-            positions[1:5] = (
-                self.wa100_thumb_rotation @ thumb_wa100.T
-            ).T + self.wa100_thumb_translation
-        # Scale about the wrist origin, preserving the Canonical wrist pose.
-        return positions * self.canonical_scale
-
-    def preset_skeleton(self, target_units: Any) -> np.ndarray:
-        """Build the Canonical 21-point skeleton for a preset 6-channel target.
-
-        Uses the same 21-joint layout and wrist-origin Canonical frame as
-        ``pico_skeleton_in_wrist_frame`` so preset postures can be compared
-        directly with PICO/glove recordings (0=wrist, 1-4=thumb, 5-8=index,
-        9-12=middle, 13-16=ring, 17-20=pinky).  The thumb follows the
-        registered WA100 kinematic reference (motor units -> physical joint
-        angles -> feature points), exactly like the glove pipeline; the four
-        fingers bend from the straight FK model by their per-finger curl
-        ratios (2000 = open, 0 = closed).
-        """
-        targets = np.asarray(target_units, dtype=float).reshape(-1)
-        if targets.shape != (6,) or not np.all(np.isfinite(targets)):
-            raise ValueError("preset target_units must contain six finite values")
-        if self.wa100_thumb_kinematics is None:
-            raise ValueError("preset skeleton requires the WA100 thumb kinematic reference")
-        positions = np.zeros((21, 3), dtype=float)
-        orientations = np.zeros((21, 4), dtype=float)
-        orientations[:, 3] = 1.0
-        thumb_wa100 = self.wa100_thumb_kinematics.thumb_feature_points_from_motor_units(targets)
-        positions[1:5] = (self.wa100_thumb_rotation @ thumb_wa100.T).T + self.wa100_thumb_translation
-        # Four fingers: (MCP, PIP, DIP, TIP, channel).  Bones extend along +x
-        # in the Canonical FK model; a positive bend rotates the tip toward -z,
-        # i.e. into the palm for the PICO-compatible palm frame.
-        fingers = (
-            (5, 6, 7, 8, 2),
-            (9, 10, 11, 12, 3),
-            (13, 14, 15, 16, 4),
-            (17, 18, 19, 20, 5),
-        )
-        bend_deg = (90.0, 100.0, 70.0)  # MCP, PIP, DIP flexion at full curl
-        for mcp, pip, dip, tip, channel in fingers:
-            ratio = float(np.clip((2000.0 - targets[channel]) / 2000.0, 0.0, 1.0))
-            curls = {mcp: ratio * bend_deg[0], pip: ratio * bend_deg[1], dip: ratio * bend_deg[2], tip: 0.0}
-            for joint in (mcp, pip, dip, tip):
-                parent = CANONICAL_PARENTS[joint]
-                positions[joint] = positions[parent] + quaternion_rotate_xyzw(
-                    orientations[parent], self.offsets[joint]
-                )
-                local = euler_deg_to_quaternion_xyzw([0.0, curls[joint], 0.0], self.euler_order)
-                orientations[joint] = normalize_quaternion_xyzw(
-                    quaternion_multiply_xyzw(orientations[parent], local)
-                )
-        return positions * self.canonical_scale
-
-
-def pico_skeleton_in_wrist_frame(positions: Any) -> np.ndarray:
-    points = np.asarray(positions, dtype=float).reshape(21, 3)
-    if not np.all(np.isfinite(points)):
-        raise ValueError("PICO hand positions contain non-finite values")
-    wrist = points[0]
-    x_axis = points[5] - wrist
-    middle = points[9] - wrist
-    x_norm = float(np.linalg.norm(x_axis))
-    if x_norm <= 1e-9:
-        raise ValueError("PICO palm x axis is degenerate")
-    x_axis /= x_norm
-    # PICO's right-hand stream uses the opposite tracked palm normal from the
-    # Hi5/WA100 registration.  This cross order is the empirically verified
-    # palm-down display for the recorded PICO right hand.
-    z_axis = np.cross(x_axis, middle)
-    z_norm = float(np.linalg.norm(z_axis))
-    if z_norm <= 1e-9:
-        raise ValueError("PICO palm plane is degenerate")
-    z_axis /= z_norm
-    y_axis = np.cross(z_axis, x_axis)
-    rotation_world_from_wrist = np.column_stack((x_axis, y_axis, z_axis))
-    local = (rotation_world_from_wrist.T @ (points - wrist).T).T
-    # The PICO right-hand joint stream is laterally mirrored relative to the
-    # operator-facing Canonical display.  Mirror only left/right so the thumb
-    # is shown on the left while preserving the empirically verified
-    # palm-down normal above.
-    local[:, 1] *= -1.0
-    return local
-
-
 def validate_canonical_goal(payload: Any) -> tuple[bool, str]:
     if not isinstance(payload, dict) or payload.get("type") != "canonical_goal":
         return False, "invalid_type"
-    if int(payload.get("schema_version", 0)) != CANONICAL_SCHEMA_VERSION:
+    schema_version = int(payload.get("schema_version", 0))
+    if schema_version not in {1, 2, 3, CANONICAL_SCHEMA_VERSION}:
         return False, "invalid_schema"
     if _finite_vector(payload.get("adapter_wrist_delta"), 6) is None:
         return False, "invalid_adapter_wrist_delta"
     pose = payload.get("wrist_pose_C") or {}
     if _finite_vector(pose.get("position_m"), 3) is None or normalize_quaternion_xyzw(pose.get("orientation_xyzw")) is None:
         return False, "invalid_wrist_pose"
+    validity = payload.get("validity") or {}
+    hand_mask_key = "hand_dof_mask" if schema_version >= 4 else "hand_node_mask"
+    if not isinstance(validity.get("wrist_dof_mask"), int) or not isinstance(validity.get(hand_mask_key), int):
+        return False, "invalid_validity_masks"
+    if schema_version >= 2:
+        raw_intent = payload.get("raw_intent") or {}
+        raw_pose = raw_intent.get("wrist_pose_C") or {}
+        if (
+            _finite_vector(raw_intent.get("adapter_wrist_delta"), 6) is None
+            or _finite_vector(raw_pose.get("position_m"), 3) is None
+            or normalize_quaternion_xyzw(raw_pose.get("orientation_xyzw")) is None
+            or _finite_vector(raw_intent.get("arm_target_q_rad"), 4) is None
+        ):
+            return False, "invalid_raw_intent"
+        planning = payload.get("planning") or {}
+        if (
+            planning.get("name") not in {"off", "jerk_limited", "one_euro"}
+            or planning.get("profile") != planning.get("name")
+            or not isinstance(planning.get("valid_for_dispatch"), bool)
+            or _finite_vector([planning.get("processing_time_ms")], 1) is None
+        ):
+            return False, "invalid_planning"
+    if schema_version < 4:
+        try:
+            skeleton = np.asarray(payload.get("hand_skeleton_w"), dtype=float)
+        except (TypeError, ValueError):
+            return False, "invalid_hand_skeleton"
+        return (True, "") if skeleton.shape == (21, 3) and np.all(np.isfinite(skeleton)) else (False, "invalid_hand_skeleton")
+
+    if payload.get("hand_source") not in {"pico_hand", "data_glove", "preset_hand"}:
+        return False, "invalid_hand_source"
+    if _finite_vector(payload.get("hand_position_units"), 6) is None:
+        return False, "invalid_hand_position_units"
     try:
-        skeleton = np.asarray(payload.get("hand_skeleton_w"), dtype=float)
+        skeleton_c = np.asarray(payload.get("hand_skeleton_C"), dtype=float)
     except (TypeError, ValueError):
         return False, "invalid_hand_skeleton"
-    if skeleton.shape != (21, 3) or not np.all(np.isfinite(skeleton)):
-        return False, "invalid_hand_skeleton"
-    validity = payload.get("validity") or {}
-    if not isinstance(validity.get("wrist_dof_mask"), int) or not isinstance(validity.get("hand_node_mask"), int):
-        return False, "invalid_validity_masks"
+    model_sha = str((payload.get("calibrations") or {}).get("wa100_kinematics_sha256") or "")
+    if (
+        skeleton_c.shape != (21, 3)
+        or not np.all(np.isfinite(skeleton_c))
+        or not 0 <= int(validity.get("hand_dof_mask", -1)) <= HAND_ALL_VALID_MASK
+        or len(model_sha) != 64
+        or any(character not in "0123456789abcdef" for character in model_sha)
+        or "hand_pose_C" in payload
+        or "hand_skeleton_w" in payload
+        or "hand" in (payload.get("raw_intent") or {})
+    ):
+        return False, "invalid_wa100_hand_state"
+    gestures = payload.get("gestures") or {}
+    for key in ("thumb_index_pinch", "thumb_middle_pinch"):
+        state = gestures.get(key) or {}
+        if (
+            not isinstance(state.get("active"), bool)
+            or _finite_vector([state.get("normalized_distance"), state.get("confidence")], 2) is None
+            or float(state.get("normalized_distance")) < 0.0
+            or not 0.0 <= float(state.get("confidence")) <= 1.0
+        ):
+            return False, "invalid_canonical_gestures"
     return True, ""
+
+
+class WA100PinchDetector:
+    """Hysteretic pinch states derived only from WA100 FK feature points."""
+
+    def __init__(self, enter_threshold: float = 0.55, release_threshold: float = 0.70):
+        self.enter_threshold = float(enter_threshold)
+        self.release_threshold = float(release_threshold)
+        self.states = {"thumb_index_pinch": False, "thumb_middle_pinch": False}
+
+    def update(self, skeleton: Any) -> Dict[str, Any]:
+        points = np.asarray(skeleton, dtype=float).reshape(21, 3)
+        palm_width = max(float(np.linalg.norm(points[5] - points[17])), 1e-9)
+        result: Dict[str, Any] = {
+            "active_anchor": "none",
+            "enter_threshold": self.enter_threshold,
+            "release_threshold": self.release_threshold,
+        }
+        for key, tip in (("thumb_index_pinch", 8), ("thumb_middle_pinch", 12)):
+            distance = float(np.linalg.norm(points[4] - points[tip])) / palm_width
+            active = self.states[key]
+            active = distance <= (self.release_threshold if active else self.enter_threshold)
+            self.states[key] = active
+            result[key] = {
+                "active": active,
+                "normalized_distance": distance,
+                "confidence": float(np.clip(1.0 - distance / self.release_threshold, 0.0, 1.0)),
+            }
+        if result["thumb_index_pinch"]["active"]:
+            result["active_anchor"] = "thumb_index"
+        elif result["thumb_middle_pinch"]["active"]:
+            result["active_anchor"] = "thumb_middle"
+        return result
 
 
 class CanonicalGoalBuilder:
     """Thread-safe aggregation of one wrist adapter and one hand adapter."""
 
-    def __init__(self, hand_model_path: Path | str, stale_timeout_sec: float = 0.5):
+    def __init__(self, kinematics_model_path: Path | str, stale_timeout_sec: float = 0.5,
+                 planner_config: Optional[CanonicalPlannerConfig | Dict[str, Any]] = None):
         self.lock = threading.RLock()
-        self.hand_model = FrozenHi5HandModel.load(hand_model_path)
+        self.hand_kinematics = WA100Kinematics.load(kinematics_model_path)
+        self.schema_version = CANONICAL_SCHEMA_VERSION
+        self.pinch_detector = WA100PinchDetector()
+        if isinstance(planner_config, CanonicalPlannerConfig):
+            resolved_planner_config = planner_config
+        else:
+            resolved_planner_config = CanonicalPlannerConfig.from_mapping(planner_config)
+        self.wrist_planner = CanonicalWristPlanner(resolved_planner_config)
         self.stale_timeout_ns = max(1, int(float(stale_timeout_sec) * 1e9))
         self.output_seq = 0
         self.wrist: Optional[Dict[str, Any]] = None
@@ -450,32 +307,22 @@ class CanonicalGoalBuilder:
         self, source: str, value: Dict[str, Any], receive_utc_ns: Optional[int] = None
     ) -> tuple[bool, str]:
         source = str(source)
+        if source not in {"pico_hand", "data_glove", "preset_hand"}:
+            return False, "unsupported_hand_source"
         receive_utc_ns = int(receive_utc_ns or time.time_ns())
-        reasons = []
+        started_ns = time.perf_counter_ns()
+        targets = value.get("mapped_target_units")
+        if source == "preset_hand" and targets is None:
+            targets = value.get("positions")
+        target_values = _finite_vector(targets, 6)
+        if target_values is None or not np.all((target_values >= 0.0) & (target_values <= 2000.0)):
+            return False, "hand_position_units_must_be_six_values_in_0_2000"
         try:
-            if source == "pico_hand":
-                skeleton = pico_skeleton_in_wrist_frame(value.get("rightPositions"))
-                calibration_id = str(value.get("calibration_id") or "pico-xr-hands-direct-v1")
-            elif source == "data_glove":
-                supplied_id = str(value.get("hand_model_calibration_id") or self.hand_model.calibration_id)
-                if supplied_id != self.hand_model.calibration_id:
-                    return False, "hand_model_calibration_id_mismatch"
-                skeleton = self.hand_model.skeleton(
-                    value.get("rightRotations"), value.get("mapped_target_units")
-                )
-                calibration_id = str(value.get("glove_calibration_id") or value.get("calibration_id") or "")
-                if not calibration_id:
-                    reasons.append("missing_glove_calibration_id")
-            else:
-                return False, "unsupported_hand_source"
+            skeleton = self.hand_kinematics.canonical_skeleton_21(target_values)
         except (TypeError, ValueError) as exc:
             return False, str(exc)
-        targets = value.get("mapped_target_units")
-        target_values = _finite_vector(targets, 6)
-        if target_values is not None and not np.all((target_values >= 0.0) & (target_values <= 2000.0)):
-            target_values = None
-        if target_values is None:
-            reasons.append("missing_legacy_compatible_hand_targets")
+        gestures = self.pinch_detector.update(skeleton)
+        calibration_id = str(value.get("glove_calibration_id") or value.get("calibration_id") or "")
         with self.lock:
             self.hand = {
                 "source": source,
@@ -483,9 +330,11 @@ class CanonicalGoalBuilder:
                 "source_time_ns": int(value.get("source_timestamp_ns") or value.get("receiver_wall_time_ns") or receive_utc_ns),
                 "receive_utc_ns": receive_utc_ns,
                 "skeleton": skeleton.tolist(),
-                "target_units": target_values.tolist() if target_values is not None else [],
+                "target_units": target_values.tolist(),
                 "calibration_id": calibration_id,
-                "invalid_reasons": reasons,
+                "invalid_reasons": [],
+                "gestures": gestures,
+                "processing_time_ms": (time.perf_counter_ns() - started_ns) / 1e6,
             }
         return True, ""
 
@@ -505,22 +354,36 @@ class CanonicalGoalBuilder:
             if wrist_age > self.stale_timeout_ns:
                 wrist_mask = 0
                 invalid_reasons.append("wrist_stale")
-            if hand_age > self.stale_timeout_ns:
+            if hand_age > self.stale_timeout_ns and hand.get("source") != "preset_hand":
                 hand_mask = 0
                 invalid_reasons.append("hand_stale")
-            if not hand.get("target_units"):
-                hand_mask = 0
             wrist_key = (str(wrist["source"]), int(wrist["source_seq"]))
-            output_delta = (
+            raw_output_delta = (
                 list(wrist["delta"])
                 if wrist_key != self.last_emitted_wrist_key
                 else [0.0] * 6
             )
+            planned_pose, output_delta, planning = self.wrist_planner.step(
+                source=str(wrist["source"]),
+                target_pose=wrist["pose"],
+                source_receive_ns=int(wrist["receive_utc_ns"]),
+                now_ns=now_ns,
+                valid=wrist_mask != 0,
+            )
+            if (
+                planning["name"] == "off"
+                and planning.get("valid_for_dispatch")
+                and planning.get("reset_reason") != "source_or_profile_changed"
+            ):
+                output_delta = raw_output_delta
+            if planning.get("hold_expired"):
+                wrist_mask = 0
+                invalid_reasons.append("planner_hold_expired")
             self.output_seq += 1
             condition = E1_CONDITIONS.get((str(arm_mode), str(hand_mode)), "NON_E1")
             goal = {
                 "type": "canonical_goal",
-                "schema_version": CANONICAL_SCHEMA_VERSION,
+                "schema_version": self.schema_version,
                 "seq": self.output_seq,
                 "source_time_ns": max(int(wrist["source_time_ns"]), int(hand["source_time_ns"])),
                 "receive_utc_ns": now_ns,
@@ -534,20 +397,28 @@ class CanonicalGoalBuilder:
                     "wrist_age_sec": wrist_age / 1e9,
                     "hand_age_sec": hand_age / 1e9,
                 },
-                "adapter_wrist_delta": output_delta,
+                "adapter_wrist_delta": list(output_delta),
+                "raw_intent": {
+                    "adapter_wrist_delta": raw_output_delta,
+                    "wrist_pose_C": dict(wrist["pose"]),
+                    "arm_target_q_rad": list(wrist["target_q"]),
+                },
+                "planning": planning,
                 "composition": {
                     "translation": "canonical_world_left",
                     "rotation": "wrist_body_right",
                     "rotation_parameterization": "rotvec_rad_xyz",
                 },
-                "wrist_pose_C": dict(wrist["pose"]),
-                "hand_skeleton_w": list(hand["skeleton"]),
-                "joint_names": list(CANONICAL_JOINT_NAMES),
-                "validity": {"wrist_dof_mask": wrist_mask, "hand_node_mask": hand_mask},
+                "wrist_pose_C": planned_pose,
+                "hand_position_units": list(hand["target_units"]),
+                "hand_skeleton_C": list(hand["skeleton"]),
+                "hand_point_names": list(CANONICAL_JOINT_NAMES),
+                "hand_channel_names": list(WA100_HAND_CHANNEL_NAMES),
+                "validity": {"wrist_dof_mask": wrist_mask, "hand_dof_mask": hand_mask},
                 "calibrations": {
                     "wrist_mapping": wrist["mapping_id"],
-                    "hand_model": self.hand_model.calibration_id,
-                    "hand_model_sha256": self.hand_model.content_sha256,
+                    "wa100_kinematics": self.hand_kinematics.calibration_id,
+                    "wa100_kinematics_sha256": self.hand_kinematics.content_sha256,
                     "hand_mapping": hand.get("calibration_id", ""),
                 },
                 "invalid_reasons": sorted(set(invalid_reasons)),
@@ -555,7 +426,17 @@ class CanonicalGoalBuilder:
                     "arm_target_q_rad": list(wrist["target_q"]),
                     "hand_target_units": list(hand.get("target_units") or []),
                 },
+                "gestures": json.loads(json.dumps(hand.get("gestures") or {})),
+                "hand_processing": {
+                    "processing_time_ms": float(hand.get("processing_time_ms") or 0.0),
+                },
             }
+            if hand_mask == 0:
+                goal["gestures"]["active_anchor"] = "none"
+                for key in ("thumb_index_pinch", "thumb_middle_pinch"):
+                    if isinstance(goal["gestures"].get(key), dict):
+                        goal["gestures"][key]["active"] = False
+                        goal["gestures"][key]["confidence"] = 0.0
             valid, reason = validate_canonical_goal(goal)
             if not valid:
                 self.last_error = reason
@@ -577,5 +458,13 @@ class CanonicalGoalBuilder:
                 "hand_source": goal.get("hand_source", ""),
                 "validity": dict(goal.get("validity") or {}),
                 "calibrations": dict(goal.get("calibrations") or {}),
+                "planning": dict(goal.get("planning") or self.wrist_planner.status()),
+                "hand_position_units": list(goal.get("hand_position_units") or []),
+                "gestures": dict(goal.get("gestures") or {}),
+                "hand_processing": dict(goal.get("hand_processing") or {}),
                 "last_error": self.last_error,
             }
+
+    def set_planner_override(self, profile: Optional[str]) -> str:
+        with self.lock:
+            return self.wrist_planner.set_override(profile)

@@ -61,6 +61,17 @@ except ImportError:
     from control_ui.canonical_goal import CanonicalGoalBuilder
 
 try:
+    from semantic_admittance import (
+        SemanticAdmittance, SemanticLimits, arm_forward_kinematics,
+        arm_inverse_kinematics, canonical_snapshot, normalize_semantic_mode,
+    )
+except ImportError:
+    from control_ui.semantic_admittance import (
+        SemanticAdmittance, SemanticLimits, arm_forward_kinematics,
+        arm_inverse_kinematics, canonical_snapshot, normalize_semantic_mode,
+    )
+
+try:
     from perception_assist_monitor import PerceptionAssistMonitor, load_monitor_config
 except ImportError:
     from control_ui.perception_assist_monitor import PerceptionAssistMonitor, load_monitor_config
@@ -130,6 +141,11 @@ def parse_config_value(value):
     value = value.strip()
     if not value:
         return ""
+    if value[0:1] in {"[", "{"}:
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            pass
     if value[0:1] in ["'", '"'] and value[-1:] == value[0]:
         return value[1:-1]
     low = value.lower()
@@ -178,6 +194,7 @@ recording_cfg = cfg.get("recording", {})
 arm_control_cfg = cfg.get("arm_control", {})
 rtsp_camera_cfg = cfg.get("rtsp_dual_camera", {})
 canonical_cfg = cfg.get("canonical", {})
+semantic_cfg = cfg.get("semantic_admittance", {})
 
 SSH_COMMON_OPTIONS = [
     "-o", "BatchMode=yes",
@@ -230,9 +247,10 @@ CANONICAL_LOG_ENABLED = str(canonical_cfg.get("log_enabled", True)).strip().lowe
 CANONICAL_STALE_TIMEOUT_SEC = float(canonical_cfg.get("stale_timeout_sec", 0.5))
 CANONICAL_PUBLISH_HZ = max(1.0, float(canonical_cfg.get("publish_hz", 50.0)))
 CANONICAL_PUBLISH_PERIOD_NS = int(round(1e9 / CANONICAL_PUBLISH_HZ))
-CANONICAL_HAND_MODEL_PATH = BASE_DIR / str(canonical_cfg.get("hi5_hand_model_path", "hi5_hand_model_v8.json"))
+CANONICAL_HAND_MODEL_PATH = BASE_DIR / str(canonical_cfg.get("wa100_kinematics_model_path", "wa100_kinematics_model.json"))
 CANONICAL_HAND_HOST = str(canonical_cfg.get("hand_host", HAND_UDP_LISTEN_HOST))
 CANONICAL_HAND_PORT = int(canonical_cfg.get("hand_port", HAND_UDP_LISTEN_PORT))
+SEMANTIC_DEFAULT_MODE = normalize_semantic_mode(semantic_cfg.get("mode", "OFF")) or "OFF"
 RECORDING = RecordingManager(
     RECORDING_ROOT,
     f"http://{CAMERA_SERVICE_HOST}:{CAMERA_SERVICE_PORT}",
@@ -242,7 +260,24 @@ RECORDING = RecordingManager(
     canonical_log_enabled=CANONICAL_LOG_ENABLED,
     canonical_publish_hz=CANONICAL_PUBLISH_HZ,
 )
-CANONICAL = CanonicalGoalBuilder(CANONICAL_HAND_MODEL_PATH, CANONICAL_STALE_TIMEOUT_SEC)
+CANONICAL = CanonicalGoalBuilder(
+    CANONICAL_HAND_MODEL_PATH,
+    CANONICAL_STALE_TIMEOUT_SEC,
+    planner_config=canonical_cfg,
+)
+SEMANTIC = SemanticAdmittance(SemanticLimits(
+    measured_timeout_sec=float(semantic_cfg.get("measured_timeout_sec", 0.25)),
+    current_timeout_sec=float(semantic_cfg.get("current_timeout_sec", 0.25)),
+    trigger_ma=float(semantic_cfg.get("trigger_ma", 80.0)),
+    wrist_max_displacement_m=float(semantic_cfg.get("wrist_max_displacement_m", 0.025)),
+    wrist_max_speed_m_s=float(semantic_cfg.get("wrist_max_speed_m_s", 0.02)),
+    hand_max_unload_ratio=float(semantic_cfg.get("hand_max_unload_ratio", 0.25)),
+    registered_retreat_direction_C=tuple(semantic_cfg.get("registered_retreat_direction_C", [-1.0, 0.0, 0.0])),
+), SEMANTIC_DEFAULT_MODE, hand_kinematics=CANONICAL.hand_kinematics)
+CANONICAL_MEASURED_LOCK = threading.RLock()
+CANONICAL_MEASURED = {"arm": None, "hand": None, "current": None}
+SLAVE_COMMAND_LOCK = threading.RLock()
+LATEST_SLAVE_COMMAND = None
 CANONICAL_HAND_SOCKET = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 PERCEPTION_CONFIG_PATH = BASE_DIR / "perception_assist_config.json"
 PERCEPTION_CONFIG = load_monitor_config(PERCEPTION_CONFIG_PATH)
@@ -255,6 +290,7 @@ PERCEPTION_UNITY_SOCKET = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 PERCEPTION_LAST_PAYLOAD = None
 PERCEPTION_LAST_RECEIVE_MONOTONIC_NS = 0
 PERCEPTION_LAST_STATUS_PUSH = 0.0
+ADMITTANCE_ASSIST_TIMEOUT_SEC = 0.25
 RUNTIME_MOTION_DURATION_SEC = max(0.001, float(arm_control_cfg.get("runtime_motion_duration_sec", 5.0)))
 ARM_LEGACY_HOME_FALLBACK = str(arm_control_cfg.get("legacy_home_fallback", False)).strip().lower() in {"1", "true", "yes", "on"}
 
@@ -387,6 +423,34 @@ def normalize_hand_mode(mode):
 
 DEFAULT_HAND_MODE = normalize_hand_mode(hand_control_cfg.get("default_mode", "idle"))
 START_GLOVE_BY_DEFAULT = config_bool(hand_control_cfg.get("start_glove_by_default"), DEFAULT_HAND_MODE == "glove")
+
+ADMITTANCE_MODE_NAMES = {
+    0: "off",
+    1: "handonly",
+    2: "holistic",
+    3: "handconfig",
+}
+
+
+def normalize_admittance_mode(value):
+    """Normalize 0..3 or off/handonly/handconfig/holistic to 0..3; None if invalid."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        aliases = {
+            "off": 0, "none": 0, "0": 0,
+            "handonly": 1, "hand_only": 1, "legacy": 1, "1": 1,
+            "holistic": 2, "arm_hand": 2, "2": 2,
+            "handconfig": 3, "hand_config": 3, "config": 3, "3": 3,
+        }
+        value = aliases.get(value.strip().lower())
+    if isinstance(value, float) and not float(value).is_integer():
+        return None
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None
+    return value if value in ADMITTANCE_MODE_NAMES else None
 
 udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -653,6 +717,25 @@ SYSTEM = {
         "loaded_fingers": [],
         "current_residual": [None] * 6,
     },
+    # Independent arm/hand admittance policy state, reported by the WA100
+    # schema 4 telemetry.  Never merged into perception_assist.
+    "admittance_assist": {
+        "type": "admittance_assist_state",
+        "schema_version": 1,
+        "mode": "unknown",
+        "mode_raw": -1,
+        "retreat_level": 0.0,
+        "retreat_active": False,
+        "closure": [None] * 6,
+        "off_hold_active": [None] * 6,
+        "gain_scale": [None] * 6,
+        "trigger_on_ma": [None] * 6,
+        "trigger_off_ma": [None] * 6,
+        "load_evidence": [None] * 6,
+        "fresh": False,
+        "received_utc_ns": 0,
+        "age_sec": None,
+    },
     "canonical": CANONICAL.status(),
     "modules": {
         "backend": {"status": "ONLINE", "last_seen": time.time(), "message": "后端服务运行中"},
@@ -696,6 +779,8 @@ def snapshot():
             "hand_mode": SYSTEM.get("hand_mode", DEFAULT_HAND_MODE),
             "arm_control": arm_control,
             "perception_assist": json.loads(json.dumps(SYSTEM.get("perception_assist", {}), ensure_ascii=False)),
+            "admittance_assist": json.loads(json.dumps(SYSTEM.get("admittance_assist", {}), ensure_ascii=False)),
+            "semantic_admittance": {"mode": SEMANTIC.mode},
             "canonical": json.loads(json.dumps(SYSTEM.get("canonical", {}), ensure_ascii=False)),
             "modules": json.loads(json.dumps(SYSTEM["modules"], ensure_ascii=False)),
             "faults": list(SYSTEM["faults"])[-20:],
@@ -1356,6 +1441,25 @@ def sanitize_hand_positions(values):
     return [clamp_hand_position(value) for value in values]
 
 
+def _preset_hand_value(name, positions, now_ns=None):
+    now_ns = int(now_ns or time.time_ns())
+    return {
+        "stream": "hand_skeleton",
+        "name": str(name),
+        "positions": list(positions),
+        "mapped_target_units": list(positions),
+        "source_timestamp_ns": now_ns,
+    }
+
+
+def _observe_preset_hand(name, positions, now_ns=None):
+    value = _preset_hand_value(name, positions, now_ns)
+    accepted, reason = CANONICAL.observe_hand_input(
+        "preset_hand", value, int(value["source_timestamp_ns"])
+    )
+    return accepted, reason, value
+
+
 def send_hand_control(mode, positions=None, name=None):
     normalized_mode = normalize_hand_mode(mode)
     if normalized_mode == "idle":
@@ -1363,6 +1467,13 @@ def send_hand_control(mode, positions=None, name=None):
         # encoder pose happened to be present when the executable started.
         positions = list(HAND_PRESETS["reset"])
         name = name or "idle_safe_open"
+    elif normalized_mode == "preset" and positions is None:
+        with STATE_LOCK:
+            latched = dict(SYSTEM.get("hand_preset") or {})
+        positions = list(latched.get("positions") or HAND_PRESETS["open"])
+        name = name or str(latched.get("name") or "open")
+
+    sanitized_positions = sanitize_hand_positions(positions) if positions is not None else None
     payload = {
         "type": "h5_hand_control",
         "schema_version": 2,
@@ -1373,16 +1484,42 @@ def send_hand_control(mode, positions=None, name=None):
     }
     if name:
         payload["name"] = name
-    if positions is not None:
-        payload["positions"] = sanitize_hand_positions(positions)
+    if sanitized_positions is not None:
+        payload["positions"] = sanitized_positions
     text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    ok, msg = send_udp_repeat(
-        HAND_UDP_LISTEN_HOST,
-        HAND_UDP_LISTEN_PORT,
-        text,
-        HAND_CONTROL_REPEAT_COUNT,
-        HAND_CONTROL_REPEAT_INTERVAL_SEC,
-    )
+
+    # Prevent the 50 Hz publisher from sending an old target between the direct
+    # mode/preset packet and the corresponding Canonical state transition.
+    with CANONICAL_PUBLISH_LOCK:
+        with CANONICAL.lock:
+            previous_hand = (
+                json.loads(json.dumps(CANONICAL.hand))
+                if CANONICAL.hand is not None else None
+            )
+        if normalized_mode in {"preset", "idle"} and sanitized_positions is not None:
+            accepted, reason, _ = _observe_preset_hand(
+                name or normalized_mode, sanitized_positions
+            )
+            if not accepted:
+                return False, f"Canonical preset rejected: {reason}"
+        elif normalized_mode in {"vr", "glove"}:
+            # Never keep dispatching the previous source while waiting for the
+            # first mapped six-channel frame from the newly selected source.
+            with CANONICAL.lock:
+                CANONICAL.hand = None
+                CANONICAL.last_error = f"awaiting {normalized_mode} hand adapter"
+
+        ok, msg = send_udp_repeat(
+            HAND_UDP_LISTEN_HOST,
+            HAND_UDP_LISTEN_PORT,
+            text,
+            HAND_CONTROL_REPEAT_COUNT,
+            HAND_CONTROL_REPEAT_INTERVAL_SEC,
+        )
+        if not ok:
+            with CANONICAL.lock:
+                CANONICAL.hand = previous_hand
+
     if ok:
         set_hand_mode(normalized_mode)
         refresh_hand_link_status()
@@ -1400,30 +1537,61 @@ def send_hand_control(mode, positions=None, name=None):
                     "changed_at": now_ts(),
                     "changed": True,
                 }
-            _record_preset_skeleton(name, sent_positions)
+            _record_preset_skeleton(name, sent_positions, update_canonical=False)
     return ok, msg
 
 
-def _record_preset_skeleton(name, positions):
-    """Publish the preset posture as a PICO-compatible 21-point skeleton to the
-    raw master recording stream (source=preset_hand) for replay/visualization."""
+def send_admittance_mode(mode):
+    """Send the admittance policy switch to the WA100 receiver (UDP 25001).
+
+    mode: 0=off, 1=handonly, 2=holistic, 3=handconfig (int or name string).
+    The authoritative state is whatever schema 4 telemetry reports back.
+    """
+    normalized = normalize_admittance_mode(mode)
+    if normalized is None:
+        return False, f"未知导纳模式: {mode!r}（支持 off/handonly/handconfig/holistic 或 0-3）"
+    payload = {
+        "type": "set_admittance_mode",
+        "schema_version": 1,
+        "mode": normalized,
+        "source": "control_ui",
+        "time": time.time(),
+    }
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    ok, msg = send_udp_repeat(
+        HAND_UDP_LISTEN_HOST,
+        HAND_UDP_LISTEN_PORT,
+        text,
+        HAND_CONTROL_REPEAT_COUNT,
+        HAND_CONTROL_REPEAT_INTERVAL_SEC,
+    )
+    if ok:
+        # Console print lives in the udp_receiver control loop; bridge only
+        # keeps the UI-side log event.
+        log_event("HAND", f"导纳模式切换: {ADMITTANCE_MODE_NAMES[normalized]}", f"mode={normalized}")
+    return ok, msg
+
+
+def _record_preset_skeleton(name, positions, update_canonical=True):
+    """Publish one fixed posture through the same six-DOF Canonical adapter."""
     try:
         if not isinstance(positions, list) or len(positions) != 6:
             return
-        skeleton = CANONICAL.hand_model.preset_skeleton(positions)
+        now_ns = time.time_ns()
+        if update_canonical:
+            accepted, reason, value = _observe_preset_hand(name, positions, now_ns)
+            if not accepted:
+                raise ValueError(reason)
+        else:
+            value = _preset_hand_value(name, positions, now_ns)
         payload = {
             "type": "raw_master_input",
             "schema_version": 1,
             "source": "preset_hand",
             "signal_form": "discrete",
-            "value": {
-                "stream": "hand_skeleton",
-                "name": str(name),
-                "rightPositions": [float(value) for value in skeleton.flatten()],
-                "mapped_target_units": [float(value) for value in positions],
-            },
+            "value": value,
         }
-        RECORDING.observe_raw_input(payload, time.time_ns(), time.monotonic_ns())
+        RECORDING.observe_raw_input(payload, now_ns, time.monotonic_ns())
     except Exception as exc:
         log_event("WARNING", f"preset 骨架记录失败: {name}", exc)
 
@@ -1498,7 +1666,15 @@ def do_command(method, path, body=None):
         with STATE_LOCK:
             arm_mode = SYSTEM.get("arm_control", {}).get("mode", "unknown")
             hand_mode = SYSTEM.get("hand_mode", "unknown")
-        return RECORDING.start(f"{arm_mode}+{hand_mode}")
+            preset = dict(SYSTEM.get("hand_preset") or {})
+        if hand_mode == "preset" and len(preset.get("positions") or []) == 6:
+            # Refresh the discrete source before readiness is evaluated, then
+            # publish it once more after start so the active trial owns a row.
+            _record_preset_skeleton(preset.get("name") or "preset", list(preset["positions"]))
+        result = RECORDING.start(f"{arm_mode}+{hand_mode}")
+        if result.get("ok") and hand_mode == "preset" and len(preset.get("positions") or []) == 6:
+            _record_preset_skeleton(preset.get("name") or "preset", list(preset["positions"]))
+        return result
     if path == "/api/recording/stop" and method == "POST":
         return RECORDING.stop()
     if path == "/api/perception-assist/status" and method == "GET":
@@ -1507,6 +1683,23 @@ def do_command(method, path, body=None):
         return {"ok": True, **status}
     if path == "/api/status":
         return command_result(True, "状态已返回")
+    if path == "/api/canonical/planner" and method == "GET":
+        return command_result(True, "canonical planner status", {
+            "canonical": CANONICAL.status(),
+        })
+    if path == "/api/canonical/planner" and method == "POST":
+        requested = (body or {}).get("profile") if isinstance(body, dict) else None
+        try:
+            selected = CANONICAL.set_planner_override(requested)
+        except ValueError as exc:
+            return command_result(False, str(exc), {
+                "supported": ["default", "off", "jerk_limited", "one_euro"],
+            })
+        push_status()
+        return command_result(True, f"canonical planner override set to {selected}", {
+            "profile": selected,
+            "canonical": CANONICAL.status(),
+        })
     if path == "/api/camera/startup-mode" and method == "GET":
         return command_result(True, "摄像头启动模式已返回", camera_startup_settings())
     if path == "/api/camera/startup-mode" and method == "POST":
@@ -1723,6 +1916,43 @@ def do_command(method, path, body=None):
         "/api/demo/semi_auto": ("TASK_RUNNING", "SEMI_AUTO_DEMO"),
         "/api/demo/backup": ("READY", "BACKUP_DEMO"),
     }
+    if path == "/api/hand/admittance-mode" and method == "GET":
+        with STATE_LOCK:
+            status = json.loads(json.dumps(SYSTEM.get("admittance_assist", {}), ensure_ascii=False))
+        return {"ok": True, **status}
+    if path == "/api/hand/admittance-mode" and method == "POST":
+        requested = (body or {}).get("mode") if isinstance(body, dict) else None
+        normalized = normalize_admittance_mode(requested)
+        if normalized is None:
+            return command_result(
+                False,
+                f"未知导纳模式: {requested!r}",
+                {"supported": list(ADMITTANCE_MODE_NAMES.values())},
+            )
+        ok, msg = send_admittance_mode(normalized)
+        return command_result(
+            ok,
+            f"导纳模式切换请求已发送: {ADMITTANCE_MODE_NAMES[normalized]}" if ok else f"导纳模式发送失败: {msg}",
+            {"mode": normalized, "mode_name": ADMITTANCE_MODE_NAMES[normalized], "output": msg},
+        )
+    if path == "/api/semantic-admittance/mode" and method == "GET":
+        return command_result(True, "semantic admittance mode", {
+            "mode": SEMANTIC.mode, "semantic_admittance": {"mode": SEMANTIC.mode}
+        })
+    if path == "/api/semantic-admittance/mode" and method == "POST":
+        requested = (body or {}).get("mode") if isinstance(body, dict) else None
+        try:
+            mode = SEMANTIC.set_mode(requested)
+        except ValueError as exc:
+            return command_result(False, str(exc), {"mode": SEMANTIC.mode})
+        # Central correction and receiver-side admittance must never run twice.
+        # OFF explicitly leaves the existing local policy available.
+        if mode != "OFF":
+            send_admittance_mode("off")
+        push_status()
+        return command_result(True, f"semantic admittance mode set to {mode}", {
+            "mode": mode, "semantic_admittance": {"mode": mode}
+        })
     if path == "/api/hand/mode/vr":
         ok, msg = activate_hand_mode("vr")
         return command_result(ok, "Switched to VR hand tracking mode" if ok else msg, {"output": msg})
@@ -1990,7 +2220,123 @@ def validate_raw_master_input(payload, browser_only=False):
     return True, ""
 
 
+def _canonical_semantic_bundle(goal, now_ns):
+    """Join nominal intent, actual feedback and bounded correction by decision_seq."""
+    decision_seq = int(goal.get("seq") or 0)
+    nominal = canonical_snapshot(
+        "nominal", timestamp_ns=now_ns, decision_seq=decision_seq,
+        wrist_pose=goal.get("wrist_pose_C"),
+        hand_position_units=goal.get("hand_position_units"),
+        hand_skeleton=goal.get("hand_skeleton_C"),
+        wrist_mask=int((goal.get("validity") or {}).get("wrist_dof_mask", 0)),
+        hand_mask=int((goal.get("validity") or {}).get("hand_dof_mask", 0)),
+        source=f"{goal.get('wrist_source', '')}+{goal.get('hand_source', '')}",
+        calibrations=goal.get("calibrations"), invalid_reasons=goal.get("invalid_reasons") or [],
+    )
+    with CANONICAL_MEASURED_LOCK:
+        arm = dict(CANONICAL_MEASURED.get("arm") or {})
+        hand = dict(CANONICAL_MEASURED.get("hand") or {})
+        current = dict(CANONICAL_MEASURED.get("current") or {})
+    measured_reasons = []
+    wrist_pose, wrist_mask = None, 0
+    try:
+        if now_ns - int(arm.get("receive_utc_ns") or 0) <= SEMANTIC.limits.measured_timeout_sec * 1e9:
+            wrist_pose = arm_forward_kinematics(arm.get("actual_q_rad"))
+            wrist_mask = 0x3F
+        else:
+            measured_reasons.append("arm_encoder_stale")
+    except (TypeError, ValueError):
+        measured_reasons.append("arm_encoder_invalid")
+    hand_units, hand_skeleton, hand_mask = None, None, 0
+    try:
+        if (
+            now_ns - int(hand.get("receive_utc_ns") or 0) <= SEMANTIC.limits.measured_timeout_sec * 1e9
+            and int(hand.get("position_valid_mask") or 0) == 0x3F
+        ):
+            # Actual WA100 feedback only; never substitute commanded positions.
+            hand_units = [float(value) for value in hand.get("actual_position_units")]
+            hand_skeleton = CANONICAL.hand_kinematics.canonical_skeleton_21(hand_units).tolist()
+            hand_mask = 0x3F
+        else:
+            measured_reasons.append("wa100_actual_position_stale_or_invalid")
+    except (TypeError, ValueError):
+        measured_reasons.append("wa100_actual_position_invalid")
+    measured = canonical_snapshot(
+        "measured", timestamp_ns=now_ns, decision_seq=decision_seq,
+        wrist_pose=wrist_pose, hand_position_units=hand_units, hand_skeleton=hand_skeleton,
+        wrist_mask=wrist_mask, hand_mask=hand_mask, source="arm_encoder+wa100_feedback",
+        calibrations={
+            "arm_fk": "ui-arm-fk-l3-l5-0.424m-v1",
+            "wa100_kinematics": CANONICAL.hand_kinematics.calibration_id,
+            "wa100_kinematics_sha256": CANONICAL.hand_kinematics.content_sha256,
+        }, invalid_reasons=measured_reasons,
+    )
+    measured["measurement_state"] = {
+        "q_a_measured": arm.get("actual_q_rad"),
+        "chi_h_measured": hand.get("actual_position_units"),
+        "arm_source_time_ns": int(arm.get("source_time_ns") or 0),
+        "hand_source_time_ns": int(hand.get("source_time_ns") or 0),
+    }
+    result = SEMANTIC.update(
+        nominal, measured, current.get("residual"),
+        current_timestamp_ns=int(current.get("timestamp_ns") or 0),
+        now_ns=now_ns,
+    )
+    corrected, audit = result["corrected"], result["audit"]
+    nominal_targets = dict(goal.get("final_targets") or {})
+    arm_targets = list(nominal_targets.get("arm_target_q_rad") or [])
+    hand_targets = list(nominal_targets.get("hand_target_units") or [])
+    planning = dict(goal.get("planning") or {})
+    wrist_valid = int((goal.get("validity") or {}).get("wrist_dof_mask", 0)) != 0
+    planned_pose = goal.get("wrist_pose_C") or {}
+    try:
+        quaternion = [float(value) for value in planned_pose.get("orientation_xyzw", [])]
+        if len(quaternion) != 4 or not all(math.isfinite(value) for value in quaternion):
+            raise ValueError("planned wrist quaternion is invalid")
+        x, y, z, w = quaternion
+        roll = math.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+        arm_targets = arm_inverse_kinematics(planned_pose["position_m"], roll)
+    except (KeyError, TypeError, ValueError):
+        wrist_valid = False
+        planning["valid_for_dispatch"] = False
+        planning["ik_error"] = "planned_arm_ik_failed"
+        goal.setdefault("invalid_reasons", []).append("planned_arm_ik_failed")
+    if audit["dispatch_corrected"] and audit["mode"] == "ARM_HAND" and corrected.get("wrist_pose_C"):
+        try:
+            roll = arm_targets[3] if len(arm_targets) >= 4 else 0.0
+            arm_targets = arm_inverse_kinematics(corrected["wrist_pose_C"]["position_m"], roll)
+        except (TypeError, ValueError):
+            audit["degradation_reasons"].append("corrected_arm_ik_failed")
+    if audit["dispatch_corrected"]:
+        corrected_targets = corrected.get("hand_position_units") or []
+        if len(corrected_targets) == 6:
+            hand_targets = list(corrected_targets)
+    slave_command = {
+        "type": "slave_kinematic_reference_cmd", "schema_version": 1,
+        "timestamp_ns": now_ns, "decision_seq": decision_seq,
+        "source": "canonical_corrected" if audit["dispatch_corrected"] else "canonical_nominal",
+        "arm_target_q_rad": arm_targets, "hand_target_units": hand_targets,
+        "valid_for_dispatch": bool(wrist_valid and planning.get("valid_for_dispatch", False)),
+        "wrist_dof_mask": int((goal.get("validity") or {}).get("wrist_dof_mask", 0)),
+        "wrist_source": str(goal.get("wrist_source") or ""),
+    }
+    envelope = dict(goal)
+    published_hand = corrected if audit["dispatch_corrected"] else nominal
+    envelope.update({
+        "timestamp_ns": now_ns, "decision_seq": decision_seq,
+        "canonical_nominal": nominal, "canonical_measured": measured,
+        "canonical_corrected": corrected, "semantic_admittance": audit,
+        "slave_kinematic_reference_cmd": slave_command,
+        "wrist_pose_C": corrected["wrist_pose_C"] if audit["dispatch_corrected"] else nominal["wrist_pose_C"],
+        "hand_position_units": published_hand["hand_position_units"],
+        "hand_skeleton_C": published_hand["hand_skeleton_C"],
+        "final_targets": slave_command, "planning": planning,
+    })
+    return envelope
+
+
 def _publish_canonical_goal_unlocked(receive_utc_ns=None):
+    global LATEST_SLAVE_COMMAND
     with STATE_LOCK:
         arm_mode = str(SYSTEM.get("arm_control", {}).get("mode") or "idle")
         hand_mode = str(SYSTEM.get("hand_mode") or "idle")
@@ -1999,6 +2345,14 @@ def _publish_canonical_goal_unlocked(receive_utc_ns=None):
         with STATE_LOCK:
             SYSTEM["canonical"] = CANONICAL.status()
         return None
+    goal = _canonical_semantic_bundle(goal, int(receive_utc_ns or time.time_ns()))
+    with SLAVE_COMMAND_LOCK:
+        LATEST_SLAVE_COMMAND = {
+            **dict(goal.get("slave_kinematic_reference_cmd") or {}),
+            "dispatch_corrected": bool((goal.get("semantic_admittance") or {}).get("dispatch_corrected")),
+            "mode": str((goal.get("semantic_admittance") or {}).get("mode") or "OFF"),
+            "no_send": bool(goal.get("no_send")),
+        }
     goal["publish_rate_hz"] = CANONICAL_PUBLISH_HZ
     RECORDING.observe_canonical_goal(goal, receive_utc_ns or time.time_ns(), time.monotonic_ns())
     encoded = json.dumps(goal, ensure_ascii=False, separators=(",", ":"))
@@ -2011,8 +2365,8 @@ def _publish_canonical_goal_unlocked(receive_utc_ns=None):
             client.send_text(encoded)
         except Exception:
             client.close()
-    hand_targets = (goal.get("final_targets") or {}).get("hand_target_units")
-    hand_valid = int((goal.get("validity") or {}).get("hand_node_mask", 0)) != 0
+    hand_targets = (goal.get("slave_kinematic_reference_cmd") or {}).get("hand_target_units")
+    hand_valid = int((goal.get("validity") or {}).get("hand_dof_mask", 0)) != 0
     if (
         CANONICAL_CONTROL_ENABLED
         and not bool(goal.get("no_send"))
@@ -2075,6 +2429,51 @@ def handle_raw_master_input(payload, browser_only=False, receive_utc_ns=None, re
     return recorded
 
 
+def apply_canonical_arm_reference(frame, decoded_frame=None):
+    """Replace J1-J4 with the fresh planned Canonical command.
+
+    Emergency stop is never delayed. Normal frames are suppressed when the
+    Canonical command is missing or stale so raw adapter targets cannot bypass
+    the planner.
+    """
+    if decoded_frame is not None and bool(getattr(decoded_frame, "emergency_stop", False)):
+        return frame
+    if not CANONICAL_CONTROL_ENABLED:
+        return frame
+    with SLAVE_COMMAND_LOCK:
+        command = dict(LATEST_SLAVE_COMMAND or {})
+    if (
+        not command.get("valid_for_dispatch")
+        or command.get("no_send")
+        or time.time_ns() - int(command.get("timestamp_ns") or 0) > 100_000_000
+    ):
+        return None
+    if decoded_frame is not None:
+        expected_source = {
+            "keyboard": "keyboard",
+            "gamepad": "gamepad",
+            "hand_vision": "pico_wrist",
+            "controller_delta": "vr_controller",
+        }.get(str(getattr(decoded_frame, "source", "") or ""))
+        if expected_source is not None and command.get("wrist_source") != expected_source:
+            return None
+    targets = command.get("arm_target_q_rad")
+    if not isinstance(targets, list) or len(targets) < 4 or len(frame) <= H5_FRAME_CRC_OFFSET + 3:
+        return None
+    try:
+        values = [float(value) for value in targets[:4]]
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) for value in values):
+        return None
+    result = bytearray(frame)
+    # frame_config.json: mode byte ends at 145; order[0] starts there.
+    struct.pack_into("<4f", result, 145, *values)
+    struct.pack_into("<I", result, H5_FRAME_CRC_OFFSET,
+                     binascii.crc32(result[:H5_FRAME_CRC_OFFSET]) & 0xFFFFFFFF)
+    return bytes(result)
+
+
 def websocket_client_loop(client):
     try:
         if client.path == STATUS_PATH:
@@ -2108,7 +2507,9 @@ def websocket_client_loop(client):
                     acquire_arm_authority("estop")
                 if LOOP_FILTER:
                     recent_ws_crc.append((binascii.crc32(payload) & 0xFFFFFFFF, time.time(), len(payload)))
-                udp.sendto(payload, (UDP_HOST, UDP_SEND_PORT))
+                planned_payload = apply_canonical_arm_reference(payload, decision.frame)
+                if planned_payload is not None:
+                    udp.sendto(planned_payload, (UDP_HOST, UDP_SEND_PORT))
                 # Per-frame output is intentionally disabled to avoid control-path jitter.
     except Exception as exc:
         print(f"[WS] client closed: {exc}")
@@ -2189,7 +2590,14 @@ def udp_broadcast_loop():
             try:
                 payload = json.loads(data.decode("utf-8"))
                 if payload.get("type") == "arm_recording_state" and int(payload.get("schema_version", 0)) == 1:
-                    RECORDING.observe_arm(payload, time.time_ns(), time.monotonic_ns())
+                    receive_utc_ns = time.time_ns()
+                    with CANONICAL_MEASURED_LOCK:
+                        CANONICAL_MEASURED["arm"] = {
+                            "receive_utc_ns": receive_utc_ns,
+                            "source_time_ns": int(payload.get("source_time_ns") or 0),
+                            "actual_q_rad": payload.get("actual_q_rad"),
+                        }
+                    RECORDING.observe_arm(payload, receive_utc_ns, time.monotonic_ns())
                     continue
             except (UnicodeDecodeError, ValueError, TypeError):
                 pass
@@ -2212,6 +2620,77 @@ def udp_broadcast_loop():
                 client.close()
 
 
+def _finite_six(value, default=None):
+    """Return a 6-list of finite floats or the given default (schema lenient)."""
+    if not isinstance(value, list) or len(value) != 6:
+        return default
+    try:
+        values = [float(item) for item in value]
+    except (TypeError, ValueError):
+        return default
+    return values if all(math.isfinite(item) for item in values) else default
+
+
+def _bool_six(value, default=None):
+    if not isinstance(value, list) or len(value) != 6:
+        return default
+    return [bool(item) for item in value]
+
+
+def _observe_admittance_assist(payload, schema_version, receive_utc_ns, receive_monotonic_ns):
+    """Maintain SYSTEM["admittance_assist"] from WA100 telemetry.
+
+    Schema < 4 (or any invalid/missing field) fails open: the arm-side assist
+    is treated as inactive so the raw operator target always passes through.
+    """
+    with STATE_LOCK:
+        previous = SYSTEM.get("admittance_assist", {})
+    mode_name = None
+    retreat_active = False
+    retreat_level = 0.0
+    if schema_version >= 4:
+        mode_name = str(payload.get("admittance_mode") or "")
+        if mode_name not in set(ADMITTANCE_MODE_NAMES.values()):
+            mode_name = None
+        try:
+            retreat_level = float(payload.get("retreat_level", 0.0))
+        except (TypeError, ValueError):
+            retreat_level = 0.0
+        if not math.isfinite(retreat_level):
+            retreat_level = 0.0
+        retreat_active = bool(payload.get("retreat_active", False)) and mode_name is not None
+        if mode_name in {"off", "handonly", "handconfig"}:
+            # Receiver guarantees zeroed retreat outside Holistic; enforce here too.
+            retreat_level = 0.0
+            retreat_active = False
+    age_sec = (receive_utc_ns - int(previous.get("received_utc_ns") or receive_utc_ns)) / 1e9
+    # "fresh" means telemetry freshness only; retreat_active is reported
+    # independently so a handonly/off session is not mislabelled as stale.
+    fresh = (
+        schema_version >= 4
+        and mode_name is not None
+        and age_sec <= ADMITTANCE_ASSIST_TIMEOUT_SEC
+    )
+    with STATE_LOCK:
+        SYSTEM["admittance_assist"] = {
+            "type": "admittance_assist_state",
+            "schema_version": 1,
+            "mode": mode_name or "unknown",
+            "mode_raw": next((code for code, name in ADMITTANCE_MODE_NAMES.items() if name == mode_name), -1),
+            "retreat_level": retreat_level,
+            "retreat_active": bool(retreat_active),
+            "closure": _finite_six(payload.get("admittance_closure"), [None] * 6),
+            "off_hold_active": _bool_six(payload.get("off_hold_active"), [None] * 6),
+            "gain_scale": _finite_six(payload.get("admittance_gain_scale"), [None] * 6),
+            "trigger_on_ma": _finite_six(payload.get("admittance_trigger_on_ma"), [None] * 6),
+            "trigger_off_ma": _finite_six(payload.get("admittance_trigger_off_ma"), [None] * 6),
+            "load_evidence": _finite_six(payload.get("channel_load_evidence"), [None] * 6),
+            "fresh": bool(fresh),
+            "received_utc_ns": receive_utc_ns,
+            "age_sec": age_sec,
+        }
+
+
 def hand_telemetry_loop():
     global PERCEPTION_LAST_PAYLOAD, PERCEPTION_LAST_RECEIVE_MONOTONIC_NS, PERCEPTION_LAST_STATUS_PUSH
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -2222,10 +2701,24 @@ def hand_telemetry_loop():
         data, _source = sock.recvfrom(65535)
         try:
             payload = json.loads(data.decode("utf-8"))
-            if payload.get("type") != "wa100_recording_state" or int(payload.get("schema_version", 0)) not in {1, 2, 3}:
+            schema_version = int(payload.get("schema_version", 0))
+            if payload.get("type") != "wa100_recording_state" or schema_version not in {1, 2, 3, 4}:
                 continue
             receive_utc_ns, receive_monotonic_ns = time.time_ns(), time.monotonic_ns()
+            _observe_admittance_assist(payload, schema_version, receive_utc_ns, receive_monotonic_ns)
             decision = PERCEPTION_MONITOR.update(payload, receive_utc_ns, receive_monotonic_ns)
+            position_valid = _bool_six(payload.get("position_valid"), [False] * 6)
+            with CANONICAL_MEASURED_LOCK:
+                CANONICAL_MEASURED["hand"] = {
+                    "receive_utc_ns": receive_utc_ns,
+                    "source_time_ns": int(payload.get("source_time_ns") or receive_utc_ns),
+                    "actual_position_units": payload.get("actual_position_units"),
+                    "position_valid_mask": sum(1 << index for index, valid in enumerate(position_valid) if valid),
+                }
+                CANONICAL_MEASURED["current"] = {
+                    "timestamp_ns": receive_utc_ns,
+                    "residual": decision.get("current_residual") if decision.get("valid") else None,
+                }
             with STATE_LOCK:
                 preset_state = dict(SYSTEM.get("hand_preset") or {})
             if preset_state:

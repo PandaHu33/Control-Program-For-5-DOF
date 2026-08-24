@@ -123,4 +123,4 @@ E1 需公平比较键盘/手柄/VR/手套四种主端，任务**不能考验精�
 - 空载闭合基线、各通道开闭端点必须在修改任务前按 perception 文档完成标定，否则观测器输出 `valid=0`，不参与抓持推断。
 - E1 正式取数前，任务变更属于实验条件变更：更新 SOP 冻结项并记录任务定义、工装、物体规格、手势预设版本。
 - 统计边界（论文 4.4）：同一对象上的连续往返不能全部当独立样本；报告独立 trial 数、操作者、对象/工装、介质、速度和标定版本。
-- **配置一致性检查**：`E1_CANONICAL_DRY_RUN_SOP.md` 记录的 Hi5 模型为 `hi5_hand_model_v2.json`，而 `control_ui/config.yaml` 当前为 `hi5_hand_model_v8.json`——正式取数前需核对并冻结实际生效版本（以配置和程序显示 SHA-256 为准）。
+- **配置一致性检查**：Canonical v4 只允许 `control_ui/wa100_kinematics_model.json`；正式取数前需冻结程序显示的 WA100 `calibration_id` 与 SHA-256。

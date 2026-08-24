@@ -124,5 +124,9 @@
 - [灵巧手抓取任务设计与过流缓解方案](docs/TASK_DESIGN.md)
 - [感知辅助监控 Phase 1](docs/perception_assist_monitor_phase1.md)
 - [WA100 本地运动学模型](control_ui/WA100_KINEMATICS.md)
+
+Canonical 手部当前为 schema v4：PICO、数据手套和固定手型先统一成
+`thumb_pitch/thumb_yaw/index/middle/ring/pinky` 六通道位置值，再由同一份 WA100
+运动学模型生成实时、实测和修正后的 21 点骨架。旧 schema 1–3 记录仅支持只读显示。
 - [Hand_Tracker 手部识别服务说明](Hand_Tracker/README.md)
 - [WA100 SDK 使用说明](wa100-sdk-publish/README.md)
