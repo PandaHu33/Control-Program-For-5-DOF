@@ -32,6 +32,159 @@ FINGER_CURL_CALIBRATION = (
     (13, 14, 16, 154.575, 56.0),
     (17, 18, 20, 160.095, 55.0),
 )
+
+
+class XrSkeletonOneEuroFilter:
+    """One Euro filter for one 21x3 XR hand-position skeleton.
+
+    Filtering happens before any curl, pinch or WA100 retargeting so every
+    downstream consumer observes the same conditioned geometry.
+    """
+
+    RESET_GAP_SEC = 0.25
+    MIN_CUTOFF_HZ = 1.5
+    BETA = 0.6
+    DERIVATIVE_CUTOFF_HZ = 1.0
+
+    def __init__(self, adaptive: bool = True, thumb_cutoff_hz: float = 0.18,
+                 finger_cutoff_hz: float = 0.35, local_beta: float = 5.0) -> None:
+        if not all(math.isfinite(x) and x > 0 for x in (thumb_cutoff_hz, finger_cutoff_hz, local_beta)):
+            raise ValueError("XR filter settings must be positive and finite")
+        self.adaptive = adaptive
+        self.thumb_cutoff_hz = thumb_cutoff_hz
+        self.finger_cutoff_hz = finger_cutoff_hz
+        self.local_beta = local_beta
+        self.generation = 0
+        self.basis = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        self.raw: Optional[list[float]] = None
+        self.filtered: Optional[list[float]] = None
+        self.derivative = [0.0] * EXPECTED_FLOAT_COUNT
+        self.last_time: Optional[float] = None
+
+    @staticmethod
+    def _alpha(dt: float, cutoff_hz: float) -> float:
+        safe_cutoff = max(float(cutoff_hz), 1e-6)
+        tau = 1.0 / (2.0 * math.pi * safe_cutoff)
+        return dt / (tau + dt)
+
+    def reset(self) -> None:
+        self.raw = None
+        self.filtered = None
+        self.derivative = [0.0] * EXPECTED_FLOAT_COUNT
+        self.last_time = None
+
+    def _initialize(self, values: list[float], now: float) -> list[float]:
+        self.generation += 1
+        sample = [float(value) for value in values]
+        self.raw = sample.copy()
+        self.filtered = sample.copy()
+        self.derivative = [0.0] * EXPECTED_FLOAT_COUNT
+        self.last_time = float(now)
+        return sample
+
+    def _output(self) -> list[float]:
+        result = self.filtered.copy()
+        if self.adaptive:
+            for joint in range(1, 21):
+                base = joint * 3
+                local = self.filtered[base:base + 3]
+                for axis in range(3):
+                    result[base + axis] = result[axis] + sum(local[k] * self.basis[k][axis] for k in range(3))
+        return result
+
+    def _palm_basis(self, sample: list[float]) -> None:
+        # One rigid palm frame for every joint: wrist translation and whole-hand
+        # rotation no longer enter independent finger filters at different gains.
+        x = [sample[15 + a] - sample[51 + a] for a in range(3)]
+        y = [sample[27 + a] - sample[a] for a in range(3)]
+        x_length = math.sqrt(sum(v * v for v in x))
+        if x_length < 1e-6:
+            return
+        x = [v / x_length for v in x]
+        dot = sum(x[a] * y[a] for a in range(3))
+        y = [y[a] - dot * x[a] for a in range(3)]
+        y_length = math.sqrt(sum(v * v for v in y))
+        if y_length < 1e-6:
+            return
+        y = [v / y_length for v in y]
+        z = [x[1]*y[2]-x[2]*y[1], x[2]*y[0]-x[0]*y[2], x[0]*y[1]-x[1]*y[0]]
+        self.basis = (x, y, z)
+
+    def apply(self, values: list, now: Optional[float] = None) -> list[float]:
+        if len(values) != EXPECTED_FLOAT_COUNT:
+            raise ValueError(f"XR skeleton length {len(values)} != {EXPECTED_FLOAT_COUNT}")
+        sample = [float(value) for value in values]
+        if not all(math.isfinite(value) for value in sample):
+            raise ValueError("XR skeleton contains non-finite positions")
+        timestamp = float(time.monotonic() if now is None else now)
+        if not math.isfinite(timestamp):
+            raise ValueError("XR timestamp must be finite")
+        if self.last_time is not None and timestamp <= self.last_time:
+            return self._output()
+        if self.adaptive:
+            self._palm_basis(sample)
+            for joint in range(1, 21):
+                base = joint * 3
+                relative = [sample[base + a] - sample[a] for a in range(3)]
+                sample[base:base + 3] = [sum(relative[a] * axis[a] for a in range(3)) for axis in self.basis]
+        if self.raw is None or self.filtered is None or self.last_time is None:
+            self._initialize(sample, timestamp)
+            return self._output()
+
+        elapsed = timestamp - self.last_time
+        if not math.isfinite(elapsed) or elapsed <= 0.0 or elapsed > self.RESET_GAP_SEC:
+            if elapsed <= 0.0:
+                return self._output()
+            self._initialize(sample, timestamp)
+            return self._output()
+
+        dt = max(0.002, min(0.05, elapsed))
+        if self.adaptive:
+            # Bound acquisition spikes before derivative adaptation; otherwise
+            # a single bad joint opens the One Euro bandwidth exactly when it
+            # should reject the measurement.
+            for joint in range(1, 21):
+                base = joint * 3
+                innovation = [sample[base + axis] - self.raw[base + axis] for axis in range(3)]
+                length = math.sqrt(sum(x * x for x in innovation))
+                limit = 0.0015 + 0.3 * dt
+                if length > limit:
+                    for axis in range(3):
+                        sample[base + axis] = self.raw[base + axis] + innovation[axis] * limit / length
+        derivative_alpha = self._alpha(dt, self.DERIVATIVE_CUTOFF_HZ)
+        raw_derivatives = [0.0] * EXPECTED_FLOAT_COUNT
+        for index in range(EXPECTED_FLOAT_COUNT):
+            raw_derivative = (sample[index] - self.raw[index]) / dt
+            self.derivative[index] += derivative_alpha * (raw_derivative - self.derivative[index])
+            raw_derivatives[index] = self.derivative[index]
+
+        # One adaptive cutoff per 3-D joint avoids axis-dependent response.
+        for joint in range(21):
+            base = joint * 3
+            speed = math.sqrt(sum(raw_derivatives[base + axis] ** 2 for axis in range(3)))
+            cutoff = self.MIN_CUTOFF_HZ + self.BETA * speed
+            if self.adaptive and joint > 0:
+                minimum = self.thumb_cutoff_hz if joint <= 4 else self.finger_cutoff_hz
+                # Local speed excludes whole-hand translation. Suppress the
+                # noise floor, but open the bandwidth for deliberate motion.
+                cutoff = minimum + self.local_beta * max(0.0, speed - 0.015)
+                residual = math.sqrt(sum((sample[base + axis] - self.filtered[base + axis]) ** 2 for axis in range(3)))
+                cutoff += min(2.0, 35.0 * max(0.0, residual - 0.004))
+                cutoff = min(cutoff, 2.5 if joint <= 4 else 5.0)
+            alpha = self._alpha(dt, cutoff)
+            gain = 1.0
+            if self.adaptive and joint > 0:
+                deadband = 0.0015 if joint <= 4 else 0.0008
+                gain = max(0.0, 1.0 - deadband / max(residual, 1e-12))
+            for axis in range(3):
+                index = base + axis
+                self.filtered[index] += alpha * gain * (sample[index] - self.filtered[index])
+
+        self.raw = sample
+        self.last_time = timestamp
+        return self._output()
+
+
 def validate_packet(payload: Dict[str, Any]) -> Tuple[bool, str]:
     for key in REQUIRED_ARRAYS:
         value = payload.get(key)
@@ -137,6 +290,8 @@ class UnityHandBridge:
         self.fist_on_threshold = float(fist_on_threshold)
         self.fist_off_threshold = float(fist_off_threshold)
         self.left_fist = False
+        self.right_skeleton_filter = XrSkeletonOneEuroFilter()
+        self.left_skeleton_filter = XrSkeletonOneEuroFilter(adaptive=False)
         self.stop_event = threading.Event()
         self.forwarded = 0
         self.dropped = 0
@@ -172,6 +327,7 @@ class UnityHandBridge:
                         client.close()
                     except OSError:
                         pass
+                    self._reset_skeleton_filters()
                     print("[UnityHandBridge] Unity disconnected")
         finally:
             server.close()
@@ -222,6 +378,11 @@ class UnityHandBridge:
             self._drop(f"json decode failed: {exc}")
             return
 
+        if payload.get("rightTracked") is False:
+            self.right_skeleton_filter.reset()
+        if payload.get("leftTracked") is False:
+            self.left_skeleton_filter.reset()
+
         ok, reason = validate_packet(payload)
         if not ok:
             self._drop(reason)
@@ -235,6 +396,13 @@ class UnityHandBridge:
         age_sec = time.monotonic() - recv_monotonic
         if self.stale_timeout_sec > 0 and age_sec > self.stale_timeout_sec:
             self._drop(f"stale in bridge {age_sec:.3f}s")
+            return
+
+        try:
+            self._filter_xr_skeletons(payload, recv_monotonic)
+        except ValueError as exc:
+            self._reset_skeleton_filters()
+            self._drop(str(exc))
             return
 
         send_wall = time.time()
@@ -280,6 +448,41 @@ class UnityHandBridge:
         self.last_frame_id = frame_id
         self._log_status(force=self.verbose)
 
+    def _filter_xr_skeletons(self, payload: Dict[str, Any], now: float) -> None:
+        filtered_sides = []
+        for side, skeleton_filter in (
+            ("right", self.right_skeleton_filter),
+            ("left", self.left_skeleton_filter),
+        ):
+            key = f"{side}Positions"
+            raw = payload.get(key)
+            tracked = bool(payload.get(f"{side}Tracked", raw is not None))
+            if not tracked or raw is None:
+                skeleton_filter.reset()
+                continue
+            payload[f"{key}Raw"] = list(raw)
+            payload[key] = skeleton_filter.apply(raw, now)
+            filtered_sides.append(side)
+        payload["xrSkeletonFilter"] = {
+            "name": "one_euro_palm_local_deadband_v4",
+            "stage": "post_xr_acquisition_pre_retarget",
+            "sides": filtered_sides,
+            "min_cutoff_hz": XrSkeletonOneEuroFilter.MIN_CUTOFF_HZ,
+            "beta": XrSkeletonOneEuroFilter.BETA,
+            "derivative_cutoff_hz": XrSkeletonOneEuroFilter.DERIVATIVE_CUTOFF_HZ,
+            "thumb_cutoff_hz": self.right_skeleton_filter.thumb_cutoff_hz,
+            "finger_cutoff_hz": self.right_skeleton_filter.finger_cutoff_hz,
+            "local_beta": self.right_skeleton_filter.local_beta,
+            "thumb_deadband_m": 0.0015,
+            "finger_deadband_m": 0.0008,
+            "right_generation": self.right_skeleton_filter.generation,
+            "left_generation": self.left_skeleton_filter.generation,
+        }
+
+    def _reset_skeleton_filters(self) -> None:
+        self.right_skeleton_filter.reset()
+        self.left_skeleton_filter.reset()
+
     def _drop(self, reason: str) -> None:
         self.dropped += 1
         if self.verbose or self.dropped <= 5 or self.dropped % 100 == 0:
@@ -308,6 +511,9 @@ def main() -> None:
     parser.add_argument("--no-latest-only", dest="latest_only", action="store_false", help="Forward every valid TCP packet instead of keeping only the latest packet from each read.")
     parser.add_argument("--stale-timeout-sec", type=float, default=0.40, help="Drop packets that wait inside this bridge longer than this many seconds.")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--thumb-cutoff-hz", type=float, default=0.18)
+    parser.add_argument("--finger-cutoff-hz", type=float, default=0.35)
+    parser.add_argument("--local-beta", type=float, default=5.0)
     parser.set_defaults(latest_only=True)
     args = parser.parse_args()
 
@@ -324,6 +530,9 @@ def main() -> None:
         args.fist_on_threshold,
         args.fist_off_threshold,
     )
+    bridge.right_skeleton_filter = XrSkeletonOneEuroFilter(
+        thumb_cutoff_hz=args.thumb_cutoff_hz,
+        finger_cutoff_hz=args.finger_cutoff_hz, local_beta=args.local_beta)
     try:
         bridge.serve_forever()
     except KeyboardInterrupt:

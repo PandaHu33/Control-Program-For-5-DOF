@@ -220,12 +220,30 @@ def validate_canonical_goal(payload: Any) -> tuple[bool, str]:
 class WA100PinchDetector:
     """Hysteretic pinch states derived only from WA100 FK feature points."""
 
-    def __init__(self, enter_threshold: float = 0.55, release_threshold: float = 0.70):
+    def __init__(self, enter_threshold: float = 0.55, release_threshold: float = 0.70,
+                 confirm_enter_sec: float = 0.08, confirm_release_sec: float = 0.04):
+        if not all(math.isfinite(v) and v > 0 for v in (confirm_enter_sec, confirm_release_sec)):
+            raise ValueError("gesture confirmation durations must be positive finite values")
+        self.confirm_enter_sec = confirm_enter_sec
+        self.confirm_release_sec = confirm_release_sec
         self.enter_threshold = float(enter_threshold)
         self.release_threshold = float(release_threshold)
         self.states = {"thumb_index_pinch": False, "thumb_middle_pinch": False}
+        self.pending = {}
+        self.last_time = None
+        self.active_anchor = "none"
 
-    def update(self, skeleton: Any) -> Dict[str, Any]:
+    def reset(self) -> None:
+        self.states = {"thumb_index_pinch": False, "thumb_middle_pinch": False}
+        self.pending.clear()
+        self.last_time = None
+        self.active_anchor = "none"
+
+    def update(self, skeleton: Any, now: Optional[float] = None) -> Dict[str, Any]:
+        if now is not None:
+            if self.last_time is not None and (now < self.last_time or now - self.last_time > 0.25):
+                self.reset()
+            self.last_time = now
         points = np.asarray(skeleton, dtype=float).reshape(21, 3)
         palm_width = max(float(np.linalg.norm(points[5] - points[17])), 1e-9)
         result: Dict[str, Any] = {
@@ -236,7 +254,16 @@ class WA100PinchDetector:
         for key, tip in (("thumb_index_pinch", 8), ("thumb_middle_pinch", 12)):
             distance = float(np.linalg.norm(points[4] - points[tip])) / palm_width
             active = self.states[key]
-            active = distance <= (self.release_threshold if active else self.enter_threshold)
+            desired = distance <= (self.release_threshold if active else self.enter_threshold)
+            if now is None:
+                active = desired
+            elif desired == active:
+                self.pending.pop(key, None)
+            else:
+                since = self.pending.setdefault(key, now)
+                if now - since + 1e-9 >= (self.confirm_enter_sec if desired else self.confirm_release_sec):
+                    active = desired
+                    self.pending.pop(key, None)
             self.states[key] = active
             result[key] = {
                 "active": active,
@@ -247,6 +274,10 @@ class WA100PinchDetector:
             result["active_anchor"] = "thumb_index"
         elif result["thumb_middle_pinch"]["active"]:
             result["active_anchor"] = "thumb_middle"
+        if now is not None and self.active_anchor != "none":
+            if result[self.active_anchor + "_pinch"]["active"]:
+                result["active_anchor"] = self.active_anchor
+        self.active_anchor = result["active_anchor"]
         return result
 
 
@@ -258,7 +289,10 @@ class CanonicalGoalBuilder:
         self.lock = threading.RLock()
         self.hand_kinematics = WA100Kinematics.load(kinematics_model_path)
         self.schema_version = CANONICAL_SCHEMA_VERSION
-        self.pinch_detector = WA100PinchDetector()
+        gesture_config = planner_config if isinstance(planner_config, dict) else {}
+        self.pinch_detector = WA100PinchDetector(
+            confirm_enter_sec=float(gesture_config.get("vr_gesture_enter_sec", 0.08)),
+            confirm_release_sec=float(gesture_config.get("vr_gesture_release_sec", 0.04)))
         if isinstance(planner_config, CanonicalPlannerConfig):
             resolved_planner_config = planner_config
         else:
@@ -289,7 +323,12 @@ class CanonicalGoalBuilder:
             return False, "invalid_wrist_adapter"
         receive_utc_ns = int(receive_utc_ns or time.time_ns())
         with self.lock:
+            session = int(payload.get("tracking_session_id", 0))
+            if (self.wrist and source == "pico_wrist" and
+                    session != self.wrist.get("tracking_session_id", 0)):
+                self.wrist_planner.reset_tracking_reference()
             self.wrist = {
+                "tracking_session_id": session,
                 "source": source,
                 "source_seq": int(payload.get("source_seq", -1)),
                 "source_time_ns": int(payload.get("source_time_ns") or receive_utc_ns),
@@ -321,10 +360,21 @@ class CanonicalGoalBuilder:
             skeleton = self.hand_kinematics.canonical_skeleton_21(target_values)
         except (TypeError, ValueError) as exc:
             return False, str(exc)
-        gestures = self.pinch_detector.update(skeleton)
         calibration_id = str(value.get("glove_calibration_id") or value.get("calibration_id") or "")
         with self.lock:
+            frame_id = int(value.get("frameId", value.get("frame_id", -1)))
+            previous = self.hand
+            generation = (value.get("xrSkeletonFilter") or {}).get("right_generation", 0)
+            same_stream = (previous and previous["source"] == source and previous["calibration_id"] == calibration_id
+                           and previous.get("tracking_generation", 0) == generation)
+            if not same_stream or (previous and receive_utc_ns - previous["receive_utc_ns"] > 250_000_000):
+                self.pinch_detector.reset()
+            elif source == "pico_hand" and frame_id >= 0 and frame_id <= previous["source_seq"]:
+                return False, "duplicate_or_out_of_order_hand_frame"
+            gestures = self.pinch_detector.update(skeleton, receive_utc_ns / 1e9 if source == "pico_hand" else None)
             self.hand = {
+                "tracking_generation": generation,
+                "vr_anchor_stability": dict(value.get("vr_anchor_stability") or {}) if source == "pico_hand" else {},
                 "source": source,
                 "source_seq": int(value.get("frameId", value.get("frame_id", -1))),
                 "source_time_ns": int(value.get("source_timestamp_ns") or value.get("receiver_wall_time_ns") or receive_utc_ns),
@@ -428,6 +478,7 @@ class CanonicalGoalBuilder:
                 },
                 "gestures": json.loads(json.dumps(hand.get("gestures") or {})),
                 "hand_processing": {
+                    "vr_anchor_stability": dict(hand.get("vr_anchor_stability") or {}),
                     "processing_time_ms": float(hand.get("processing_time_ms") or 0.0),
                 },
             }

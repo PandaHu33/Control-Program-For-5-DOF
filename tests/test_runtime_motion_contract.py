@@ -45,6 +45,29 @@ class RuntimeMotionContractTests(unittest.TestCase):
         launch = (ROOT / "DataSet_ws/src/mainpulator/launch/mainpulatorlaunch.launch").read_text(encoding="utf-8")
         source = (ROOT / "DataSet_ws/src/mainpulator/src/test_node.cpp").read_text(encoding="utf-8")
         self.assertIn('<arg name="runtime_motion_duration" default="5.0" />', launch)
+        self.assertIn('<arg name="joint5_enabled" default="false" />', launch)
+        self.assertIn('nh.param("joint5_enabled", joint5_enabled, false);', source)
+        self.assertEqual(
+            len(re.findall(
+                r"if \(joint5_enabled\)\s*\{\s*param::MomentInit\(joint5, socket_can\);",
+                source,
+            )),
+            2,
+        )
+        self.assertIn("feedback_joint_count = joint5_enabled ? 5 : 4;", source)
+        self.assertIn("rollback < feedback_joint_count", source)
+        self.assertEqual(
+            len(re.findall(
+                r"if \(joint5_enabled\)\s*\{\s*param::Enable\(socket_can, 6, joint5\);",
+                source,
+            )),
+            2,
+        )
+        self.assertRegex(
+            source,
+            r"if \(joint5_enabled\)\s*\{\s*// 关节 5力矩控制[\s\S]*?joint5\.MomentOutput\(tol5\);",
+        )
+        self.assertIn("if (index == 4 && !joint5_enabled) break;", source)
         self.assertIn('"/arm/motion_status"', source)
         self.assertIn("StartRuntimeMotion(msg, command_source)", source)
         self.assertIn("last_runtime_motion_stamp == msg.header.stamp", source)

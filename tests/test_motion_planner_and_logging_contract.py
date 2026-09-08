@@ -32,7 +32,7 @@ class MotionPlannerAndLoggingContractTests(unittest.TestCase):
     def test_planner_switch_and_limits_are_exposed_with_safe_defaults(self):
         launch = (PACKAGE / "launch/mainpulatorlaunch.launch").read_text(encoding="utf-8")
         for expected in (
-            '<arg name="trajectory_planner_enabled" default="false" />',
+            '<arg name="trajectory_planner_enabled" default="true" />',
             '<arg name="trajectory_max_velocity" default="[1.0, 1.0, 1.0, 1.0]" />',
             '<arg name="trajectory_max_acceleration" default="[2.0, 2.0, 2.0, 2.0]" />',
             '<arg name="trajectory_max_jerk" default="[10.0, 10.0, 10.0, 10.0]" />',
@@ -69,8 +69,29 @@ class MotionPlannerAndLoggingContractTests(unittest.TestCase):
             self.assertIn("ARM_TRAJECTORY_PLANNER_ENABLE", environment)
             self.assertIn("ARM_MOTION_DATA_LOG_ENABLE", environment)
             self.assertIn("ARM_MOTION_DATA_LOG_PATH", environment)
+            self.assertIn('ARM_JOINT5_ENABLE="${ARM_JOINT5_ENABLE:-0}"', environment)
             self.assertIn("trajectory_planner_enabled:=${ARM_TRAJECTORY_PLANNER_ENABLE}", environment)
             self.assertIn("motion_data_log_enabled:=${ARM_MOTION_DATA_LOG_ENABLE}", environment)
+            self.assertIn("joint5_enabled:=${ARM_JOINT5_ENABLE}", environment)
+
+    def test_source_wrist_planning_is_enabled_but_slave_ruckig_owns_joint_trajectory(self):
+        config = (ROOT / "control_ui/config.yaml").read_text(encoding="utf-8")
+        node = (PACKAGE / "src/test_node.cpp").read_text(encoding="utf-8")
+        for environment_path in (
+            ROOT / "robot/robot_env.sh",
+            ROOT / "deployment/jetson_ros1_20.04/robot_env.sh",
+        ):
+            environment = environment_path.read_text(encoding="utf-8")
+            self.assertIn('ARM_TRAJECTORY_PLANNER_ENABLE="${ARM_TRAJECTORY_PLANNER_ENABLE:-1}"', environment)
+        self.assertIn("planner_enabled: true", config)
+        self.assertIn('planner_keyboard_profile: "jerk_limited"', config)
+        self.assertIn('planner_gamepad_profile: "jerk_limited"', config)
+        self.assertIn('planner_pico_wrist_profile: "one_euro"', config)
+        self.assertIn('planner_vr_controller_profile: "one_euro"', config)
+        self.assertIn('target_dq.fill(0.0);', node)
+        self.assertIn('target_ddq.fill(0.0);', node)
+        self.assertNotIn('expect_dq(0,0) = -msg.angular_velocity.x;', node)
+        self.assertNotIn('expect_ddq(0,0) = -msg.linear_acceleration.x;', node)
 
     def test_controller_fixed_step_and_startup_homing_contract_remain(self):
         node = (PACKAGE / "src/test_node.cpp").read_text(encoding="utf-8")

@@ -1,6 +1,8 @@
 import ast
 import importlib.util
+import queue
 import sys
+import time
 import types
 import unittest
 from pathlib import Path
@@ -45,6 +47,14 @@ def load_h5_bridge(path, module_name):
 
 
 class H5SourceHelperTests(unittest.TestCase):
+    @staticmethod
+    def bare_bridge(module):
+        bridge = object.__new__(module.H5UdpBridge)
+        bridge.tx_queue = queue.Queue()
+        bridge.telemetry_ind = 0
+        bridge.last_imitation_state_time = 0.0
+        return bridge
+
     def test_active_source_is_initialized_once_in_constructor(self):
         paths = [
             ROOT / "DataSet_ws/src/h5_udp_bridge/scripts/h5_udp_bridge_node.py",
@@ -118,6 +128,46 @@ class H5SourceHelperTests(unittest.TestCase):
         self.assertEqual(payload["source_time_ns"], 1_250_000_000)
         self.assertEqual(payload["current_valid_mask"], 0b00111)
         self.assertIsNone(payload["actual_current_ma"][4])
+
+    def test_fresh_versioned_state_blocks_competing_generic_joint_state(self):
+        module = load_h5_bridge(
+            ROOT / "DataSet_ws/src/h5_udp_bridge/scripts/h5_udp_bridge_node.py",
+            "h5_bridge_joint_priority_test",
+        )
+        bridge = self.bare_bridge(module)
+        bridge.last_imitation_state_time = time.time()
+        bridge.on_joint_states(_Message(
+            name=["joint1", "joint2", "joint3"],
+            position=[0.1, 0.2, 0.3], velocity=[0.0, 0.0, 0.0],
+        ))
+        self.assertTrue(bridge.tx_queue.empty())
+
+    def test_generic_joint_state_without_named_j4_is_rejected(self):
+        module = load_h5_bridge(
+            ROOT / "DataSet_ws/src/h5_udp_bridge/scripts/h5_udp_bridge_node.py",
+            "h5_bridge_missing_j4_test",
+        )
+        bridge = self.bare_bridge(module)
+        bridge.on_joint_states(_Message(
+            name=["joint1", "joint2", "joint3"],
+            position=[0.1, 0.2, 0.3], velocity=[0.0, 0.0, 0.0],
+        ))
+        self.assertTrue(bridge.tx_queue.empty())
+
+    def test_complete_named_joint_state_preserves_real_j4(self):
+        module = load_h5_bridge(
+            ROOT / "DataSet_ws/src/h5_udp_bridge/scripts/h5_udp_bridge_node.py",
+            "h5_bridge_complete_j4_test",
+        )
+        bridge = self.bare_bridge(module)
+        bridge.on_joint_states(_Message(
+            name=["joint1", "joint2", "joint3", "wrist_roll"],
+            position=[0.1, 0.2, 0.3, 0.75], velocity=[0.01, 0.02, 0.03, 0.04],
+            header=_Message(stamp=None),
+        ))
+        payload = bridge.tx_queue.get_nowait()
+        self.assertEqual(payload["angle"][:4], [-0.1, 0.2, 0.3, 0.75])
+        self.assertEqual(payload["current"][:4], [-0.01, 0.02, 0.03, 0.04])
 
 
 if __name__ == "__main__":

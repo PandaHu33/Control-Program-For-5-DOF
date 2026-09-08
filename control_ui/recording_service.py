@@ -197,6 +197,7 @@ class RecordingManager:
         self._raw_input_rejected = {}
         self._raw_input_last_seen_ns = {}
         self._raw_input_required = []
+        self._hand_tracking_gaps = []
         self._last_raw_timestamp_ns = 0
         self._browser_raw_connected = False
         self._camera_counts = {"left": 0, "right": 0}
@@ -269,6 +270,8 @@ class RecordingManager:
         receive_monotonic_ns = int(receive_monotonic_ns or time.monotonic_ns())
         key = self._raw_input_key(source, value)
         with self.lock:
+            if key == "pico_hand:hand_skeleton" and self.state == "recording":
+                self._update_hand_tracking_gap(receive_utc_ns, recovered=True)
             self._raw_input_last_seen_ns[key] = receive_utc_ns
             if self.state != "recording" or not self.session or not self._raw_input_fh:
                 return False
@@ -288,6 +291,30 @@ class RecordingManager:
             self._raw_input_fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
             self._raw_input_counts[key] = self._raw_input_counts.get(key, 0) + 1
             return True
+
+    def _update_hand_tracking_gap(self, now_ns, recovered=False, grace_ns=1_000_000_000):
+        """Called under self.lock; gaps describe absent samples, never synthetic input."""
+        key = "pico_hand:hand_skeleton"
+        if not self.session or key not in self._raw_input_required:
+            return
+        last_seen = self._raw_input_last_seen_ns.get(key)
+        gap = self._hand_tracking_gaps[-1] if self._hand_tracking_gaps else None
+        if not gap or gap["end_utc_ns"] is not None:
+            if last_seen and now_ns - last_seen <= grace_ns:
+                return
+            gap = {
+                "source": key,
+                "last_sample_utc_ns": last_seen,
+                "start_utc_ns": max(last_seen or 0, self.session["started_at_ns"]),
+                "detected_utc_ns": now_ns,
+                "end_utc_ns": None,
+                "recovered": False,
+            }
+            self._hand_tracking_gaps.append(gap)
+        if recovered:
+            gap["end_utc_ns"] = now_ns
+            gap["duration_sec"] = max(0, now_ns - gap["start_utc_ns"]) / 1e9
+            gap["recovered"] = True
 
     def observe_canonical_goal(self, payload, receive_utc_ns=None, receive_monotonic_ns=None):
         if not isinstance(payload, dict) or payload.get("type") != "canonical_goal":
@@ -718,6 +745,7 @@ class RecordingManager:
             self._raw_input_counts = {}
             self._raw_input_rejected = {}
             self._raw_input_required = self._required_raw_inputs(method)
+            self._hand_tracking_gaps = []
             self._last_raw_timestamp_ns = 0
             self._camera_counts = {"left": 0, "right": 0}
             self._clock = ClockMapper()
@@ -737,7 +765,13 @@ class RecordingManager:
                 return {"ok": True, "message": "no active recording", **self.status()}
             self.state = "stopping"
             session = self.session
-        stopped_ns, errors, camera = time.time_ns(), [], {}
+            stopped_ns = time.time_ns()
+            self._update_hand_tracking_gap(stopped_ns)
+            for gap in self._hand_tracking_gaps:
+                if gap["end_utc_ns"] is None:
+                    gap["end_utc_ns"] = stopped_ns
+                    gap["duration_sec"] = max(0, stopped_ns - gap["start_utc_ns"]) / 1e9
+        errors, camera = [], {}
         canonical_writer_error = self._stop_canonical_writer()
         if canonical_writer_error:
             errors.append(canonical_writer_error)
@@ -794,6 +828,8 @@ class RecordingManager:
             "total": sum(self._raw_input_counts.values()),
             "rejected": dict(self._raw_input_rejected),
             "missing": missing_raw,
+            "hand_tracking_loss_policy": "hold_last_target_continue_recording",
+            "hand_tracking_gaps": [dict(gap) for gap in self._hand_tracking_gaps],
         }
         manifest.update({
             "state": "incomplete" if incomplete_reason or errors else "complete",
@@ -843,6 +879,7 @@ class RecordingManager:
             self._raw_input_counts = {}
             self._raw_input_rejected = {}
             self._raw_input_required = []
+            self._hand_tracking_gaps = []
             self._last_raw_timestamp_ns = 0
         return {"ok": manifest["complete"], "message": manifest["state"], "manifest": manifest, **self.status()}
 
@@ -1226,6 +1263,8 @@ class RecordingManager:
                     "right_frames": self._camera_counts["right"],
                 },
                 "raw_input_required": list(self._raw_input_required),
+                "hand_tracking_paused": any(gap["end_utc_ns"] is None for gap in self._hand_tracking_gaps),
+                "hand_tracking_gap_count": len(self._hand_tracking_gaps),
                 "canonical_writer": canonical_writer,
                 "error": self.error,
             }
@@ -1247,11 +1286,23 @@ class RecordingManager:
             required_raw = list(self._raw_input_required)
             last_seen_raw = dict(self._raw_input_last_seen_ns)
             browser_connected = self._browser_raw_connected
+            if self.state == "recording":
+                self._update_hand_tracking_gap(now, grace_ns=grace_ns)
         for key in required_raw:
+            if key == "pico_hand:hand_skeleton":
+                # Leaving the VR field of view is a tracking pause. The hand
+                # keeps its last target; actual device telemetry is checked above.
+                continue
             source = key.split(":", 1)[0]
             if source == "keyboard":
                 if not browser_connected:
                     missing.append("keyboard raw input websocket")
+                continue
+            if source == "preset_hand":
+                # Presets are latched discrete states.  They must exist when
+                # recording starts, but they do not need periodic refreshes.
+                if not last_seen_raw.get(key):
+                    missing.append(f"raw input {key}")
                 continue
             if source == "gamepad" and not browser_connected:
                 missing.append("gamepad raw input websocket")

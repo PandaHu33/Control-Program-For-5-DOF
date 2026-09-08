@@ -865,7 +865,7 @@
           <button data-api="POST /api/hand/preset/half" title="快捷键 Y">半握 <kbd>Y</kbd></button>
           <button data-api="POST /api/hand/preset/close" title="快捷键 U">握拳 <kbd>U</kbd></button>
           <button data-api="POST /api/hand/preset/pinch" title="快捷键 I">捏取 <kbd>I</kbd></button>
-          <button data-api="POST /api/hand/preset/hook" title="快捷键 O">钩拉 <kbd>O</kbd></button>
+          <button data-api="POST /api/hand/preset/hook" title="快捷键 O">对掌 <kbd>O</kbd></button>
           <button data-api="POST /api/hand/preset/thumb_index" title="快捷键 H">拇指-食指碰 <kbd>H</kbd></button>
           <button data-api="POST /api/hand/preset/thumb_middle" title="快捷键 J">拇指-中指碰 <kbd>J</kbd></button>
         </div>
@@ -1662,6 +1662,7 @@
         type: "canonical_wrist_adapter",
         schema_version: 1,
         wrist_source: canonicalWristSource(mode),
+        tracking_session_id: Number(state?.vr?.session_id ?? 0),
         source_seq: sourceSeq,
         source_time_ns: Math.max(0, Math.round(Number(sourceTimeMs || Date.now()) * 1e6)),
         adapter_wrist_delta: [
@@ -2899,6 +2900,7 @@
       if (recordingStopBtn) recordingStopBtn.disabled = !active || state === "arming";
       if (recordingHintEl) {
         if (data.error) recordingHintEl.textContent = data.error;
+        else if (state === "recording" && data.hand_tracking_paused) recordingHintEl.textContent = "VR 手部追踪暂停：保持最后姿态，录制继续；恢复识别后自动更新。";
         else if (state === "recording") recordingHintEl.textContent = "机械臂、灵巧手和双相机数据正在服务端持续落盘。";
         else if (data.readiness && !data.readiness.ok) {
           const cameraHealth = data.readiness.camera_health || {};
@@ -2921,7 +2923,7 @@
           if (data.readiness.camera_error) missing.push(`相机服务(${data.readiness.camera_error})`);
           recordingHintEl.textContent = `未就绪: ${missing.join(", ")}`;
         } else recordingHintEl.textContent = "开始前将检查机械臂、灵巧手、左右相机和磁盘空间。";
-        recordingHintEl.classList.toggle("warning", !!data.error || (!!data.readiness && !data.readiness.ok));
+        recordingHintEl.classList.toggle("warning", !!data.error || (!active && !!data.readiness && !data.readiness.ok));
       }
     }
 
@@ -4027,7 +4029,7 @@
       half: "半握",
       close: "握拳",
       pinch: "捏取",
-      hook: "钩拉",
+      hook: "对掌",
       thumb_index: "拇指-食指碰",
       thumb_middle: "拇指-中指碰",
     };

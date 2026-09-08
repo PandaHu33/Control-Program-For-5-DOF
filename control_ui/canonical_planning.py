@@ -76,7 +76,7 @@ class CanonicalPlannerConfig:
     one_euro_min_cutoff_hz: float = 2.0
     one_euro_beta: float = 0.6
     one_euro_derivative_cutoff_hz: float = 1.0
-    one_euro_max_velocity_m_s: float = 0.45
+    one_euro_max_velocity_m_s: float = 0.20
     one_euro_max_roll_velocity_rad_s: float = 1.5
     one_euro_innovation_base_m: float = 0.003
     one_euro_prediction_horizon_sec: float = 0.06
@@ -85,6 +85,10 @@ class CanonicalPlannerConfig:
     one_euro_prediction_roll_threshold_rad_s: float = 0.10
     one_euro_prediction_full_roll_rad_s: float = 0.50
     hold_timeout_sec: float = 0.10
+    vr_stability_enabled: bool = True
+    vr_still_cutoff_hz: float = 0.4
+    vr_translation_deadband_m: float = 0.0015
+    vr_roll_deadband_rad: float = 0.004
 
     @classmethod
     def from_mapping(cls, values: Optional[Mapping[str, Any]], publish_hz: float = 50.0) -> "CanonicalPlannerConfig":
@@ -112,7 +116,7 @@ class CanonicalPlannerConfig:
             one_euro_min_cutoff_hz=float(values.get("planner_one_euro_min_cutoff_hz", 2.0)),
             one_euro_beta=float(values.get("planner_one_euro_beta", 0.6)),
             one_euro_derivative_cutoff_hz=float(values.get("planner_one_euro_derivative_cutoff_hz", 1.0)),
-            one_euro_max_velocity_m_s=float(values.get("planner_one_euro_max_velocity_m_s", 0.45)),
+            one_euro_max_velocity_m_s=float(values.get("planner_one_euro_max_velocity_m_s", 0.20)),
             one_euro_max_roll_velocity_rad_s=float(values.get("planner_one_euro_max_roll_velocity_rad_s", 1.5)),
             one_euro_innovation_base_m=float(values.get("planner_one_euro_innovation_base_m", 0.003)),
             one_euro_prediction_horizon_sec=float(values.get("planner_one_euro_prediction_horizon_sec", 0.06)),
@@ -121,6 +125,10 @@ class CanonicalPlannerConfig:
             one_euro_prediction_roll_threshold_rad_s=float(values.get("planner_one_euro_prediction_roll_threshold_rad_s", 0.10)),
             one_euro_prediction_full_roll_rad_s=float(values.get("planner_one_euro_prediction_full_roll_rad_s", 0.50)),
             hold_timeout_sec=float(values.get("planner_hold_timeout_sec", 0.10)),
+            vr_stability_enabled=boolean("planner_vr_stability_enabled", True),
+            vr_still_cutoff_hz=float(values.get("planner_vr_still_cutoff_hz", 0.4)),
+            vr_translation_deadband_m=float(values.get("planner_vr_translation_deadband_m", 0.0015)),
+            vr_roll_deadband_rad=float(values.get("planner_vr_roll_deadband_rad", 0.004)),
         )
         config.validate()
         return config
@@ -135,6 +143,9 @@ class CanonicalPlannerConfig:
         if any(profile not in PLANNER_NAMES for profile in profiles):
             raise ValueError(f"planner profiles must be one of {PLANNER_NAMES}")
         positive = (
+            self.vr_still_cutoff_hz,
+            self.vr_translation_deadband_m,
+            self.vr_roll_deadband_rad,
             self.publish_hz,
             self.translation_max_velocity_m_s,
             self.translation_max_acceleration_m_s2,
@@ -196,6 +207,8 @@ class _OneEuroVector:
         self.filtered: Optional[np.ndarray] = None
         self.raw: Optional[np.ndarray] = None
         self.derivative: Optional[np.ndarray] = None
+        self.still = [True, True]
+        self.motion_evidence = [0.0, 0.0]
 
     @staticmethod
     def _alpha(cutoff_hz: np.ndarray | float, dt: float) -> np.ndarray:
@@ -208,8 +221,11 @@ class _OneEuroVector:
         self.filtered = vector.copy()
         self.raw = vector.copy()
         self.derivative = np.zeros(self.size, dtype=float)
+        self.still = [True, True]
+        self.motion_evidence = [0.0, 0.0]
 
-    def update(self, value: Sequence[float], dt: float) -> np.ndarray:
+    def update(self, value: Sequence[float], dt: float,
+               stability: Optional[CanonicalPlannerConfig] = None) -> np.ndarray:
         vector = _finite_vector(value, self.size)
         if self.filtered is None or self.raw is None or self.derivative is None:
             self.reset(vector)
@@ -218,8 +234,30 @@ class _OneEuroVector:
         derivative_alpha = self._alpha(self.derivative_cutoff_hz, dt)
         self.derivative += derivative_alpha * (derivative - self.derivative)
         cutoff = self.min_cutoff_hz + self.beta * np.abs(self.derivative)
+        target = vector.copy()
+        if stability is not None:
+            for group, indices, deadband in (
+                (0, slice(0, 3), stability.vr_translation_deadband_m),
+                (1, slice(3, 4), stability.vr_roll_deadband_rad),
+            ):
+                error = target[indices] - self.filtered[indices]
+                distance = float(np.linalg.norm(error))
+                speed = float(np.linalg.norm(self.derivative[indices]))
+                if self.still[group]:
+                    moving = distance >= 4.0 * deadband or speed >= 20.0 * deadband
+                    self.motion_evidence[group] = self.motion_evidence[group] + dt if moving else 0.0
+                    if self.motion_evidence[group] >= 0.04:
+                        self.still[group] = False
+                else:
+                    self.still[group] = distance < 2.0 * deadband and speed < 5.0 * deadband
+                    self.motion_evidence[group] = 0.0
+                if self.still[group]:
+                    cutoff[indices] = stability.vr_still_cutoff_hz
+                    # Continuous soft deadzone; accumulated displacement can
+                    # always release the hold, including very slow motion.
+                    target[indices] = self.filtered[indices] + error * max(0.0, 1.0 - deadband / max(distance, 1e-12))
         alpha = self._alpha(cutoff, dt)
-        self.filtered += alpha * (vector - self.filtered)
+        self.filtered += alpha * (target - self.filtered)
         self.raw = vector.copy()
         return self.filtered.copy()
 
@@ -260,6 +298,11 @@ class CanonicalWristPlanner:
 
     def _selected_profile(self, source: str) -> str:
         return self.override_profile or self.config.profile_for(source)
+
+    def reset_tracking_reference(self) -> None:
+        if self.position is not None:
+            self._reset_state(self.position, self.roll, "tracking_reference_changed")
+        self.last_time_ns = None
 
     def _pose(self) -> dict[str, list[float]]:
         if self.position is None:
@@ -320,7 +363,8 @@ class CanonicalWristPlanner:
         self.position = current[:3]
         self.roll = float(current[3])
 
-    def _one_euro_step(self, target_position: np.ndarray, target_roll: float, dt: float) -> None:
+    def _one_euro_step(self, target_position: np.ndarray, target_roll: float, dt: float,
+                       stabilize: bool = False) -> None:
         measurement = np.r_[target_position, target_roll]
         if self.last_measurement is None:
             self.last_measurement = measurement.copy()
@@ -334,7 +378,7 @@ class CanonicalWristPlanner:
             measurement[3] - self.last_measurement[3], -roll_limit, roll_limit
         ))
         self.last_measurement = measurement.copy()
-        filtered = self.one_euro.update(measurement, dt)
+        filtered = self.one_euro.update(measurement, dt, self.config if stabilize else None)
         derivative = np.asarray(self.one_euro.derivative, dtype=float)
         translation_speed = float(np.linalg.norm(derivative[:3]))
         translation_prediction_ratio = float(np.clip(
@@ -350,6 +394,11 @@ class CanonicalWristPlanner:
              self.config.one_euro_prediction_roll_threshold_rad_s),
             0.0, 1.0,
         ))
+        if stabilize:
+            if self.one_euro.still[0]:
+                translation_prediction_ratio = 0.0
+            if self.one_euro.still[1]:
+                roll_prediction_ratio = 0.0
         predicted = filtered.copy()
         predicted[:3] += (
             derivative[:3] * self.config.one_euro_prediction_horizon_sec *
@@ -406,6 +455,9 @@ class CanonicalWristPlanner:
         elif not effective_valid:
             self.velocity.fill(0.0)
             self.acceleration.fill(0.0)
+            if source == "pico_wrist" and self.config.vr_stability_enabled:
+                self.one_euro.reset(np.r_[self.position, self.roll])
+                self.last_measurement = np.r_[self.position, self.roll]
             reset_reason = "invalid_hold"
         else:
             target_roll = _closest_angle(self.roll, target_roll)
@@ -414,7 +466,8 @@ class CanonicalWristPlanner:
             elif profile == "jerk_limited":
                 self._jerk_limited_step(target_position, target_roll, dt)
             elif profile == "one_euro":
-                self._one_euro_step(target_position, target_roll, dt)
+                self._one_euro_step(target_position, target_roll, dt,
+                                    source == "pico_wrist" and self.config.vr_stability_enabled)
             else:  # Config validation should make this unreachable.
                 raise ValueError(f"unsupported planner profile {profile}")
 
@@ -444,6 +497,11 @@ class CanonicalWristPlanner:
             "hold_expired": hold_expired,
             "valid_for_dispatch": bool(effective_valid),
             "override": self.override_profile or "default",
+            "vr_stability": {
+                "enabled": source == "pico_wrist" and profile == "one_euro" and self.config.vr_stability_enabled,
+                "translation_still": self.one_euro.still[0],
+                "roll_still": self.one_euro.still[1],
+            },
         }
         self.last_metadata = metadata
         return output_pose, delta, dict(metadata)

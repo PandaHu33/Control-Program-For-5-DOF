@@ -1,6 +1,7 @@
 import struct
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from control_ui import bridge
@@ -154,6 +155,30 @@ class CanonicalDispatchTests(unittest.TestCase):
             with bridge.CANONICAL_ASYNC_CONDITION:
                 bridge.CANONICAL_LATEST_ENVELOPE = previous_goal
                 bridge.CANONICAL_LATEST_VERSION = previous_version
+
+    def test_hand_source_switch_marks_hand_stale_without_removing_arm_input(self):
+        with bridge.CANONICAL.lock:
+            previous_hand = bridge.CANONICAL.hand
+            previous_error = bridge.CANONICAL.last_error
+        previous_mode = bridge.SYSTEM.get("hand_mode")
+        try:
+            now = time.time_ns()
+            bridge.CANONICAL.observe_hand_input(
+                "preset_hand", {"mapped_target_units": [2000.0] * 6}, now
+            )
+            with mock.patch.object(bridge, "send_udp_repeat", return_value=(True, "sent")), \
+                 mock.patch.object(bridge, "refresh_hand_link_status", return_value=None), \
+                 mock.patch.object(bridge, "push_status", return_value=None):
+                ok, _message = bridge.send_hand_control("vr")
+            self.assertTrue(ok)
+            with bridge.CANONICAL.lock:
+                self.assertIsNotNone(bridge.CANONICAL.hand)
+                self.assertEqual(bridge.CANONICAL.hand["receive_utc_ns"], 0)
+        finally:
+            with bridge.CANONICAL.lock:
+                bridge.CANONICAL.hand = previous_hand
+                bridge.CANONICAL.last_error = previous_error
+            bridge.SYSTEM["hand_mode"] = previous_mode
 
 
 if __name__ == "__main__":

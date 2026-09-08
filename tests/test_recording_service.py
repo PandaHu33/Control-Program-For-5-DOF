@@ -357,6 +357,22 @@ class RecordingManagerTests(unittest.TestCase):
             self.assertTrue(second_stop["ok"])
             self.assertEqual(second_stop["message"], "no active recording")
 
+    @mock.patch("control_ui.recording_service._http_json")
+    def test_watchdog_keeps_latched_preset_hand_recording_alive(self, camera_api):
+        camera_api.side_effect = self.camera_api
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = RecordingManager(Path(temp_dir), min_free_bytes=0)
+            now = time.time_ns()
+            manager.state = "recording"
+            manager.session = {"started_at_ns": now, "id": "preset-test"}
+            manager._last_arm_receive_ns = now
+            manager._last_hand_receive_ns = now
+            manager._browser_raw_connected = True
+            manager._raw_input_required = ["keyboard", "preset_hand:hand_skeleton"]
+            manager._raw_input_last_seen_ns["preset_hand:hand_skeleton"] = now - 10_000_000_000
+
+            self.assertIsNone(manager.watchdog(grace_ns=1_000_000_000))
+
     def test_alignment_helpers_do_not_extrapolate_across_gaps(self):
         rows = [{"aligned_utc_ns": 100, "value": 1}, {"aligned_utc_ns": 200, "value": 2}]
         self.assertEqual(RecordingManager._interpolate(rows, [100, 200], 100, ["value"])[1], "outside_range")

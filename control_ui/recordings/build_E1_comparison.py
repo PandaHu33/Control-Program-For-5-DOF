@@ -33,6 +33,7 @@ import numpy as np
 # Conditions (mapped from manifest method strings)
 # ---------------------------------------------------------------------------
 CONDITION_NAMES = {
+    "keyboard+preset": "Keyboard + Preset",
     "keyboard+glove": "Keyboard + Glove",
     "gamepad+glove": "Gamepad + Glove",
     "controller_delta+glove": "VR Controller + Glove",
@@ -45,6 +46,7 @@ CONDITION_ORDER = [
     "Pure VR Hand Tracking",
 ]
 CONDITION_COLORS = {
+    "Keyboard + Preset": "#7c3aed",
     "Keyboard + Glove": "#1f77b4",
     "Gamepad + Glove": "#ff7f0e",
     "VR Controller + Glove": "#2ca02c",
@@ -73,6 +75,7 @@ REPEATED_CONDITIONS = {
     "controller_delta+glove": "VR Controller + Glove",
 }
 REPEATED_CONDITION_LABELS_ZH = {
+    "Keyboard + Preset": "键盘 + 预编程",
     "Keyboard + Glove": "键盘 + 数据手套",
     "Gamepad + Glove": "手柄 + 数据手套",
     "VR Controller + Glove": "VR手柄 + 数据手套",
@@ -81,6 +84,7 @@ SMOOTHNESS_HZ = 50.0
 SMOOTHNESS_WINDOW_S = 0.4
 ARM_LINK_3_M = 0.424
 ARM_LINK_5_M = 0.424
+RUCKIG_MAX_JOINT_VELOCITY_RAD_S = 1.0
 REPRESENTATIVE_METRICS = (
     "duration_s",
     "wrist_path_length_m",
@@ -671,7 +675,7 @@ def load_repeated_trial(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     except (OSError, json.JSONDecodeError) as exc:
         return None, f"invalid_manifest:{exc}"
     method = str(manifest.get("method", "unknown"))
-    condition = REPEATED_CONDITIONS.get(method)
+    condition = REPEATED_CONDITIONS.get(method) or ("Keyboard + Preset" if method == "keyboard+preset" else None)
     if condition is None:
         return None, f"unsupported_method:{method}"
     if not bool(manifest.get("complete")) or str(manifest.get("state", "")) != "complete":
@@ -767,6 +771,11 @@ def build_repeated_group_summary(
         for key in (
             "duration_s", "wrist_path_length_m", "overall_arm_rmse_rad", "overall_hand_rmse_unit",
             "endpoint_position_rmse_mm", "endpoint_orientation_rmse_deg",
+            "canonical_cartesian_speed_max_m_s",
+            "canonical_cartesian_speed_p99_m_s", "canonical_joint_speed_max_rad_s",
+            "canonical_joint_speed_p99_rad_s", "canonical_intervals_over_ruckig_velocity_fraction",
+            "equivalent_045_joint_speed_median_rad_s", "equivalent_045_joint_speed_p95_rad_s",
+            "equivalent_045_over_ruckig_velocity_fraction",
         ):
             mean, sd = _mean_sd([float(row[key]) for row in group])
             summary[f"{key}_mean"] = mean
@@ -963,6 +972,19 @@ def arm_fk_pose_4dof(q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return position, quaternion
 
 
+def arm_position_jacobian_3dof(q: np.ndarray) -> np.ndarray:
+    q1, q2, q3 = (float(q[index]) for index in range(3))
+    radial = ARM_LINK_3_M * math.cos(q2) + ARM_LINK_5_M * math.cos(q2 - q3)
+    height = ARM_LINK_3_M * math.sin(q2) + ARM_LINK_5_M * math.sin(q2 - q3)
+    distal_sin = ARM_LINK_5_M * math.sin(q2 - q3)
+    distal_cos = ARM_LINK_5_M * math.cos(q2 - q3)
+    return np.asarray([
+        [-radial * math.sin(q1), -height * math.cos(q1), distal_sin * math.cos(q1)],
+        [ radial * math.cos(q1), -height * math.sin(q1), distal_sin * math.sin(q1)],
+        [0.0, radial, -distal_cos],
+    ])
+
+
 def load_endpoint_tracking_errors(session_path: Path) -> dict[str, np.ndarray]:
     rows = read_csv(session_path / "aligned_20hz.csv")
     times: list[float] = []
@@ -992,6 +1014,79 @@ def load_endpoint_tracking_errors(session_path: Path) -> dict[str, np.ndarray]:
         "position_error_mm": np.asarray(position_errors_mm),
         "orientation_error_deg": np.asarray(orientation_errors_deg),
     }
+
+
+def audit_canonical_speed_against_ruckig(session_path: Path) -> dict[str, Any]:
+    """Compare 50 Hz canonical IK increments with the downstream joint limit."""
+    manifest = json.loads((session_path / "manifest.json").read_text(encoding="utf-8"))
+    start_ns = int(manifest["started_at_ns"])
+    samples: list[tuple[float, np.ndarray, np.ndarray]] = []
+    with (session_path / "canonical_goal.jsonl").open("r", encoding="utf-8") as stream:
+        for line in stream:
+            try:
+                goal = json.loads(line)
+                target = goal.get("final_targets") or goal.get("slave_kinematic_reference_cmd") or {}
+                q = numeric_vector(target.get("arm_target_q_rad"), 4)
+                position = numeric_vector((goal.get("wrist_pose_C") or {}).get("position_m"), 3)
+                timestamp_ns = int(goal.get("record_receive_utc_ns") or goal.get("receive_utc_ns") or 0)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+            if q is not None and position is not None and timestamp_ns > 0:
+                samples.append(((timestamp_ns - start_ns) / 1e9, np.asarray(q), np.asarray(position)))
+    if len(samples) < 5:
+        raise ValueError(f"insufficient canonical IK data in {session_path}")
+    samples.sort(key=lambda item: item[0])
+    times = np.asarray([item[0] for item in samples])
+    q = np.unwrap(np.asarray([item[1] for item in samples]), axis=0)
+    position = np.asarray([item[2] for item in samples])
+    dt = np.diff(times)
+    valid = (dt >= 0.005) & (dt <= 0.100)
+    if np.count_nonzero(valid) < 4:
+        raise ValueError(f"insufficient valid canonical intervals in {session_path}")
+    joint_speed = np.abs(np.diff(q, axis=0)[valid] / dt[valid, None])
+    cartesian_speed = np.linalg.norm(np.diff(position, axis=0)[valid] / dt[valid, None], axis=1)
+    any_joint_speed = np.max(joint_speed, axis=1)
+    high_cartesian = cartesian_speed >= 0.40
+    moving = cartesian_speed >= 0.05
+    equivalent_joint_speed_045: list[float] = []
+    valid_indices = np.flatnonzero(valid)
+    for local_index in np.flatnonzero(moving):
+        source_index = valid_indices[local_index]
+        displacement = position[source_index + 1] - position[source_index]
+        direction = displacement / np.linalg.norm(displacement)
+        jacobian = arm_position_jacobian_3dof(q[source_index])
+        qdot_at_045 = np.linalg.pinv(jacobian, rcond=1e-4) @ (0.45 * direction)
+        equivalent_joint_speed_045.append(float(np.max(np.abs(qdot_at_045))))
+    equivalent_045 = np.asarray(equivalent_joint_speed_045)
+    return {
+        "canonical_speed_intervals": int(len(cartesian_speed)),
+        "canonical_cartesian_speed_max_m_s": float(np.max(cartesian_speed)),
+        "canonical_cartesian_speed_p99_m_s": float(np.percentile(cartesian_speed, 99)),
+        "canonical_joint_speed_max_rad_s": float(np.max(any_joint_speed)),
+        "canonical_joint_speed_p99_rad_s": float(np.percentile(any_joint_speed, 99)),
+        "canonical_joint_speed_p99_per_joint_rad_s": [
+            float(np.percentile(joint_speed[:, joint], 99)) for joint in range(4)
+        ],
+        "canonical_intervals_over_ruckig_velocity_fraction": float(np.mean(
+            any_joint_speed > RUCKIG_MAX_JOINT_VELOCITY_RAD_S
+        )),
+        "canonical_high_cartesian_speed_intervals": int(np.count_nonzero(high_cartesian)),
+        "canonical_high_cartesian_any_joint_over_limit_fraction": float(np.mean(
+            any_joint_speed[high_cartesian] > RUCKIG_MAX_JOINT_VELOCITY_RAD_S
+        )) if np.any(high_cartesian) else 0.0,
+        "equivalent_045_speed_samples": int(len(equivalent_045)),
+        "equivalent_045_joint_speed_median_rad_s": float(np.median(equivalent_045)),
+        "equivalent_045_joint_speed_p95_rad_s": float(np.percentile(equivalent_045, 95)),
+        "equivalent_045_over_ruckig_velocity_fraction": float(np.mean(
+            equivalent_045 > RUCKIG_MAX_JOINT_VELOCITY_RAD_S
+        )),
+    }
+
+
+def add_speed_metrics(records: list[dict[str, Any]]) -> None:
+    for record in records:
+        speed = audit_canonical_speed_against_ruckig(Path(record["session_path"]))
+        record.update(speed)
 
 
 def _distribution_summary(values: list[float]) -> dict[str, float | int]:
@@ -1111,6 +1206,7 @@ def run_repeated_analysis(data_root: Path, output_dir: Path) -> None:
             })
     selected = select_representatives(valid_records)
     add_endpoint_trial_metrics(valid_records)
+    add_speed_metrics(valid_records)
     summaries = build_repeated_group_summary(valid_records, all_trials, selected)
     build_fig1_arm_source_raw_signals(selected, output_dir / "Fig1_E1_arm_source_raw_signals")
     event_summary = build_fig2_representative_wrist_rows(selected, [
@@ -1120,14 +1216,19 @@ def run_repeated_analysis(data_root: Path, output_dir: Path) -> None:
     endpoint_error_summary = build_fig3_endpoint_tracking_errors(
         valid_records, output_dir / "Fig3_E1_endpoint_tracking_errors"
     )
-
     detail_columns = [
         "condition_zh", "condition", "method", "session_id", "folder_name", "included", "exclusion_reason",
         "is_representative", "representative_score", "duration_s", "canonical_valid_samples",
         "canonical_total_samples", "canonical_valid_fraction", "wrist_path_length_m", "wrist_mean_speed_m_s",
         "wrist_dimensionless_jerk", "wrist_log10_dimensionless_jerk", "overall_arm_rmse_rad",
         "overall_hand_rmse_unit", "endpoint_position_rmse_mm", "endpoint_orientation_rmse_deg",
-        "endpoint_tracking_samples", "session_path",
+        "endpoint_tracking_samples", "canonical_speed_intervals", "canonical_cartesian_speed_max_m_s",
+        "canonical_cartesian_speed_p99_m_s", "canonical_joint_speed_max_rad_s",
+        "canonical_joint_speed_p99_rad_s", "canonical_joint_speed_p99_per_joint_rad_s",
+        "canonical_intervals_over_ruckig_velocity_fraction", "canonical_high_cartesian_speed_intervals",
+        "canonical_high_cartesian_any_joint_over_limit_fraction", "equivalent_045_speed_samples",
+        "equivalent_045_joint_speed_median_rad_s", "equivalent_045_joint_speed_p95_rad_s",
+        "equivalent_045_over_ruckig_velocity_fraction", "session_path",
     ]
     summary_columns = [
         "condition_zh", "condition", "scanned_n", "valid_n", "failed_n", "representative_session_id",
@@ -1137,10 +1238,19 @@ def run_repeated_analysis(data_root: Path, output_dir: Path) -> None:
         "overall_hand_rmse_unit_sd", "canonical_valid_fraction_mean",
         "endpoint_position_rmse_mm_mean", "endpoint_position_rmse_mm_sd",
         "endpoint_orientation_rmse_deg_mean", "endpoint_orientation_rmse_deg_sd",
+        "canonical_cartesian_speed_max_m_s_mean", "canonical_cartesian_speed_max_m_s_sd",
+        "canonical_cartesian_speed_p99_m_s_mean", "canonical_cartesian_speed_p99_m_s_sd",
+        "canonical_joint_speed_max_rad_s_mean", "canonical_joint_speed_max_rad_s_sd",
+        "canonical_joint_speed_p99_rad_s_mean", "canonical_joint_speed_p99_rad_s_sd",
+        "canonical_intervals_over_ruckig_velocity_fraction_mean",
+        "canonical_intervals_over_ruckig_velocity_fraction_sd",
+        "equivalent_045_joint_speed_median_rad_s_mean", "equivalent_045_joint_speed_median_rad_s_sd",
+        "equivalent_045_joint_speed_p95_rad_s_mean", "equivalent_045_joint_speed_p95_rad_s_sd",
+        "equivalent_045_over_ruckig_velocity_fraction_mean",
+        "equivalent_045_over_ruckig_velocity_fraction_sd",
     ]
     write_csv_records(output_dir / "E1_20260824_trial_metrics.csv", all_trials, detail_columns)
     write_csv_records(output_dir / "E1_20260824_group_summary.csv", summaries, summary_columns)
-
     json_records = [{key: value for key, value in row.items() if key != "canonical_rows"} for row in all_trials]
     report = {
         "data_root": str(data_root.resolve()),
@@ -1154,6 +1264,7 @@ def run_repeated_analysis(data_root: Path, output_dir: Path) -> None:
             "representative_rule": "minimum equal-weight sum of absolute robust z distances to group medians; scale=1.4826*MAD",
             "event_proxies": "global minimum z = grasp; global minimum y = release",
             "endpoint_error": "target/actual arm q1-q4 mapped through the registered 0.424 m + 0.424 m FK; position norm in mm and quaternion geodesic angle in degrees",
+            "ruckig_velocity_audit": "canonical 50 Hz IK target finite differences compared with the verified downstream per-joint velocity limit of 1.0 rad/s; observed motion directions are also normalized to 0.45 m/s through the analytic position Jacobian",
         },
         "counts": {
             "scanned": len(all_trials),
@@ -1197,6 +1308,148 @@ def run_repeated_analysis(data_root: Path, output_dir: Path) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+def run_single_condition_analysis(data_root: Path, output_dir: Path, method: str,
+                                  excluded_sessions: list[str], expected_trials: int | None) -> None:
+    """Single-condition E1 metrics using the original motion/tracking/speed functions."""
+    records, excluded = [], []
+    for manifest_path in sorted(data_root.rglob("manifest.json")):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("method") != method:
+            continue
+        path = manifest_path.parent
+        session_id = str(manifest.get("session_id") or path.name)
+        if session_id in excluded_sessions or path.name in excluded_sessions:
+            excluded.append({"session_id": session_id, "reason": "explicit_user_exclusion"})
+            continue
+        record, reason = load_repeated_trial(path)
+        if record is None:
+            excluded.append({"session_id": session_id, "reason": reason})
+            continue
+        record["started_at_ns"] = int(manifest["started_at_ns"])
+        record["success_annotation"] = manifest.get("success", "unknown")
+        aligned = read_csv(path / "aligned_20hz.csv")
+        record["aligned_rows"] = len(aligned)
+        for key in ("arm", "hand"):
+            record[f"{key}_valid_rows"] = sum(truthy(row.get(f"{key}_valid", "")) for row in aligned)
+            record[f"{key}_valid_fraction"] = record[f"{key}_valid_rows"] / len(aligned)
+        record["arm_rmse_per_joint_rad"] = compute_arm_rmse(aligned)[0].tolist()
+        record["hand_rmse_per_channel_unit"] = compute_hand_rmse(aligned)[0].tolist()
+        record["hand_target_span_units"] = []
+        for channel in range(1, 7):
+            values = [_finite_number(row.get(f"hand_target_position_units_{channel}")) for row in aligned]
+            finite_values = [v for v in values if v is not None]
+            record["hand_target_span_units"].append(max(finite_values) - min(finite_values) if finite_values else None)
+            record[f"hand_h{channel}_rmse_unit"] = record["hand_rmse_per_channel_unit"][channel - 1]
+        for channel in range(1, 5):
+            record[f"arm_j{channel}_rmse_rad"] = record["arm_rmse_per_joint_rad"][channel - 1]
+        records.append(record)
+    records.sort(key=lambda row: (row["started_at_ns"], row["session_id"]))
+    if not records or (expected_trials is not None and len(records) != expected_trials):
+        raise ValueError(f"expected {expected_trials} valid trials; found {len(records)}; exclusions={excluded}")
+    add_endpoint_trial_metrics(records)
+    add_speed_metrics(records)
+    for index, record in enumerate(records, 1):
+        record["analysis_sequence"] = index
+        errors = load_endpoint_tracking_errors(Path(record["session_path"]))
+        for label, key, unit in (("position", "position_error_mm", "mm"), ("orientation", "orientation_error_deg", "deg")):
+            record[f"endpoint_{label}_p95_{unit}"] = float(np.percentile(errors[key], 95))
+            record[f"endpoint_{label}_peak_{unit}"] = float(np.max(errors[key]))
+        for key in ("canonical_rows", "representative_score", "is_representative"):
+            record.pop(key)
+    metric_keys = [key for key in records[0] if (
+        key.startswith(("overall_", "wrist_", "endpoint_", "canonical_", "equivalent_"))
+        or key in ("duration_s", "arm_valid_fraction", "hand_valid_fraction"))
+        and isinstance(records[0][key], (float, int))]
+    summary = {key: _distribution_summary([row[key] for row in records]) for key in metric_keys}
+    for key, count in (("arm_rmse_per_joint_rad", 4), ("hand_rmse_per_channel_unit", 6)):
+        summary[key] = [_distribution_summary([row[key][i] for row in records]) for i in range(count)]
+    for key in ("endpoint_position_rmse_mm", "endpoint_orientation_rmse_deg"):
+        summary[key]["pooled_rmse"] = float(np.sqrt(np.average(
+            [row[key] ** 2 for row in records], weights=[row["endpoint_tracking_samples"] for row in records])))
+    report = {"method": method, "condition_zh": records[0]["condition_zh"], "n": len(records),
+              "data_root": str(data_root.resolve()), "excluded": excluded, "summary": summary, "trials": records}
+    def finite_json(value):
+        if isinstance(value, dict): return {k: finite_json(v) for k, v in value.items()}
+        if isinstance(value, list): return [finite_json(v) for v in value]
+        if isinstance(value, float) and not math.isfinite(value): return None
+        return value
+    output_dir.mkdir(parents=True, exist_ok=True)
+    write_csv_records(output_dir / "E1_trial_metrics.csv", records, list(records[0]))
+    write_csv_records(output_dir / "E1_group_summary.csv",
+                      [{"metric": k, **v} for k, v in summary.items() if isinstance(v, dict)],
+                      ["metric", "n", "mean", "sd", "median", "q1", "q3", "pooled_rmse"])
+    configure_style()
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8), constrained_layout=True)
+    for axis, (key, title, unit) in zip(axes.flat, (
+        ("endpoint_position_rmse_mm", "末端位置跟踪", "RMSE (mm)"),
+        ("endpoint_orientation_rmse_deg", "末端姿态跟踪", "RMSE (°)"),
+        ("overall_hand_rmse_unit", "手部六通道跟踪", "RMSE (编码器单位)"),
+        ("wrist_log10_dimensionless_jerk", "canonical 轨迹平滑性", "log10(无量纲 jerk)，越低越平滑"),
+    )):
+        axis.bar(range(1, len(records) + 1), [row[key] for row in records], color="#7c3aed")
+        axis.set(title=title, xlabel="分析序号（按时间排列）", ylabel=unit, xticks=range(1, len(records) + 1))
+        axis.grid(axis="y", alpha=.25)
+    fig.suptitle(f"{records[0]['condition_zh']}：{len(records)} 组 E1 指标")
+    save_figure(fig, output_dir / "E1_single_condition_metrics")
+    lines = [f"# {records[0]['condition_zh']}：{len(records)} 组独立 E1 分析", "",
+             "排除：" + "、".join(row["session_id"] for row in excluded), "",
+             "组均值与样本标准差按每组等权计算；pooled_rmse 另按有效样本数加权。", "",
+             "| 指标 | 均值 ± 标准差 | 中位数 |", "| --- | ---: | ---: |"]
+    labels = {
+        "duration_s": "录制时长 (s)", "wrist_path_length_m": "canonical 路径长度 (m)",
+        "wrist_mean_speed_m_s": "canonical 平均速度 (m/s)",
+        "wrist_log10_dimensionless_jerk": "log10 无量纲 jerk（越低越平滑）",
+        "overall_arm_rmse_rad": "四关节整体 RMSE (rad)",
+        "overall_hand_rmse_unit": "手部六通道整体 RMSE (编码器单位)",
+        "endpoint_position_rmse_mm": "末端位置 RMSE (mm)",
+        "endpoint_orientation_rmse_deg": "腕部姿态/J4 RMSE (°)",
+        "endpoint_position_p95_mm": "各组位置误差 P95 (mm)",
+        "endpoint_position_peak_mm": "各组位置误差峰值 (mm)",
+        "canonical_cartesian_speed_max_m_s": "各组 canonical 笛卡尔速度最大值 (m/s)",
+        "canonical_cartesian_speed_p99_m_s": "各组 canonical 笛卡尔速度 P99 (m/s)",
+        "canonical_joint_speed_p99_rad_s": "各组 canonical 最大关节速度 P99 (rad/s)",
+        "canonical_intervals_over_ruckig_velocity_fraction": "关节速度超过参考 1rad/s 的比例（0–1）",
+        "canonical_valid_fraction": "canonical 有效比例（0–1）",
+        "arm_valid_fraction": "臂对齐有效比例（0–1）", "hand_valid_fraction": "手对齐有效比例（0–1）",
+    }
+    for key, label in labels.items():
+        s = summary[key]
+        lines.append(f"| {label} | {s['mean']:.5g} ± {s['sd']:.5g} | {s['median']:.5g} |")
+    worst = max(records, key=lambda row: row["endpoint_orientation_rmse_deg"])
+    position_values = [row["endpoint_position_rmse_mm"] for row in records]
+    other_orientation = [row["endpoint_orientation_rmse_deg"] for row in records if row is not worst]
+    lines += ["", "## 结果解读", "",
+              f"- 总录制时长 {sum(r['duration_s'] for r in records):.2f} s；有效末端跟踪样本 {sum(r['endpoint_tracking_samples'] for r in records)} 个。",
+              f"- 各组位置 RMSE 范围 {min(position_values):.2f}–{max(position_values):.2f} mm；合并样本 RMSE {summary['endpoint_position_rmse_mm']['pooled_rmse']:.2f} mm。",
+              f"- 姿态误差最高为 {worst['session_id']}，RMSE {worst['endpoint_orientation_rmse_deg']:.3f}°；该组保留在全部统计中。",
+              f"- 其余组姿态 RMSE 范围 {min(other_orientation):.3f}–{max(other_orientation):.3f}°，仅作为分布说明，不改变所选数据。" if other_orientation else "",
+              "", "## 关节与手指通道", "", "| 通道 | 各组 RMSE 均值 ± 标准差 |", "| --- | ---: |"]
+    for i, s in enumerate(summary["arm_rmse_per_joint_rad"], 1):
+        lines.append(f"| J{i} (rad) | {s['mean']:.6f} ± {s['sd']:.6f} |")
+    for label, s in zip(("拇指弯曲", "拇指横摇", "食指", "中指", "无名指", "小指"), summary["hand_rmse_per_channel_unit"]):
+        lines.append(f"| {label} (编码器单位) | {s['mean']:.3f} ± {s['sd']:.3f} |")
+    static_channels = [str(i + 1) for i in range(6) if all(row["hand_target_span_units"][i] == 0 for row in records)]
+    if static_channels:
+        lines += ["", "所有试次中目标固定的手部通道：H" + "、H".join(static_channels) + "。这些通道的低误差仅反映保持目标时的表现，不能评价动态跟踪。"]
+    lines += ["", "## 逐组结果", "", "| 序号 | 原始会话 | 时长 s | 位置 RMSE mm | 姿态 RMSE ° | 手部 RMSE unit | log10 jerk |",
+              "| --- | --- | ---: | ---: | ---: | ---: | ---: |"]
+    for r in records:
+        lines.append(f"| {r['analysis_sequence']:02d} | {r['session_id']} | {r['duration_s']:.2f} | {r['endpoint_position_rmse_mm']:.2f} | {r['endpoint_orientation_rmse_deg']:.2f} | {r['overall_hand_rmse_unit']:.2f} | {r['wrist_log10_dimensionless_jerk']:.3f} |")
+    notes = [
+        "沿用 build_E1_comparison.py 原有计算函数；位置误差来自同一对齐时刻目标／实际关节的 FK，无时间平移，不等同于外部测量的绝对精度。原脚本姿态四元数仅由 J4 生成，该项表示腕部转动误差，不是完整三维姿态误差。",
+        "无量纲 jerk 使用原脚本 50Hz 重采样、约 0.4 秒三阶 Savitzky-Golay 平滑及 T^5/L^2 积分归一化，越低越平滑。",
+        "速度超过 1rad/s 是相对于脚本参考值的统计，不代表实机超限；equivalent_045 是沿记录方向以假设 0.45m/s 运动的雅可比估计，不是实际速度。",
+        "手部单位为编码器单位，通道依次为拇指弯曲、拇指横摇、食指、中指、无名指、小指；各通道详细结果保存在 JSON 与逐组 CSV。",
+        "complete 仅表示录制完成；success 未标注，不能计算任务成功率。没有其他组别对照，不作跨输入方式优劣判断。",
+    ]
+    report["definitions"] = notes
+    lines += ["", "## 口径与限制", "", *["- " + n for n in notes], "", "![逐组指标](E1_single_condition_metrics.png)", ""]
+    (output_dir / "E1_report.md").write_text("\n".join(lines), encoding="utf-8")
+    (output_dir / "E1_single_condition_analysis.json").write_text(
+        json.dumps(finite_json(report), ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
+    print(json.dumps(finite_json({"n": len(records), "excluded": excluded, "summary": summary}), ensure_ascii=False, indent=2))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session", action="append", type=Path,
@@ -1204,12 +1457,23 @@ def main() -> None:
     parser.add_argument("--data-root", type=Path,
                         help="repeated-trial root containing three arm-source condition folders")
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).with_name("outputs"))
+    parser.add_argument("--method", choices=[*REPEATED_CONDITIONS, "keyboard+preset"], help="analyze only one condition")
+    parser.add_argument("--exclude-session", action="append", default=[], help="explicit original session ID to omit")
+    parser.add_argument("--expected-trials", type=int, help="require exactly this many valid selected trials")
     args = parser.parse_args()
+    if (args.method or args.exclude_session or args.expected_trials is not None) and args.data_root is None:
+        parser.error("single-condition options require --data-root")
+    if (args.exclude_session or args.expected_trials is not None) and not args.method:
+        parser.error("--exclude-session/--expected-trials require --method")
     if args.data_root is not None:
         if args.session:
             parser.error("--data-root and --session cannot be used together")
         try:
-            run_repeated_analysis(args.data_root, args.output_dir)
+            if args.method:
+                run_single_condition_analysis(args.data_root, args.output_dir, args.method,
+                                              args.exclude_session, args.expected_trials)
+            else:
+                run_repeated_analysis(args.data_root, args.output_dir)
         except ValueError as exc:
             parser.error(str(exc))
         return

@@ -134,6 +134,31 @@ Install those only if your CAN node uses them.
 /home/night/robot/stop_arm.sh
 ```
 
+Before starting the arm after power-on, the standalone CANopen acceptance test
+can validate all five drives without launching or changing the low-level node:
+
+```bash
+# Read-only SDO and reliability checks.
+/home/night/robot/can_poweron_test.py
+
+# After a clean read-only preflight, apply the same Fault Reset used by the
+# deployed driver when needed, then write and poll the expected modes.
+/home/night/robot/can_poweron_test.py --mode-test
+```
+
+The default minimum gap between SDO transactions is 20 ms. To intentionally
+stress the bus with back-to-back SDO traffic, use `--gap 0`; to test a slower
+device, increase it, for example `--gap 0.05`.
+
+When a kernel link error counter changes, the report prints a `LINK_ERROR` line
+with the exact joint, object index/subindex, and retry attempt that surrounded
+the increment.
+
+The mode test only writes controlword 0x0080 to clear an existing fault. It never
+enables a drive or writes target position, target torque, or NMT reset. It
+requires `test_node` to be stopped and saves a timestamped report under
+`/home/night/robot/logs/can_poweron_*.log`.
+
 `stop_arm.sh` is intentionally non-destructive by default. For bench debugging
 only, force-kill the processes launched by the script with:
 

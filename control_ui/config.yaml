@@ -52,8 +52,9 @@ canonical:
   wa100_kinematics_model_path: "wa100_kinematics_model.json"
   hand_host: "127.0.0.1"
   hand_port: 25001
-  # Source-adaptive Canonical wrist planning. Use the runtime API override for
-  # off/cross-planner E1 ablations without changing the frozen configuration.
+  # Canonical smooths the requested xyz+roll using the source-specific profile.
+  # The existing analytic IK then converts position only to J1-J4 targets;
+  # Jetson Ruckig remains the only q/dq/ddq trajectory generator at 100 Hz.
   planner_enabled: true
   planner_keyboard_profile: "jerk_limited"
   planner_gamepad_profile: "jerk_limited"
@@ -68,7 +69,7 @@ canonical:
   planner_one_euro_min_cutoff_hz: 2.0
   planner_one_euro_beta: 0.6
   planner_one_euro_derivative_cutoff_hz: 1.0
-  planner_one_euro_max_velocity_m_s: 0.45
+  planner_one_euro_max_velocity_m_s: 0.20
   planner_one_euro_max_roll_velocity_rad_s: 1.5
   planner_one_euro_innovation_base_m: 0.003
   planner_one_euro_prediction_horizon_sec: 0.06
@@ -77,6 +78,13 @@ canonical:
   planner_one_euro_prediction_roll_threshold_rad_s: 0.10
   planner_one_euro_prediction_full_roll_rad_s: 0.50
   planner_hold_timeout_sec: 0.10
+  # VR hand-wrist acquisition stability, before canonical publication.
+  planner_vr_stability_enabled: true
+  planner_vr_still_cutoff_hz: 0.4
+  planner_vr_translation_deadband_m: 0.0015
+  planner_vr_roll_deadband_rad: 0.004
+  vr_gesture_enter_sec: 0.08
+  vr_gesture_release_sec: 0.04
 
 semantic_admittance:
   # Safe baseline: no canonical correction and existing low-level policy unchanged.

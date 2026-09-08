@@ -47,6 +47,17 @@ class HandStartupModeTests(unittest.TestCase):
         self.assertEqual(payload["positions"], [2000] * 6)
         self.assertEqual(payload["name"], "idle_safe_open")
 
+    def test_opposition_preset_only_moves_thumb_opposition_encoder(self):
+        self.assertEqual(
+            bridge.HAND_PRESETS["hook"],
+            [2000, 300, 2000, 2000, 2000, 2000],
+        )
+        self.assertIn(
+            '<button data-api="POST /api/hand/preset/hook" title="快捷键 O">对掌 <kbd>O</kbd></button>',
+            UI,
+        )
+        self.assertIn('hook: "对掌"', UI)
+
     def test_preset_is_staged_in_canonical_before_direct_udp_send(self):
         previous_hand = deepcopy(bridge.CANONICAL.hand)
         target = [200, 400, 600, 800, 1000, 1200]

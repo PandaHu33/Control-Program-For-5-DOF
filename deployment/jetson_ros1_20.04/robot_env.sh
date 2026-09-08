@@ -25,9 +25,10 @@ export ARM_HOME_TIMEOUT="${ARM_HOME_TIMEOUT:-12}"
 export ARM_RUNTIME_MOTION_DURATION="${ARM_RUNTIME_MOTION_DURATION:-5.0}"
 export ARM_TRAJECTORY_PLANNER_ENABLE="${ARM_TRAJECTORY_PLANNER_ENABLE:-1}"
 export ARM_MOTION_DATA_LOG_ENABLE="${ARM_MOTION_DATA_LOG_ENABLE:-1}"
-export ARM_MOTION_DATA_LOG_PATH="${ARM_MOTION_DATA_LOG_PATH:-${ROBOT_LOG_DIR}/arm_motion_planned_2x.csv}"
+export ARM_MOTION_DATA_LOG_PATH="${ARM_MOTION_DATA_LOG_PATH:-${ROBOT_LOG_DIR}/arm_motion_planned.csv}"
 export ARM_ACTUAL_CURRENT_FEEDBACK_ENABLE="${ARM_ACTUAL_CURRENT_FEEDBACK_ENABLE:-1}"
-export ARM_CMD="${ARM_CMD:-roslaunch mainpulator mainpulatorlaunch.launch control_type:=${ARM_CONTROL_TYPE} runtime_motion_duration:=${ARM_RUNTIME_MOTION_DURATION} trajectory_planner_enabled:=${ARM_TRAJECTORY_PLANNER_ENABLE} motion_data_log_enabled:=${ARM_MOTION_DATA_LOG_ENABLE} motion_data_log_path:=${ARM_MOTION_DATA_LOG_PATH} actual_current_feedback_enabled:=${ARM_ACTUAL_CURRENT_FEEDBACK_ENABLE}}"
+export ARM_JOINT5_ENABLE="${ARM_JOINT5_ENABLE:-0}"
+export ARM_CMD="${ARM_CMD:-roslaunch mainpulator mainpulatorlaunch.launch control_type:=${ARM_CONTROL_TYPE} runtime_motion_duration:=${ARM_RUNTIME_MOTION_DURATION} trajectory_planner_enabled:=${ARM_TRAJECTORY_PLANNER_ENABLE} motion_data_log_enabled:=${ARM_MOTION_DATA_LOG_ENABLE} motion_data_log_path:=${ARM_MOTION_DATA_LOG_PATH} actual_current_feedback_enabled:=${ARM_ACTUAL_CURRENT_FEEDBACK_ENABLE} joint5_enabled:=${ARM_JOINT5_ENABLE}}"
 
 # Keep the H5 UDP bridge enabled so the UI receives arm telemetry even when
 # the low-level arm node also consumes the command stream directly.

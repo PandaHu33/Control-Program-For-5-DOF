@@ -67,6 +67,7 @@ uint32_t latest_command_ind = 0;
 std::string latest_command_source = "idle";
 bool motion_data_log_enabled = false;
 bool actual_current_feedback_enabled = true;
+bool joint5_enabled = false;
 std::string motion_data_log_path = "/home/night/robot/logs/arm_motion.csv";
 std::unique_ptr<mainpulator_motion::MotionCsvLogger> motion_csv_logger;
 bool startup_homing_active = false;
@@ -272,6 +273,7 @@ int main(int argc, char *argv[])
     nh.param("trajectory_max_jerk", trajectory_max_jerk, std::vector<double>(4, 5.0));
     nh.param("motion_data_log_enabled", motion_data_log_enabled, false);
     nh.param("actual_current_feedback_enabled", actual_current_feedback_enabled, true);
+    nh.param("joint5_enabled", joint5_enabled, false);
     nh.param<std::string>("motion_data_log_path", motion_data_log_path,
                           "/home/night/robot/logs/arm_motion.csv");
     int motion_data_log_queue_capacity = 8192;
@@ -395,7 +397,10 @@ int main(int argc, char *argv[])
     if (torque_control)
     {
         // Strictly preserve the original 1228 torque-loop initialization order.
-        param::MomentInit(joint5, socket_can);
+        if (joint5_enabled)
+        {
+            param::MomentInit(joint5, socket_can);
+        }
         param::MomentInit(joint1, socket_can);
         param::MomentInit(joint2, socket_can);
         param::MomentInit(joint3, socket_can);
@@ -407,18 +412,22 @@ int main(int argc, char *argv[])
         param::PositionInit(joint2, socket_can);
         param::PositionInit(joint3, socket_can);
         param::PositionInit(joint4, socket_can);
-        param::MomentInit(joint5, socket_can);
+        if (joint5_enabled)
+        {
+            param::MomentInit(joint5, socket_can);
+        }
     }
     if (actual_current_feedback_enabled)
     {
         control::mainpulator* joints[5] = {&joint1, &joint2, &joint3, &joint4, &joint5};
-        for (std::size_t index = 0; index < 5; ++index)
+        const std::size_t feedback_joint_count = joint5_enabled ? 5 : 4;
+        for (std::size_t index = 0; index < feedback_joint_count; ++index)
         {
             if (!param::ConfigureActualCurrentFeedback(*joints[index], socket_can))
             {
                 ROS_ERROR("Actual-current TPDO3 setup failed for joint %zu; current recording disabled", index + 1);
                 actual_current_feedback_enabled = false;
-                for (std::size_t rollback = 0; rollback < 5; ++rollback)
+                for (std::size_t rollback = 0; rollback < feedback_joint_count; ++rollback)
                 {
                     if (!param::DisableActualCurrentFeedback(*joints[rollback], socket_can))
                     {
@@ -437,7 +446,10 @@ int main(int argc, char *argv[])
         param::Enable(socket_can, 6, joint1);
         param::Enable(socket_can, 6, joint2);
         param::Enable(socket_can, 6, joint3);
-        param::Enable(socket_can, 6, joint5);
+        if (joint5_enabled)
+        {
+            param::Enable(socket_can, 6, joint5);
+        }
 
         // J4 is the merged position-loop extension and stays after the legacy
         // J1-J3/J5 torque-loop sequence.
@@ -477,7 +489,10 @@ int main(int argc, char *argv[])
         param::Enable(socket_can, 6, joint2);
         param::Enable(socket_can, 6, joint3);
         param::Enable(socket_can, 6, joint4);
-        param::Enable(socket_can, 6, joint5);
+        if (joint5_enabled)
+        {
+            param::Enable(socket_can, 6, joint5);
+        }
         usleep(500000);
     }
     // ROS_INFO("init end");
@@ -749,39 +764,42 @@ int main(int argc, char *argv[])
         socketcan_send_pub.publish(send_message);
         //ROS_INFO("joint4angle=%lf",joint4angle);
 
-        // 关节 5力矩控制
-        if(KB_D>0.01)
+        if (joint5_enabled)
         {
-            // 执行抓手合上动作
-           //tol5 = 30;
-            tol5 = 30;
-            if(joint5_actual_angle>4.5)  //插拔件6.2 10mm时对应的角度值
+            // 关节 5力矩控制
+            if(KB_D>0.01)
+            {
+                // 执行抓手合上动作
+               //tol5 = 30;
+                tol5 = 30;
+                if(joint5_actual_angle>4.5)  //插拔件6.2 10mm时对应的角度值
+                {
+                    tol5 = 0;
+                    gripper_flag = 1; //说明已经抓到东西
+                }
+
+            }
+            else if (KB_D<-0.01)
+            {
+                // 执行抓手打开动作
+               //tol5 = -45;
+                tol5 = -30;
+                //if(joint5_actual_angle<0.00001)
+                if(joint5_actual_angle<0.8) //张开 72mm
+                {
+                    tol5 = 0;
+                }
+                gripper_flag = 0; //执行抓手打开动作，认为没有抓到东西
+            }
+            else
             {
                 tol5 = 0;
-                gripper_flag = 1; //说明已经抓到东西
             }
-            
+            // ROS_INFO("joint5_actual_angle=%lf",joint5_actual_angle);
+            //ROS_INFO("gripper_flag=%lf",gripper_flag);
+            send_message = joint5.MomentOutput(tol5);
+            socketcan_send_pub.publish(send_message);
         }
-        else if (KB_D<-0.01)
-        {
-            // 执行抓手打开动作
-           //tol5 = -45;
-            tol5 = -30;
-            //if(joint5_actual_angle<0.00001)
-            if(joint5_actual_angle<0.8) //张开 72mm
-            {
-                tol5 = 0;
-            }
-            gripper_flag = 0; //执行抓手打开动作，认为没有抓到东西
-        }
-        else
-        {
-            tol5 = 0;
-        }
-        // ROS_INFO("joint5_actual_angle=%lf",joint5_actual_angle);
-        //ROS_INFO("gripper_flag=%lf",gripper_flag);
-        send_message = joint5.MomentOutput(tol5);
-        socketcan_send_pub.publish(send_message);
 
 
 
@@ -1424,6 +1442,7 @@ void MainpulatorCallback(const can_msgs::Frame &receive_message)
             joint4_actual_angle = joint4.get_current_angle();
             break;
         case 0x185:
+            if (!joint5_enabled) break;
             joint5.current_angle(receive_message);
             joint5_actual_angle = joint5.get_current_angle();
             // ROS_INFO("joint5angle: %f, joint5_expect_angle: %f", joint5_actual_angle, joint5angle);
@@ -1449,6 +1468,7 @@ void MainpulatorCallback(const can_msgs::Frame &receive_message)
             joint4_actual_velocity = joint4.get_current_velocity();
             break;
         case 0x285:
+            if (!joint5_enabled) break;
             if (actual_current_feedback_enabled)
             {
                 joint5.current_velocity(receive_message);
@@ -1467,6 +1487,7 @@ void MainpulatorCallback(const can_msgs::Frame &receive_message)
         {
             if (!actual_current_feedback_enabled) break;
             const std::size_t index = static_cast<std::size_t>(receive_message.id - 0x381);
+            if (index == 4 && !joint5_enabled) break;
             control::mainpulator* joints[5] = {&joint1, &joint2, &joint3, &joint4, &joint5};
             joints[index]->ActualCurrent(receive_message);
             joint_actual_current_ma[index] = joints[index]->get_ActualCurrent();

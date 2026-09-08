@@ -667,6 +667,19 @@ ARM_PRESET_REPEAT_COUNT = 8
 ARM_PRESET_REPEAT_INTERVAL_SEC = 0.035
 ARM_TELEMETRY_TIMEOUT_SEC = 1.0
 ARM_FRAME_COUNTER = 0
+ARM_MOTION_ACTIVE_STATES = frozenset({"accepted", "running"})
+ARM_MOTION_TERMINAL_STATES = frozenset({"complete", "failed", "preempted"})
+
+
+def arm_motion_transition_is_regressive(previous_state, next_state):
+    """Reject delayed UDP status packets that would re-lock a finished motion."""
+    previous = str(previous_state or "idle").strip().lower()
+    incoming = str(next_state or "unknown").strip().lower()
+    if previous in ARM_MOTION_TERMINAL_STATES and incoming in ARM_MOTION_ACTIVE_STATES:
+        return True
+    return previous == "running" and incoming == "accepted"
+
+
 def acknowledge_arm_command(ind):
     with ARM_COMMAND_LOCK:
         PENDING_ARM_COMMANDS.pop(int(ind) & 0xFFFFFFFF, None)
@@ -943,14 +956,34 @@ def update_arm_telemetry(data):
         with STATE_LOCK:
             control = SYSTEM["arm_control"]
             control["last_telemetry_time"] = time.time()
-            control["motion"] = motion
-            companion_ok = bool(control.get("motion_companion_ok", True))
-            if state in {"accepted", "running"}:
-                SYSTEM["state"] = ("HOMING" if source == "home" else "MOVING") if companion_ok else "ERROR"
-            elif state == "complete":
-                SYSTEM["state"] = "READY" if companion_ok else "ERROR"
-            elif state == "failed":
-                SYSTEM["state"] = "ERROR"
+            previous_motion = dict(control.get("motion") or {})
+            same_motion = (
+                previous_motion.get("ind") == ind
+                and str(previous_motion.get("source") or "") == source
+            )
+            regressive = same_motion and arm_motion_transition_is_regressive(
+                previous_motion.get("state"), state
+            )
+            if not regressive:
+                control["motion"] = motion
+                companion_ok = bool(control.get("motion_companion_ok", True))
+                if state in ARM_MOTION_ACTIVE_STATES:
+                    SYSTEM["state"] = ("HOMING" if source == "home" else "MOVING") if companion_ok else "ERROR"
+                elif state == "complete":
+                    SYSTEM["state"] = "READY" if companion_ok else "ERROR"
+                elif state == "failed":
+                    SYSTEM["state"] = "ERROR"
+                elif state == "preempted":
+                    SYSTEM["state"] = "READY" if companion_ok else "ERROR"
+
+                # Home/preset owns the arm only for the duration of its motion.
+                # Releasing the UI-side authority here lets a local/external
+                # source be selected immediately after the terminal status.
+                if state in ARM_MOTION_TERMINAL_STATES and control.get("mode") in {"home", "preset"}:
+                    control["mode"] = "idle"
+                    control["owner_id"] = None
+                    control["owner_since"] = time.time()
+                    control["last_reject_reason"] = ""
         acknowledge_arm_command(ind)
         push_status()
         return True
@@ -1442,10 +1475,11 @@ HAND_PRESETS = {
     "close": [200, 200, 200, 200, 200, 200],
     # Physical order: ID1 thumb pitch, ID2 thumb yaw, ID3-ID6 index-pinky.
     "pinch": [1200, 1600, 250, 2000, 2000, 2000],
-    "hook": [2000, 2000, 250, 250, 250, 250],
+    # Thumb opposition only: keep thumb pitch and all four fingers fully open.
+    "hook": [2000, 300, 2000, 2000, 2000, 2000],
     # Touch anchors match the Hi5/PICO thumb contact fusion targets
     # (thumb_glove_calibration.json gesture_anchors).
-    "thumb_index": [750, 300, 350, 2000, 2000, 2000],
+    "thumb_index": [800, 300, 350, 2000, 2000, 2000],
     "thumb_middle": [800, 0, 2000, 350, 2000, 2000],
 }
 
@@ -1525,10 +1559,23 @@ def send_hand_control(mode, positions=None, name=None):
             if not accepted:
                 return False, f"Canonical preset rejected: {reason}"
         elif normalized_mode in {"vr", "glove"}:
-            # Never keep dispatching the previous source while waiting for the
-            # first mapped six-channel frame from the newly selected source.
+            # Keep a stale placeholder so wrist/arm Canonical planning remains
+            # available while the new hand source produces its first frame.
+            # hand_mask stays zero, so the previous hand target is never sent.
             with CANONICAL.lock:
-                CANONICAL.hand = None
+                if CANONICAL.hand is None:
+                    placeholder = _preset_hand_value(
+                        f"awaiting_{normalized_mode}", HAND_PRESETS["open"]
+                    )
+                    accepted, reason = CANONICAL.observe_hand_input(
+                        "preset_hand", placeholder, int(placeholder["source_timestamp_ns"])
+                    )
+                    if not accepted:
+                        return False, f"Canonical hand placeholder rejected: {reason}"
+                CANONICAL.hand["receive_utc_ns"] = 0
+                CANONICAL.hand.setdefault("invalid_reasons", []).append(
+                    f"awaiting_{normalized_mode}_hand_adapter"
+                )
                 CANONICAL.last_error = f"awaiting {normalized_mode} hand adapter"
 
         ok, msg = send_udp_repeat(

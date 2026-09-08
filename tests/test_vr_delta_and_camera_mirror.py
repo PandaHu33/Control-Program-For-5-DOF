@@ -313,7 +313,9 @@ class XrHandGestureTests(unittest.TestCase):
         self.assertEqual(forwarded["source"], "xr-hands")
         self.assertIn("unity-xr-hands", forwarded["jointFormat"])
         self.assertEqual(len(forwarded["rightPositions"]), 63)
+        self.assertEqual(len(forwarded["rightPositionsRaw"]), 63)
         self.assertEqual(len(forwarded["rightRotations"]), 63)
+        self.assertEqual(forwarded["xrSkeletonFilter"]["stage"], "post_xr_acquisition_pre_retarget")
         gesture = [item for item, target in sock.sent if target[1] == 25002][0]
         self.assertTrue(gesture["left_fist"])
         self.assertEqual(gesture["deadman"], 1)
