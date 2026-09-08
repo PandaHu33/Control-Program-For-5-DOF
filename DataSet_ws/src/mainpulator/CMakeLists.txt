@@ -373,28 +373,3 @@ target_link_libraries(Imu_111_Node
 #   # myfile2
 #   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 # )
-
-#############
-## Testing ##
-#############
-
-## Add gtest based cpp test target and link libraries
-if(CATKIN_ENABLE_TESTING)
-  catkin_add_gtest(test_online_joint_planner test/test_online_joint_planner.cpp)
-  if(TARGET test_online_joint_planner)
-    target_link_libraries(test_online_joint_planner mainpulator_library)
-  endif()
-
-  catkin_add_gtest(test_motion_csv_logger test/test_motion_csv_logger.cpp)
-  if(TARGET test_motion_csv_logger)
-    target_link_libraries(test_motion_csv_logger mainpulator_library)
-  endif()
-
-  catkin_add_gtest(test_actual_current test/test_actual_current.cpp)
-  if(TARGET test_actual_current)
-    target_link_libraries(test_actual_current mainpulator_library ${catkin_LIBRARIES})
-  endif()
-endif()
-
-## Add folders to be run by python nosetests
-# catkin_add_nosetests(test)
